@@ -11,3 +11,4 @@ pub mod memory;
 pub mod store;
 
 pub use error::Error;
+pub use store::InitializedActor;

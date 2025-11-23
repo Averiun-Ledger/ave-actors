@@ -22,6 +22,8 @@ pub struct EdgeCaseActor {
     pub fail_on_message: bool,
 }
 
+impl actor::NotPersistentActor for EdgeCaseActor {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EdgeCaseCommand {
     TriggerError,
@@ -162,6 +164,8 @@ impl Handler<EdgeCaseActor> for EdgeCaseActor {
 // Test actor that always fails on start
 #[derive(Debug, Clone)]
 pub struct FailingActor;
+
+impl actor::NotPersistentActor for FailingActor {}
 
 #[async_trait]
 impl Actor for FailingActor {

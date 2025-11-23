@@ -231,14 +231,16 @@ impl SystemRef {
     ///
     /// Returns an error if the actor already exists.
     ///
-    pub async fn create_root_actor<A>(
+    pub async fn create_root_actor<A, I>(
         &self,
         name: &str,
-        actor: A,
+        actor_init: I,
     ) -> Result<ActorRef<A>, Error>
     where
         A: Actor + Handler<A>,
+        I: crate::IntoActor<A>,
     {
+        let actor = actor_init.into_actor();
         let path = ActorPath::from("/user") / name;
         let (actor_ref, stop_sender, ..) =
             self.create_actor_path::<A>(path, actor, None).await?;

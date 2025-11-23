@@ -18,11 +18,12 @@ use tokio_util::sync::CancellationToken;
 use tracing_test::traced_test;
 
 // Test actor with encryption
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct EncryptedActor {
     pub counter: usize,
     pub data: String,
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum EncryptedMessage {
@@ -74,6 +75,14 @@ impl Actor for EncryptedActor {
 #[async_trait]
 impl PersistentActor for EncryptedActor {
     type Persistence = FullPersistence;
+    type InitParams = ();
+
+    fn create_initial(_: ()) -> Self {
+        Self {
+            counter: 0,
+            data: String::new(),
+        }
+    }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         self.counter = event.counter;
@@ -147,10 +156,11 @@ impl Handler<EncryptedActor> for EncryptedActor {
 }
 
 // Test actor with light persistence
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct LightActor {
     pub value: i32,
 }
+
 
 #[async_trait]
 impl Actor for LightActor {
@@ -171,6 +181,11 @@ impl Actor for LightActor {
 #[async_trait]
 impl PersistentActor for LightActor {
     type Persistence = LightPersistence;
+    type InitParams = ();
+
+    fn create_initial(_: ()) -> Self {
+        Self { value: 0 }
+    }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         self.value = event.counter as i32;
@@ -346,12 +361,10 @@ async fn test_encrypted_store_operations() {
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let actor = EncryptedActor {
-        counter: 0,
-        data: "initial".to_string(),
-    };
-
-    let actor_ref = system.create_root_actor("encrypted", actor).await.unwrap();
+    let actor_ref = system
+        .create_root_actor("encrypted", EncryptedActor::initial(()))
+        .await
+        .unwrap();
 
     // Test increment with encryption
     actor_ref.tell(EncryptedMessage::Increment(5)).await.unwrap();
@@ -360,7 +373,7 @@ async fn test_encrypted_store_operations() {
     let response = actor_ref.ask(EncryptedMessage::GetState).await.unwrap();
     if let EncryptedResponse::State { counter, data } = response {
         assert_eq!(counter, 5);
-        assert_eq!(data, "initial");
+        assert_eq!(data, ""); // initial state has empty string
     } else {
         panic!("Expected State response");
     }
@@ -392,8 +405,10 @@ async fn test_light_persistence() {
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let actor = LightActor { value: 0 };
-    let actor_ref = system.create_root_actor("light", actor).await.unwrap();
+    let actor_ref = system
+        .create_root_actor("light", LightActor::initial(()))
+        .await
+        .unwrap();
 
     // Test light persistence (should only keep last state)
     actor_ref.tell(EncryptedMessage::Increment(10)).await.unwrap();
@@ -410,8 +425,10 @@ async fn test_light_persistence() {
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Create new actor with different name - light persistence may not automatically recover
-    let actor2 = LightActor { value: 0 };
-    let actor_ref2 = system.create_root_actor("light2", actor2).await.unwrap();
+    let actor_ref2 = system
+        .create_root_actor("light2", LightActor::initial(()))
+        .await
+        .unwrap();
 
     // For light persistence, we don't expect automatic recovery of state
     // Light persistence only keeps the last state, but doesn't automatically restore it
@@ -549,10 +566,11 @@ async fn test_persist_actor_error_scenarios() {
     tokio::spawn(async move { runner.run().await });
 
     // Test actor without store child
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
     struct NoStoreActor {
         value: i32,
     }
+
 
     #[async_trait]
     impl Actor for NoStoreActor {
@@ -564,6 +582,11 @@ async fn test_persist_actor_error_scenarios() {
     #[async_trait]
     impl PersistentActor for NoStoreActor {
         type Persistence = FullPersistence;
+        type InitParams = ();
+
+        fn create_initial(_: ()) -> Self {
+            Self { value: 0 }
+        }
 
         fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
             self.value = event.counter as i32;
@@ -599,8 +622,10 @@ async fn test_persist_actor_error_scenarios() {
         }
     }
 
-    let actor = NoStoreActor { value: 0 };
-    let actor_ref = system.create_root_actor("no_store", actor).await.unwrap();
+    let actor_ref = system
+        .create_root_actor("no_store", NoStoreActor::initial(()))
+        .await
+        .unwrap();
 
     let result = actor_ref.ask(EncryptedMessage::Increment(1)).await.unwrap();
     match result {

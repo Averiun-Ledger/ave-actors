@@ -21,6 +21,7 @@
 mod actor;
 mod error;
 mod handler;
+mod into_actor;
 mod path;
 mod retries;
 mod runner;
@@ -34,6 +35,7 @@ pub use actor::{
     Response,
 };
 pub use error::Error;
+pub use into_actor::{IntoActor, NotPersistentActor};
 pub use path::ActorPath;
 
 pub use sink::{Sink, Subscriber};

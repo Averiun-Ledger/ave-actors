@@ -27,6 +27,8 @@ pub struct TestActor {
     pub counter: u32,
 }
 
+impl actor::NotPersistentActor for TestActor {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TestMessage {
     Emit(u32, String),
@@ -211,6 +213,8 @@ pub struct FailingHandlerActor {
     pub fail_with_timeout: bool,
 }
 
+impl actor::NotPersistentActor for FailingHandlerActor {}
+
 #[async_trait]
 impl Actor for FailingHandlerActor {
     type Message = TestMessage;
@@ -281,6 +285,8 @@ async fn test_message_serialization_edge_cases() {
     #[derive(Debug, Clone)]
     pub struct ComplexHandlerActor;
 
+    impl actor::NotPersistentActor for ComplexHandlerActor {}
+
     #[async_trait]
     impl Actor for ComplexHandlerActor {
         type Message = ComplexMessage;
@@ -332,6 +338,8 @@ async fn test_message_ordering_and_mailbox() {
     pub struct OrderingActor {
         pub received_order: Vec<u32>,
     }
+
+    impl actor::NotPersistentActor for OrderingActor {}
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct OrderedMessage {
@@ -391,6 +399,8 @@ async fn test_handler_context_operations() {
         pub path_checked: bool,
         pub system_accessed: bool,
     }
+
+    impl actor::NotPersistentActor for ContextActor {}
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum ContextMessage {

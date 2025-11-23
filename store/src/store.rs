@@ -15,7 +15,7 @@ use crate::{
 
 use actor::{
     Actor, ActorContext, ActorPath, EncryptedKey, Error as ActorError, Event,
-    Handler, Message, Response,
+    Handler, IntoActor, Message, Response,
 };
 
 use async_trait::async_trait;
@@ -73,6 +73,37 @@ impl Persistence for FullPersistence {
     }
 }
 
+/// Wrapper type that guarantees a persistent actor was created via `PersistentActor::initial()`.
+///
+/// This type cannot be constructed directly by users - it can only be obtained
+/// by calling `PersistentActor::initial()`. This ensures that all persistent actors
+/// are initialized correctly through their defined initialization logic.
+///
+/// The actor system requires `InitializedActor<A>` for persistent actors,
+/// preventing users from manually constructing instances that bypass the
+/// initialization process.
+#[derive(Debug)]
+pub struct InitializedActor<A>(A);
+
+impl<A> InitializedActor<A> {
+    /// Creates a new InitializedActor wrapper.
+    /// This is `pub(crate)` so only PersistentActor::initial() can call it.
+    pub(crate) fn new(actor: A) -> Self {
+        Self(actor)
+    }
+}
+
+/// Implement `IntoActor` for `InitializedActor` to allow it to be used
+/// with the actor system's create methods.
+impl<A> IntoActor<A> for InitializedActor<A>
+where
+    A: PersistentActor,
+{
+    fn into_actor(self) -> A {
+        self.0
+    }
+}
+
 /// Trait for actors that persist their state using event sourcing.
 /// PersistentActor extends the Actor trait with methods for persisting events,
 /// snapshotting state, and recovering from storage.
@@ -90,6 +121,7 @@ impl Persistence for FullPersistence {
 /// - Cloneable (for state snapshots)
 /// - Serializable (for persistence)
 /// - Debuggable (for logging)
+/// - Must NOT implement NotPersistentActor (convention, not enforced at compile time)
 ///
 /// # Usage
 ///
@@ -97,12 +129,51 @@ impl Persistence for FullPersistence {
 /// method, and choose either Light or Full persistence strategy based on
 /// recovery speed vs storage requirements tradeoffs.
 ///
+/// # Important
+///
+/// Do NOT implement both `PersistentActor` and `NotPersistentActor` on the same type.
+/// While Rust's type system cannot prevent this without negative trait bounds,
+/// doing so will lead to undefined behavior as both creation paths will be available.
+///
 #[async_trait]
 pub trait PersistentActor:
     Actor + Handler<Self> + Debug + Clone + Serialize + DeserializeOwned
 {
     /// The persistence strategy type (Light or Full).
     type Persistence: Persistence;
+
+    /// Parameters needed to initialize this actor.
+    /// Use `()` if no parameters are needed.
+    type InitParams;
+
+    /// Creates the initial state for this actor with the given parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - Initialization parameters (can be `()` if none needed)
+    ///
+    /// # Returns
+    ///
+    /// A new instance of the actor in its initial state.
+    fn create_initial(params: Self::InitParams) -> Self;
+
+    /// Returns an `InitializedActor` wrapper containing the initial state.
+    /// This is the ONLY way to create a persistent actor instance that the
+    /// actor system will accept.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - Initialization parameters
+    ///
+    /// # Returns
+    ///
+    /// An `InitializedActor<Self>` that can be passed to the actor system.
+    fn initial(params: Self::InitParams) -> InitializedActor<Self>
+    where
+        Self: Sized,
+    {
+        InitializedActor::new(Self::create_initial(params))
+    }
 
     /// Applies an event to the actor's state.
     /// This method should be deterministic - applying the same event
@@ -256,6 +327,16 @@ pub trait PersistentActor:
 
     /// Start the child store and recover the state (if any).
     ///
+    /// If a persisted state exists, it will be recovered and applied to the actor.
+    /// If no state exists, the actor continues with its current state (which should
+    /// be initialized using `ActorState::initial()`).
+    ///
+    /// No initial snapshot is created for new actors without events.
+    /// Snapshots are only created when:
+    /// - Events are persisted (with Light persistence, automatically; with Full, on shutdown if events exist)
+    /// - Manually calling `snapshot()`
+    /// - During recovery if events need to be replayed
+    ///
     /// # Arguments
     ///
     /// - ctx: The actor context.
@@ -291,14 +372,14 @@ pub trait PersistentActor:
 
         if let StoreResponse::State(Some(state)) = response {
             self.update(state);
-        } else {
-            debug!("Create first snapshot");
-            store.tell(StoreCommand::Snapshot(self.clone())).await?;
         }
         Ok(())
     }
 
     /// Stop the child store and snapshot the state.
+    ///
+    /// For Full persistence mode, a snapshot is only created if there are
+    /// persisted events. Actors without events won't create a snapshot.
     ///
     /// # Arguments
     ///
@@ -319,7 +400,13 @@ pub trait PersistentActor:
         if let Some(store) = ctx.get_child::<Store<Self>>("store").await {
             if let PersistenceType::Full = Self::Persistence::get_persistence()
             {
-                let _ = store.ask(StoreCommand::Snapshot(self.clone())).await?;
+                // Only snapshot if there are events
+                let response = store.ask(StoreCommand::LastEventNumber).await?;
+                if let StoreResponse::LastEventNumber(count) = response {
+                    if count > 0 {
+                        let _ = store.ask(StoreCommand::Snapshot(self.clone())).await?;
+                    }
+                }
             }
 
             store.ask_stop().await
@@ -361,6 +448,8 @@ where
     /// Phantom data to associate with the PersistentActor type.
     _phantom: PhantomData<P>,
 }
+
+impl<P> actor::NotPersistentActor for Store<P> where P: PersistentActor {}
 
 impl<P: PersistentActor> Store<P> {
     /// Creates a new store actor.
@@ -1021,13 +1110,13 @@ mod tests {
 
     use async_trait::async_trait;
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
     struct TestActor {
         pub version: usize,
         pub value: i32,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
     struct TestActorLight {
         pub data: Vec<i32>,
     }
@@ -1179,6 +1268,13 @@ mod tests {
     #[async_trait]
     impl PersistentActor for TestActorLight {
         type Persistence = LightPersistence;
+        type InitParams = ();
+
+        fn create_initial(_: ()) -> Self {
+            Self {
+                data: Vec::new(),
+            }
+        }
 
         fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
             self.data.clone_from(&event.0);
@@ -1189,6 +1285,14 @@ mod tests {
     #[async_trait]
     impl PersistentActor for TestActor {
         type Persistence = FullPersistence;
+        type InitParams = ();
+
+        fn create_initial(_: ()) -> Self {
+            Self {
+                version: 0,
+                value: 0,
+            }
+        }
 
         fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
             self.version += 1;
@@ -1362,9 +1466,10 @@ mod tests {
 
         system.add_helper("db", MemoryManager::default()).await;
 
-        let actor = TestActorLight { data: vec![] };
-
-        let actor_ref = system.create_root_actor("test", actor).await.unwrap();
+        let actor_ref = system
+            .create_root_actor("test", TestActorLight::initial(()))
+            .await
+            .unwrap();
 
         let result = actor_ref
             .ask(TestMessageLight::SetData(vec![12, 13, 14, 15]))
@@ -1377,9 +1482,10 @@ mod tests {
 
         actor_ref.ask_stop().await.unwrap();
 
-        let actor = TestActorLight { data: vec![] };
-
-        let actor_ref = system.create_root_actor("test", actor).await.unwrap();
+        let actor_ref = system
+            .create_root_actor("test", TestActorLight::initial(()))
+            .await
+            .unwrap();
 
         let result = actor_ref.ask(TestMessageLight::GetData).await.unwrap();
 
@@ -1400,12 +1506,10 @@ mod tests {
             runner.run().await;
         });
 
-        let actor = TestActor {
-            version: 0,
-            value: 0,
-        };
-
-        let actor_ref = system.create_root_actor("test", actor).await.unwrap();
+        let actor_ref = system
+            .create_root_actor("test", TestActor::initial(()))
+            .await
+            .unwrap();
 
         let result = actor_ref.ask(TestMessage::Increment(10)).await.unwrap();
 

@@ -17,6 +17,8 @@ pub struct TestActor {
     pub state: usize,
 }
 
+impl actor::NotPersistentActor for TestActor {}
+
 // Defines parent command
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TestCommand {
@@ -129,6 +131,8 @@ impl Handler<TestActor> for TestActor {
 pub struct ChildActor {
     pub state: usize,
 }
+
+impl actor::NotPersistentActor for ChildActor {}
 
 // Defines child command.
 #[derive(Debug, Clone, Serialize, Deserialize)]

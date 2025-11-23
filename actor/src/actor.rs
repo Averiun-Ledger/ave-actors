@@ -292,20 +292,22 @@ where
     ///
     /// Returns an error if the child actor could not be created.
     ///
-    pub async fn create_child<C>(
+    pub async fn create_child<C, I>(
         &mut self,
         name: &str,
-        actor: C,
+        actor_init: I,
     ) -> Result<ActorRef<C>, Error>
     where
         C: Actor + Handler<C>,
+        I: crate::IntoActor<C>,
     {
+        let actor = actor_init.into_actor();
         let path = self.path.clone() / name;
         let (actor_ref, stop_sender) = self
             .system
             .create_actor_path(path, actor, Some(self.error_sender.clone()))
             .await?;
-        
+
         self.child_senders.push(stop_sender);
         Ok(actor_ref)
     }
@@ -792,6 +794,8 @@ mod test {
     struct TestActor {
         counter: usize,
     }
+
+    impl crate::NotPersistentActor for TestActor {}
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestMessage(usize);

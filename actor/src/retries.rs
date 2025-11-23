@@ -7,7 +7,7 @@
 
 use crate::{
     Actor, ActorContext, ActorPath, ActorRef, Error, Event, Handler, Message,
-    Response,
+    NotPersistentActor, Response,
     supervision::{RetryStrategy, Strategy},
 };
 
@@ -19,7 +19,7 @@ use tracing::{debug, error, warn};
 /// Retry actor.
 pub struct RetryActor<T>
 where
-    T: Actor + Handler<T> + Clone,
+    T: Actor + Handler<T> + Clone + NotPersistentActor,
 {
     target: T,
     message: T::Message,
@@ -30,7 +30,7 @@ where
 
 impl<T> RetryActor<T>
 where
-    T: Actor + Handler<T> + Clone,
+    T: Actor + Handler<T> + Clone + NotPersistentActor,
 {
     /// Create a new RetryActor.
     pub fn new(
@@ -59,10 +59,12 @@ impl Response for () {}
 
 impl Event for () {}
 
+impl<T> NotPersistentActor for RetryActor<T> where T: Actor + Handler<T> + Clone + NotPersistentActor {}
+
 #[async_trait]
 impl<T> Actor for RetryActor<T>
 where
-    T: Actor + Handler<T> + Clone,
+    T: Actor + Handler<T> + Clone + NotPersistentActor,
 {
     type Message = RetryMessage;
     type Response = ();
@@ -73,7 +75,7 @@ where
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         debug!("RetryActor pre_start");
-        let _ = ctx.create_child::<T>("target", self.target.clone()).await?;
+        let _ = ctx.create_child("target", self.target.clone()).await?;
         Ok(())
     }
 }
@@ -81,7 +83,7 @@ where
 #[async_trait]
 impl<T> Handler<RetryActor<T>> for RetryActor<T>
 where
-    T: Actor + Handler<T> + Clone,
+    T: Actor + Handler<T> + Clone + NotPersistentActor,
 {
     async fn handle_message(
         &mut self,
@@ -158,6 +160,8 @@ mod tests {
 
     pub struct SourceActor;
 
+    impl NotPersistentActor for SourceActor {}
+
     #[derive(Debug, Clone)]
     pub struct SourceMessage(pub String);
 
@@ -189,8 +193,8 @@ mod tests {
                 },
                 strategy,
             );
-            let retry = ctx
-                .create_child::<RetryActor<TargetActor>>("retry", retry_actor)
+            let retry: ActorRef<RetryActor<TargetActor>> = ctx
+                .create_child("retry", retry_actor)
                 .await
                 .unwrap();
 
@@ -233,6 +237,8 @@ mod tests {
 
     impl Message for TargetMessage {}
 
+    impl NotPersistentActor for TargetActor {}
+
     impl Actor for TargetActor {
         type Message = TargetMessage;
         type Response = ();
@@ -272,8 +278,8 @@ mod tests {
             runner.run().await;
         });
 
-        let _ = system
-            .create_root_actor::<SourceActor>("source", SourceActor)
+        let _: ActorRef<SourceActor> = system
+            .create_root_actor("source", SourceActor)
             .await
             .unwrap();
 

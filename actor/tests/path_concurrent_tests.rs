@@ -98,6 +98,8 @@ struct ConcurrentActor {
     messages_received: Arc<Mutex<Vec<String>>>,
 }
 
+impl actor::NotPersistentActor for ConcurrentActor {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum ConcurrentMessage {
     Increment,
