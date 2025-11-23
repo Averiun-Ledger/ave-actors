@@ -50,6 +50,9 @@ pub enum Error {
     /// Store  Error.
     #[error("Store error: {0}")]
     Store(String),
+    /// Helper  Error.
+    #[error("Helper error: {0}")]
+    Helper(String),
     /// Error that does not compromise the operation of the system.
     #[error("Error: {0}")]
     Functional(String),

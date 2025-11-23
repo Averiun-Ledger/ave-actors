@@ -1,5 +1,3 @@
-
-
 //! # Store module.
 //!
 //! This module contains the store implementation.
@@ -16,17 +14,16 @@ use crate::{
 };
 
 use actor::{
-    Actor, ActorContext, ActorPath, Error as ActorError, Event, Handler,
-    Message, Response,
+    Actor, ActorContext, ActorPath, EncryptedKey, Error as ActorError, Event,
+    Handler, Message, Response,
 };
 
 use async_trait::async_trait;
 
 use chacha20poly1305::{
-    ChaCha20Poly1305, Nonce,
+    XChaCha20Poly1305, XNonce,
     aead::{Aead, AeadCore, KeyInit, OsRng},
 };
-use memsecurity::EncryptedMem;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -34,8 +31,8 @@ use tracing::{debug, error};
 
 use std::{fmt::Debug, marker::PhantomData};
 
-/// Nonce size for ChaCha20-Poly1305 encryption.
-const NONCE_SIZE: usize = 12;
+/// Nonce size for XChaCha20-Poly1305 encryption.
+const NONCE_SIZE: usize = 24;
 
 /// Defines the persistence strategy for an actor.
 /// This determines how events and state are stored.
@@ -280,19 +277,17 @@ pub trait PersistentActor:
         prefix: Option<String>,
         ctx: &mut ActorContext<Self>,
         manager: impl DbManager<C, S>,
-        password: Option<[u8; 32]>,
+        key_box: Option<EncryptedKey>,
     ) -> Result<(), ActorError> {
         let prefix = match prefix {
             Some(prefix) => prefix,
             None => ctx.path().key(),
         };
 
-        let store = Store::<Self>::new(name, &prefix, manager, password)
+        let store = Store::<Self>::new(name, &prefix, manager, key_box)
             .map_err(|e| ActorError::Store(e.to_string()))?;
         let store = ctx.create_child("store", store).await?;
-        let response = store
-            .ask(StoreCommand::Recover)
-            .await?;
+        let response = store.ask(StoreCommand::Recover).await?;
 
         if let StoreResponse::State(Some(state)) = response {
             self.update(state);
@@ -322,7 +317,8 @@ pub trait PersistentActor:
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Some(store) = ctx.get_child::<Store<Self>>("store").await {
-            if let PersistenceType::Full = Self::Persistence::get_persistence() {
+            if let PersistenceType::Full = Self::Persistence::get_persistence()
+            {
                 let _ = store.ask(StoreCommand::Snapshot(self.clone())).await?;
             }
 
@@ -359,9 +355,9 @@ where
     events: Box<dyn Collection>,
     /// Storage for the latest state snapshot.
     states: Box<dyn State>,
-    /// Encrypted password for data encryption (ChaCha20-Poly1305).
+    /// Encrypted password for data encryption (XChaCha20-Poly1305).
     /// If None, data is stored unencrypted.
-    key_box: Option<EncryptedMem>,
+    key_box: Option<EncryptedKey>,
     /// Phantom data to associate with the PersistentActor type.
     _phantom: PhantomData<P>,
 }
@@ -386,22 +382,12 @@ impl<P: PersistentActor> Store<P> {
         name: &str,
         prefix: &str,
         manager: impl DbManager<C, S>,
-        password: Option<[u8; 32]>,
+        key_box: Option<EncryptedKey>,
     ) -> Result<Self, Error>
     where
         C: Collection + 'static,
         S: State + 'static,
     {
-        let key_box = match password {
-            Some(key) => {
-                let mut key_box = EncryptedMem::new();
-                key_box.encrypt(&key).map_err(|e| {
-                    Error::Store(format!("Can't encrypt password: {:?}", e))
-                })?;
-                Some(key_box)
-            }
-            None => None,
-        };
         let events =
             manager.create_collection(&format!("{}_events", name), prefix)?;
         let states =
@@ -414,7 +400,10 @@ impl<P: PersistentActor> Store<P> {
             0
         };
 
-        debug!("Initializing Store with event_counter: {}", initial_event_counter);
+        debug!(
+            "Initializing Store with event_counter: {}",
+            initial_event_counter
+        );
 
         Ok(Self {
             event_counter: initial_event_counter,
@@ -443,43 +432,47 @@ impl<P: PersistentActor> Store<P> {
         debug!("Persisting event: {:?}", event);
         let bin_config = bincode::config::standard();
 
-        let bytes = if let Some(key_box) = &self.key_box {
-            if let Ok(key) = key_box.decrypt() {
-                let bytes = bincode::serde::encode_to_vec(event, bin_config)
-                    .map_err(|e| {
-                        error!("Can't encode event: {}", e);
-                        Error::Store(format!("Can't encode event: {}", e))
-                    })?;
-                self.encrypt(key.as_ref(), &bytes)?
-            } else {
-                return Err(Error::Store("Can't decrypt key".to_owned()));
-            }
-        } else {
+        let bytes =
             bincode::serde::encode_to_vec(event, bin_config).map_err(|e| {
                 error!("Can't encode event: {}", e);
                 Error::Store(format!("Can't encode event: {}", e))
-            })?
+            })?;
+
+        let bytes = if let Some(key_box) = &self.key_box {
+            self.encrypt(key_box, &bytes)?
+        } else {
+            bytes
         };
 
         // Calculate next event number but don't increment yet
         let next_event_number = if self.event_counter != 0 {
             self.event_counter + 1
-        } else if let Ok(last) = self.last_event() && last.is_some(){
+        } else if let Ok(last) = self.last_event()
+            && last.is_some()
+        {
             self.event_counter + 1
         } else {
             0
         };
 
-        debug!("Persisting event {} at index {}", std::any::type_name::<E>(), next_event_number);
+        debug!(
+            "Persisting event {} at index {}",
+            std::any::type_name::<E>(),
+            next_event_number
+        );
 
         // First persist the event, then increment counter (atomic operation)
-        let result = self.events
+        let result = self
+            .events
             .put(&format!("{:020}", next_event_number), &bytes);
 
         // Only increment counter if persist was successful
         if result.is_ok() {
             self.event_counter = next_event_number;
-            debug!("Successfully persisted event, event_counter now: {}", self.event_counter);
+            debug!(
+                "Successfully persisted event, event_counter now: {}",
+                self.event_counter
+            );
         }
 
         result
@@ -505,22 +498,16 @@ impl<P: PersistentActor> Store<P> {
         debug!("Persisting event: {:?}", event);
         let bin_config = bincode::config::standard();
 
-        let bytes = if let Some(key_box) = &self.key_box {
-            if let Ok(key) = key_box.decrypt() {
-                let bytes = bincode::serde::encode_to_vec(event, bin_config)
-                    .map_err(|e| {
-                        error!("Can't encode event: {}", e);
-                        Error::Store(format!("Can't encode event: {}", e))
-                    })?;
-                self.encrypt(key.as_ref(), &bytes)?
-            } else {
-                return Err(Error::Store("Can't decrypt key".to_owned()));
-            }
-        } else {
+        let bytes =
             bincode::serde::encode_to_vec(event, bin_config).map_err(|e| {
                 error!("Can't encode event: {}", e);
                 Error::Store(format!("Can't encode event: {}", e))
-            })?
+            })?;
+
+        let bytes = if let Some(key_box) = &self.key_box {
+            self.encrypt(key_box, &bytes)?
+        } else {
+            bytes
         };
 
         self.snapshot(state)?;
@@ -540,26 +527,19 @@ impl<P: PersistentActor> Store<P> {
         if let Some((_, data)) = self.events.last() {
             let bin_config = bincode::config::standard();
 
-            let event: P::Event = if let Some(key_box) = &self.key_box {
-                if let Ok(key) = key_box.decrypt() {
-                    let data = self.decrypt(key.as_ref(), data.as_slice())?;
-                    bincode::serde::decode_from_slice(&data, bin_config)
-                        .map_err(|e| {
-                            error!("Can't decode event: {}", e);
-                            Error::Store(format!("Can't decode event: {}", e))
-                        })?
-                        .0
-                } else {
-                    return Err(Error::Store("Can't decrypt key".to_owned()));
-                }
+            let data = if let Some(key_box) = &self.key_box {
+                self.decrypt(key_box, data.as_slice())?
             } else {
+                data
+            };
+            let event: P::Event =
                 bincode::serde::decode_from_slice(&data, bin_config)
                     .map_err(|e| {
                         error!("Can't decode event: {}", e);
                         Error::Store(format!("Can't decode event: {}", e))
                     })?
-                    .0
-            };
+                    .0;
+
             Ok(Some(event))
         } else {
             Ok(None)
@@ -579,11 +559,7 @@ impl<P: PersistentActor> Store<P> {
         };
 
         let bytes = if let Some(key_box) = &self.key_box {
-            if let Ok(key) = key_box.decrypt() {
-                self.decrypt(key.as_ref(), data.as_slice())?
-            } else {
-                return Err(Error::Store("Can't decrypt key".to_owned()));
-            }
+            self.decrypt(key_box, data.as_slice())?
         } else {
             data
         };
@@ -607,32 +583,20 @@ impl<P: PersistentActor> Store<P> {
 
         for i in from..=to {
             if let Ok(data) = self.events.get(&format!("{:020}", i)) {
-                let event: P::Event = if let Some(key_box) = &self.key_box {
-                    if let Ok(key) = key_box.decrypt() {
-                        let data =
-                            self.decrypt(key.as_ref(), data.as_slice())?;
-                        bincode::serde::decode_from_slice(&data, bin_config)
-                            .map_err(|e| {
-                                error!("Can't decode event: {}", e);
-                                Error::Store(format!(
-                                    "Can't decode event: {}",
-                                    e
-                                ))
-                            })?
-                            .0
-                    } else {
-                        return Err(Error::Store(
-                            "Can't decrypt key".to_owned(),
-                        ));
-                    }
+                let data = if let Some(key_box) = &self.key_box {
+                    self.decrypt(key_box, data.as_slice())?
                 } else {
+                    data
+                };
+
+                let event: P::Event =
                     bincode::serde::decode_from_slice(&data, bin_config)
                         .map_err(|e| {
                             error!("Can't decode event: {}", e);
                             Error::Store(format!("Can't decode event: {}", e))
                         })?
-                        .0
-                };
+                        .0;
+
                 events.push(event);
             } else {
                 break;
@@ -652,31 +616,27 @@ impl<P: PersistentActor> Store<P> {
     /// An error if the operation failed.
     ///
     fn snapshot(&mut self, actor: &P) -> Result<(), Error> {
-            debug!("Snapshotting state: {:?}", actor);
-            let bin_config = bincode::config::standard();
+        debug!("Snapshotting state: {:?}", actor);
+        let bin_config = bincode::config::standard();
 
-            self.state_counter = self.event_counter;
+        self.state_counter = self.event_counter;
 
-            let data = bincode::serde::encode_to_vec(
-                (actor, self.state_counter),
-                bin_config,
-            )
-            .map_err(|e| {
-                error!("Can't encode actor: {}", e);
-                Error::Store(format!("Can't encode actor: {}", e))
-            })?;
-            let bytes = if let Some(key_box) = &self.key_box {
-                if let Ok(key) = key_box.decrypt() {
-                    self.encrypt(key.as_ref(), data.as_slice())?
-                } else {
-                    data
-                }
-            } else {
-                data
-            };
+        let data = bincode::serde::encode_to_vec(
+            (actor, self.state_counter),
+            bin_config,
+        )
+        .map_err(|e| {
+            error!("Can't encode actor: {}", e);
+            Error::Store(format!("Can't encode actor: {}", e))
+        })?;
 
-            self.states.put(&bytes)
+        let bytes = if let Some(key_box) = &self.key_box {
+            self.encrypt(key_box ,data.as_slice())?
+        } else {
+            data
+        };
 
+        self.states.put(&bytes)
     }
 
     /// Recover the state.
@@ -687,9 +647,7 @@ impl<P: PersistentActor> Store<P> {
     ///
     /// An error if the operation failed.
     ///
-    fn recover(
-        &mut self,
-    ) -> Result<Option<P>, Error> {
+    fn recover(&mut self) -> Result<Option<P>, Error> {
         debug!("Starting recovery process");
 
         if let Some((mut state, counter)) = self.get_state()? {
@@ -701,13 +659,19 @@ impl<P: PersistentActor> Store<P> {
                     Error::Store(format!("Can't parse event key: {}", e))
                 })?;
 
-                debug!("Recovery state: event_counter={}, state_counter={}",
-                       self.event_counter, self.state_counter);
+                debug!(
+                    "Recovery state: event_counter={}, state_counter={}",
+                    self.event_counter, self.state_counter
+                );
 
                 if self.event_counter != self.state_counter {
-                    debug!("Applying events from {} to {}", self.state_counter + 1, self.event_counter);
-                    let events =
-                        self.events(self.state_counter + 1, self.event_counter)?;
+                    debug!(
+                        "Applying events from {} to {}",
+                        self.state_counter + 1,
+                        self.event_counter
+                    );
+                    let events = self
+                        .events(self.state_counter + 1, self.event_counter)?;
                     debug!("Found {} events to replay", events.len());
 
                     for (i, event) in events.iter().enumerate() {
@@ -717,9 +681,15 @@ impl<P: PersistentActor> Store<P> {
                             .map_err(|e| Error::Store(e.to_string()))?;
                     }
 
-                    debug!("Updating snapshot after applying {} events", events.len());
+                    debug!(
+                        "Updating snapshot after applying {} events",
+                        events.len()
+                    );
                     self.snapshot(&state)?;
-                    debug!("Recovery completed. Final event_counter: {}", self.event_counter);
+                    debug!(
+                        "Recovery completed. Final event_counter: {}",
+                        self.event_counter
+                    );
                     // Note: We don't increment event_counter here as it already has the correct value
                     // from the last persisted event key
                 } else {
@@ -728,7 +698,9 @@ impl<P: PersistentActor> Store<P> {
 
                 Ok(Some(state))
             } else {
-                debug!("No events found in database, using recovered state as-is");
+                debug!(
+                    "No events found in database, using recovered state as-is"
+                );
                 Ok(Some(state))
             }
         } else {
@@ -749,30 +721,139 @@ impl<P: PersistentActor> Store<P> {
         Ok(())
     }
 
-    /// Encrypt bytes.
+    /// Encrypt bytes using XChaCha20-Poly1305 AEAD.
     ///
-    fn encrypt(&self, key: &[u8], bytes: &[u8]) -> Result<Vec<u8>, Error> {
-        let cipher = ChaCha20Poly1305::new(key.into());
-        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng); // 96-bits; unique per message
-        let ciphertext: Vec<u8> = cipher
-            .encrypt(&nonce, bytes.as_ref())
-            .map_err(|e| Error::Store(format!("Encrypt error: {}", e)))?;
+    /// # Security considerations
+    ///
+    /// - Uses XChaCha20-Poly1305 with 192-bit random nonce (superior to ChaCha20)
+    /// - Cryptographically secure random nonce via OsRng (no collision risk)
+    /// - Key must be exactly 32 bytes (256 bits)
+    /// - Each encryption produces a unique ciphertext due to random nonce
+    /// - The nonce is prepended to the ciphertext for later decryption
+    /// - Provides both confidentiality (XChaCha20) and authenticity (Poly1305 MAC)
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - 32-byte encryption key wrapped in Zeroizing for secure memory handling
+    /// * `bytes` - Plaintext data to encrypt
+    ///
+    /// # Returns
+    ///
+    /// Encrypted data with format: [nonce (24 bytes) || ciphertext || auth_tag (16 bytes)]
+    ///
+    /// # Errors
+    ///
+    /// Returns Error::Store if:
+    /// - Key length is not exactly 32 bytes
+    /// - Encryption operation fails
+    ///
+    fn encrypt(
+        &self,
+        key_box: &EncryptedKey,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        if let Ok(key) = key_box.key() {
+            // Validate key size (XChaCha20-Poly1305 requires exactly 32 bytes)
+            if key.len() != 32 {
+                return Err(Error::Store(format!(
+                    "Invalid key length: expected 32 bytes, got {}",
+                    key.len()
+                )));
+            }
 
-        Ok([nonce.to_vec(), ciphertext].concat())
+            // Create cipher from key
+            let cipher = XChaCha20Poly1305::new(key.as_ref().into());
+
+            // Generate cryptographically secure random nonce (192-bits/24-bytes)
+            // XChaCha20 uses extended nonce, virtually eliminating collision risk
+            let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+
+            // Encrypt and authenticate the data
+            // XChaCha20-Poly1305 provides both confidentiality and authenticity
+            let ciphertext: Vec<u8> =
+                cipher.encrypt(&nonce, bytes.as_ref()).map_err(|e| {
+                    Error::Store(format!("Encryption failed: {}", e))
+                })?;
+
+            // Prepend nonce to ciphertext for storage
+            // Format: [nonce (24 bytes) || ciphertext || poly1305_tag (16 bytes)]
+            Ok([nonce.to_vec(), ciphertext].concat())
+        } else {
+            return Err(Error::Store("Can't decrypt key".to_owned()));
+        }
     }
 
-    /// Decrypt bytes
+    /// Decrypt bytes using XChaCha20-Poly1305 AEAD.
     ///
-    fn decrypt(&self, key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
-        let cipher = ChaCha20Poly1305::new(key.into());
-        let nonce = ciphertext[..NONCE_SIZE].to_vec();
-        let nonce = Nonce::from_slice(&nonce);
-        let ciphertext = &ciphertext[NONCE_SIZE..];
+    /// # Security considerations
+    ///
+    /// - Validates ciphertext length to prevent panics
+    /// - Verifies authentication tag (built into XChaCha20-Poly1305)
+    /// - Returns error if authentication fails (data tampered or corrupted)
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - 32-byte decryption key (must match encryption key)
+    /// * `ciphertext` - Encrypted data with format: [nonce || ciphertext || auth_tag]
+    ///
+    /// # Returns
+    ///
+    /// Decrypted plaintext data
+    ///
+    /// # Errors
+    ///
+    /// Returns Error::Store if:
+    /// - Key length is not exactly 32 bytes
+    /// - Ciphertext is too short (minimum: nonce + tag = 40 bytes)
+    /// - Authentication tag verification fails (tampering detected)
+    /// - Decryption operation fails
+    ///
+    fn decrypt(
+        &self,
+        key_box: &EncryptedKey,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        // Validate ciphertext length (nonce + tag minimum = 24 + 16 = 40 bytes)
+        if ciphertext.len() < NONCE_SIZE + 16 {
+            return Err(Error::Store(format!(
+                "Invalid ciphertext length: expected at least {} bytes, got {}",
+                NONCE_SIZE + 16,
+                ciphertext.len()
+            )));
+        }
 
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|e| Error::Store(format!("Decrypt error: {}", e)))?;
-        Ok(plaintext)
+        if let Ok(key) = key_box.key() {
+            // Validate key size (XChaCha20-Poly1305 requires exactly 32 bytes)
+            if key.len() != 32 {
+                return Err(Error::Store(format!(
+                    "Invalid key length: expected 32 bytes, got {}",
+                    key.len()
+                )));
+            }
+
+            // Extract nonce from the beginning of ciphertext
+            let nonce = XNonce::from_slice(&ciphertext[..NONCE_SIZE]);
+
+            // Extract actual ciphertext (includes Poly1305 authentication tag at the end)
+            let ciphertext_data = &ciphertext[NONCE_SIZE..];
+
+            // Create cipher and decrypt
+            let cipher = XChaCha20Poly1305::new(key.as_ref().into());
+
+            // Decrypt and verify authentication tag
+            // This will fail if data has been tampered with or corrupted
+            let plaintext =
+                cipher.decrypt(nonce, ciphertext_data).map_err(|e| {
+                    Error::Store(format!(
+                        "Decryption failed (possible tampering): {}",
+                        e
+                    ))
+                })?;
+
+            Ok(plaintext)
+        } else {
+            return Err(Error::Store("Can't decrypt key".to_owned()));
+        }
     }
 }
 
@@ -877,15 +958,13 @@ where
                 Err(e) => Ok(StoreResponse::Error(e)),
             },
             // Recover the state.
-            StoreCommand::Recover => {
-                match self.recover() {
-                    Ok(state) => {
-                        debug!("Recovered state: {:?}", state);
-                        Ok(StoreResponse::State(state))
-                    }
-                    Err(e) => Ok(StoreResponse::Error(e)),
+            StoreCommand::Recover => match self.recover() {
+                Ok(state) => {
+                    debug!("Recovered state: {:?}", state);
+                    Ok(StoreResponse::State(state))
                 }
-            }
+                Err(e) => Ok(StoreResponse::Error(e)),
+            },
             StoreCommand::GetEvents { from, to } => {
                 let events = self.events(from, to).map_err(|e| {
                     ActorError::Store(format!(
@@ -1008,18 +1087,18 @@ mod tests {
             let memory_db: MemoryManager =
                 ctx.system().get_helper("db").await.unwrap();
 
+            let encrypt_key = EncryptedKey::new(&[3u8; 32]).unwrap();
+
             let db = Store::<Self>::new(
                 "store",
                 "prefix",
                 memory_db,
-                Some([3u8; 32]),
+                Some(encrypt_key),
             )
             .unwrap();
 
             let store = ctx.create_child("store", db).await.unwrap();
-            let response = store
-                .ask(StoreCommand::Recover)
-                .await?;
+            let response = store.ask(StoreCommand::Recover).await?;
 
             if let StoreResponse::State(Some(state)) = response {
                 self.update(state);
@@ -1070,10 +1149,7 @@ mod tests {
             )
             .unwrap();
             let store = ctx.create_child("store", db).await.unwrap();
-            let response = store
-                .ask(StoreCommand::Recover)
-                .await
-                .unwrap();
+            let response = store.ask(StoreCommand::Recover).await.unwrap();
             debug!("Recover response: {:?}", response);
             if let StoreResponse::State(Some(state)) = response {
                 debug!("Recovering state: {:?}", state);
@@ -1166,10 +1242,8 @@ mod tests {
                 TestMessage::Recover => {
                     let store: ActorRef<Store<Self>> =
                         ctx.get_child("store").await.unwrap();
-                    let response = store
-                        .ask(StoreCommand::Recover)
-                        .await
-                        .unwrap();
+                    let response =
+                        store.ask(StoreCommand::Recover).await.unwrap();
                     if let StoreResponse::State(Some(state)) = response {
                         self.update(state.clone());
                         Ok(TestResponse::Value(state.value))
@@ -1201,17 +1275,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_actor() {
-        let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+        let (system, mut runner) =
+            ActorSystem::create(CancellationToken::new());
         // Init runner.
         tokio::spawn(async move {
             runner.run().await;
         });
-        let password = b"0123456789abcdef0123456789abcdef";
+        
+        let encrypt_key = EncryptedKey::new(b"0123456789abcdef0123456789abcdef").unwrap();
         let db = Store::<TestActor>::new(
             "store",
             "test",
             MemoryManager::default(),
-            Some(*password),
+            Some(encrypt_key),
         )
         .unwrap();
         let store = system.create_root_actor("store", db).await.unwrap();
@@ -1239,17 +1315,11 @@ mod tests {
             .unwrap();
 
         actor.apply(&TestEvent(10)).unwrap();
-        let response = store
-            .ask(StoreCommand::Recover)
-            .await
-            .unwrap();
+        let response = store.ask(StoreCommand::Recover).await.unwrap();
         if let StoreResponse::State(Some(state)) = response {
             assert_eq!(state.value, actor.value);
         }
-        let response = store
-            .ask(StoreCommand::Recover)
-            .await
-            .unwrap();
+        let response = store.ask(StoreCommand::Recover).await.unwrap();
         if let StoreResponse::State(Some(state)) = response {
             assert_eq!(state.value, actor.value);
         }
@@ -1323,7 +1393,8 @@ mod tests {
     #[tokio::test]
     //#[traced_test]
     async fn test_persistent_actor() {
-        let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+        let (system, mut runner) =
+            ActorSystem::create(CancellationToken::new());
         // Init runner.
         tokio::spawn(async move {
             runner.run().await;
@@ -1366,17 +1437,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_encrypt_decrypt() {
-        let key = [0u8; 32];
+        let encrypt_key = EncryptedKey::new(&[0u8; 32]).unwrap();
+
         let store = Store::<TestActor>::new(
             "store",
             "test",
             MemoryManager::default(),
-            Some(key),
+            Some(encrypt_key),
         )
         .unwrap();
         let data = b"Hello, world!";
-        let encrypted = store.encrypt(&key, data).unwrap();
-        let decrypted = store.decrypt(&key, &encrypted).unwrap();
+        let encrypted = store.encrypt(&store.key_box.clone().unwrap(), data).unwrap();
+        let decrypted = store.decrypt(&store.key_box.clone().unwrap(), &encrypted).unwrap();
         assert_eq!(data, decrypted.as_slice());
     }
 }

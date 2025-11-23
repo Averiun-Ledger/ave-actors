@@ -27,6 +27,7 @@ mod runner;
 mod sink;
 mod supervision;
 mod system;
+mod helpers;
 
 pub use actor::{
     Actor, ActorContext, ActorRef, ChildAction, Event, Handler, Message,
@@ -36,6 +37,7 @@ pub use error::Error;
 pub use path::ActorPath;
 
 pub use sink::{Sink, Subscriber};
+pub use helpers::encrypted_key::EncryptedKey;
 
 pub use retries::{RetryActor, RetryMessage};
 pub use supervision::{

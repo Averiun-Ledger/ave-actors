@@ -8,8 +8,7 @@ use store::{
 };
 
 use actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError,
-    Event, Handler, Message, Response,
+    Actor, ActorContext, ActorPath, ActorSystem, EncryptedKey, Error as ActorError, Event, Handler, Message, Response
 };
 
 use async_trait::async_trait;
@@ -63,7 +62,8 @@ impl Actor for EncryptedActor {
 
     async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
         let memory_db = MemoryManager::default();
-        self.start_store("encrypted_test", None, ctx, memory_db, Some([1u8; 32])).await
+        let encrypt_key = EncryptedKey::new(&[1u8; 32]).unwrap();
+        self.start_store("encrypted_test", None, ctx, memory_db, Some(encrypt_key)).await
     }
 
     async fn pre_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
@@ -653,7 +653,8 @@ async fn test_encryption_failure_scenarios() {
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<EncryptedActor>::new("test", "prefix", MemoryManager::default(), Some([0u8; 32])).unwrap();
+    let encrypt_key = EncryptedKey::new(&[0u8; 32]).unwrap();
+    let store = Store::<EncryptedActor>::new("test", "prefix", MemoryManager::default(), Some(encrypt_key)).unwrap();
     let store_ref = system.create_root_actor("encrypted_store", store).await.unwrap();
 
     // Test encryption/decryption by persisting and recovering

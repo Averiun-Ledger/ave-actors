@@ -8,7 +8,8 @@ actor = { path = "../actor" }
 async-trait = { workspace = true }
 bincode = { workspace = true }
 chacha20poly1305 = "0.10"
-memsecurity = { version = "3.5", features = ["encryption"] }
+zeroize = { workspace = true }
+memsecurity = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }

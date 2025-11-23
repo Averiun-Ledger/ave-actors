@@ -1,6 +1,6 @@
 
 
-//! Core library for the Rush framework.
+//! Core library for the Ave-Actors framework.
 //! Provides the foundational components for building actor-based applications.
 //! This library includes the core actor model, message passing, and persistence layers.
 //! It is designed to be modular and extensible, allowing developers to build custom actors and message types.
@@ -11,7 +11,7 @@ pub use actor::{
     FixedIntervalStrategy, Handler, Message, NoIntervalStrategy,
     Response, RetryActor, RetryMessage, RetryStrategy, Sink,
     Strategy, Subscriber, SupervisionStrategy, SystemEvent, SystemRef,
-    SystemRunner,
+    SystemRunner, EncryptedKey
 };
 
 #[cfg(any(feature = "rocksdb", feature = "sqlite"))]
