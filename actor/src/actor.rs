@@ -185,8 +185,8 @@ where
     /// # Arguments
     ///
     /// * `sender` - Optional channel to receive stop confirmation.
-    ///              If Some, the actor will send a signal when finished.
-    ///              If None, the stop is fire-and-forget.
+    ///   If Some, the actor will send a signal when finished.
+    ///   If None, the stop is fire-and-forget.
     ///
     pub async fn stop(&self, sender: Option<oneshot::Sender<()>>) {
         debug!("Stopping actor from handle reference.");

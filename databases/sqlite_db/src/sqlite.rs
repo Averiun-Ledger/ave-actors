@@ -41,7 +41,7 @@ impl SqliteManager {
     /// # Arguments
     ///
     /// * `path` - Directory path where the database file will be created.
-    ///            The database file will be named "database.db" within this directory.
+    ///   The database file will be named "database.db" within this directory.
     ///
     /// # Returns
     ///

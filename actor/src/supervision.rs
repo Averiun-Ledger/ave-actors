@@ -207,7 +207,7 @@ impl CustomIntervalStrategy {
     /// # Arguments
     ///
     /// * `durations` - A queue of durations defining the delay before each retry.
-    ///                 The number of durations determines the maximum number of retries.
+    ///   The number of durations determines the maximum number of retries.
     ///
     /// # Returns
     ///

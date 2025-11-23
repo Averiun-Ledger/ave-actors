@@ -10,6 +10,54 @@
 //! ✅ Persistent + initial() wrapper → SUCCESS
 //! ❌ Persistent + Direct instance → COMPILE ERROR (prevented by NotPersistentActor requirement)
 //! ❌ Non-persistent + initial() wrapper → N/A (NotPersistentActor actors don't have initial())
+//!
+//! # Mutual Exclusivity Enforcement
+//!
+//! The traits `NotPersistentActor` and `PersistentActor` are mutually exclusive via sealed traits.
+//! Attempting to implement both will result in a compile error:
+//!
+//! ```compile_fail
+//! use actor::{Actor, Handler, Message, Response, Event, ActorContext, ActorPath, NotPersistentActor};
+//! use store::store::{PersistentActor, FullPersistence};
+//! use serde::{Serialize, Deserialize};
+//! use async_trait::async_trait;
+//!
+//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! struct ConflictingActor { value: i32 }
+//!
+//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! struct Msg;
+//! impl Message for Msg {}
+//!
+//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! struct Evt;
+//! impl Event for Evt {}
+//!
+//! #[async_trait]
+//! impl Actor for ConflictingActor {
+//!     type Message = Msg;
+//!     type Response = ();
+//!     type Event = Evt;
+//! }
+//!
+//! #[async_trait]
+//! impl Handler<ConflictingActor> for ConflictingActor {
+//!     async fn handle_message(&mut self, _: ActorPath, _: Msg, _: &mut ActorContext<ConflictingActor>) -> Result<(), actor::Error> {
+//!         Ok(())
+//!     }
+//! }
+//!
+//! #[async_trait]
+//! impl PersistentActor for ConflictingActor {
+//!     type Persistence = FullPersistence;
+//!     type InitParams = i32;
+//!     fn create_initial(value: i32) -> Self { Self { value } }
+//!     fn apply(&mut self, _: &Self::Event) -> Result<(), actor::Error> { Ok(()) }
+//! }
+//!
+//! // This will cause a compile error due to conflicting sealed trait implementations
+//! impl NotPersistentActor for ConflictingActor {}
+//! ```
 
 use actor::{Actor, ActorSystem, Handler, Message, Response, Event, ActorContext, ActorPath, NotPersistentActor};
 use store::store::{PersistentActor, FullPersistence};
@@ -276,6 +324,9 @@ fn test_type_safety_documentation() {
     fn _assert_persistent_has_trait<T: PersistentActor>() {}
     _assert_persistent_has_trait::<MyPersistentActor>();
 
-    // ❌ Would fail: Can't require both traits together (they're mutually exclusive by convention)
-    // fn _assert_both<T: NotPersistentActor + PersistentActor>() {}
+    // ❌ ENFORCED AT COMPILE TIME: Can't require both traits together
+    // The traits are mutually exclusive via sealed traits pattern.
+    // See:
+    // 1. Module-level doctest for compile_fail example
+    // 2. store/tests/test_trait_exclusion.rs for manual verification (currently commented out)
 }

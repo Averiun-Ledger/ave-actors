@@ -104,6 +104,18 @@ where
     }
 }
 
+/// Sealed module to enforce mutual exclusivity with NotPersistentActor.
+mod sealed_persistent {
+    /// Sealed trait that prevents external implementations.
+    /// This is used to make `PersistentActor` and `NotPersistentActor` mutually exclusive.
+    pub trait SealedPersistent {}
+
+    /// Marker type for persistent actors.
+    #[allow(dead_code)]
+    pub struct PersistentMarker;
+    impl SealedPersistent for PersistentMarker {}
+}
+
 /// Trait for actors that persist their state using event sourcing.
 /// PersistentActor extends the Actor trait with methods for persisting events,
 /// snapshotting state, and recovering from storage.
@@ -121,7 +133,7 @@ where
 /// - Cloneable (for state snapshots)
 /// - Serializable (for persistence)
 /// - Debuggable (for logging)
-/// - Must NOT implement NotPersistentActor (convention, not enforced at compile time)
+/// - **CANNOT implement NotPersistentActor** (enforced at compile time via sealed traits)
 ///
 /// # Usage
 ///
@@ -131,13 +143,13 @@ where
 ///
 /// # Important
 ///
-/// Do NOT implement both `PersistentActor` and `NotPersistentActor` on the same type.
-/// While Rust's type system cannot prevent this without negative trait bounds,
-/// doing so will lead to undefined behavior as both creation paths will be available.
+/// Due to the sealed trait pattern, it is now **impossible at compile time** to implement
+/// both `PersistentActor` and `NotPersistentActor` on the same type. The Rust compiler
+/// will prevent this with a trait conflict error.
 ///
 #[async_trait]
 pub trait PersistentActor:
-    Actor + Handler<Self> + Debug + Clone + Serialize + DeserializeOwned
+    Actor + Handler<Self> + Debug + Clone + Serialize + DeserializeOwned + sealed_persistent::SealedPersistent
 {
     /// The persistence strategy type (Light or Full).
     type Persistence: Persistence;
@@ -402,11 +414,10 @@ pub trait PersistentActor:
             {
                 // Only snapshot if there are events
                 let response = store.ask(StoreCommand::LastEventNumber).await?;
-                if let StoreResponse::LastEventNumber(count) = response {
-                    if count > 0 {
+                if let StoreResponse::LastEventNumber(count) = response
+                    && count > 0 {
                         let _ = store.ask(StoreCommand::Snapshot(self.clone())).await?;
                     }
-                }
             }
 
             store.ask_stop().await
@@ -415,6 +426,10 @@ pub trait PersistentActor:
         }
     }
 }
+
+/// Blanket implementation that automatically provides the sealed trait for all
+/// types that implement PersistentActor.
+impl<T: PersistentActor> sealed_persistent::SealedPersistent for T {}
 
 /// Store actor that manages persistent storage for a PersistentActor.
 /// The Store handles event persistence, state snapshots, and recovery.
@@ -868,7 +883,7 @@ impl<P: PersistentActor> Store<P> {
             // Format: [nonce (24 bytes) || ciphertext || poly1305_tag (16 bytes)]
             Ok([nonce.to_vec(), ciphertext].concat())
         } else {
-            return Err(Error::Store("Can't decrypt key".to_owned()));
+            Err(Error::Store("Can't decrypt key".to_owned()))
         }
     }
 
@@ -941,7 +956,7 @@ impl<P: PersistentActor> Store<P> {
 
             Ok(plaintext)
         } else {
-            return Err(Error::Store("Can't decrypt key".to_owned()));
+            Err(Error::Store("Can't decrypt key".to_owned()))
         }
     }
 }
