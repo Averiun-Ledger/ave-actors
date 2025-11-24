@@ -480,8 +480,9 @@ impl<P: PersistentActor> Store<P> {
             manager.create_state(&format!("{}_states", name), prefix)?;
 
         // Initialize event_counter from the last event in the database
+        // event_counter works like vector.len(): last position + 1
         let initial_event_counter = if let Some((key, _)) = events.last() {
-            key.parse().unwrap_or(0)
+            key.parse::<u64>().unwrap_or(0) + 1
         } else {
             0
         };
@@ -530,16 +531,9 @@ impl<P: PersistentActor> Store<P> {
             bytes
         };
 
-        // Calculate next event number but don't increment yet
-        let next_event_number = if self.event_counter != 0 {
-            self.event_counter + 1
-        } else if let Ok(last) = self.last_event()
-            && last.is_some()
-        {
-            self.event_counter + 1
-        } else {
-            0
-        };
+        // Calculate next event position (0-indexed)
+        // event_counter works like vector.len(): 0 means empty, 1 means one event at position 0
+        let next_event_number = self.event_counter;
 
         debug!(
             "Persisting event {} at index {}",
@@ -554,7 +548,7 @@ impl<P: PersistentActor> Store<P> {
 
         // Only increment counter if persist was successful
         if result.is_ok() {
-            self.event_counter = next_event_number;
+            self.event_counter += 1;
             debug!(
                 "Successfully persisted event, event_counter now: {}",
                 self.event_counter
@@ -741,9 +735,9 @@ impl<P: PersistentActor> Store<P> {
             debug!("Recovered state with counter: {}", counter);
 
             if let Some((key, ..)) = self.events.last() {
-                self.event_counter = key.parse().map_err(|e| {
+                self.event_counter = key.parse::<u64>().map_err(|e| {
                     Error::Store(format!("Can't parse event key: {}", e))
-                })?;
+                })? + 1;
 
                 debug!(
                     "Recovery state: event_counter={}, state_counter={}",
@@ -753,11 +747,11 @@ impl<P: PersistentActor> Store<P> {
                 if self.event_counter != self.state_counter {
                     debug!(
                         "Applying events from {} to {}",
-                        self.state_counter + 1,
-                        self.event_counter
+                        self.state_counter,
+                        self.event_counter - 1
                     );
                     let events = self
-                        .events(self.state_counter + 1, self.event_counter)?;
+                        .events(self.state_counter, self.event_counter - 1)?;
                     debug!("Found {} events to replay", events.len());
 
                     for (i, event) in events.iter().enumerate() {
@@ -1432,7 +1426,7 @@ mod tests {
         }
         let response = store.ask(StoreCommand::LastEventNumber).await.unwrap();
         if let StoreResponse::LastEventNumber(number) = response {
-            assert_eq!(number, 1);
+            assert_eq!(number, 2);
         } else {
             panic!("Event number not found");
         }
