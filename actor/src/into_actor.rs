@@ -6,29 +6,15 @@
 
 use crate::actor::{Actor, Handler};
 
-/// Sealed module to prevent external implementations of the persistence marker.
-mod sealed {
-    /// Sealed trait that prevents external implementations.
-    /// This is used to make `NotPersistentActor` and `PersistentActor` mutually exclusive.
-    pub trait Sealed {}
-
-    /// Marker type for non-persistent actors.
-    #[allow(dead_code)]
-    pub struct NonPersistentMarker;
-    impl Sealed for NonPersistentMarker {}
-}
-
 /// Marker trait for actors that do NOT use persistence.
 ///
 /// This trait must be implemented by actors that don't persist their state.
-/// It is mutually exclusive with `PersistentActor` from the store crate.
 ///
 /// # Purpose
 ///
 /// This trait enables compile-time enforcement that:
 /// - Non-persistent actors can be created directly via instances
 /// - Persistent actors MUST use `PersistentActor::initial()` wrapper
-/// - **An actor CANNOT implement both `NotPersistentActor` and `PersistentActor`**
 ///
 /// # Implementation
 ///
@@ -44,14 +30,9 @@ mod sealed {
 ///
 /// # Important
 ///
-/// Due to the sealed trait pattern, it is now **impossible at compile time** to implement
-/// both `NotPersistentActor` and `PersistentActor` on the same type. The Rust compiler
-/// will prevent this with a trait conflict error.
-pub trait NotPersistentActor: sealed::Sealed {}
-
-/// Blanket implementation that automatically provides the sealed trait for all
-/// types that implement NotPersistentActor.
-impl<T: NotPersistentActor> sealed::Sealed for T {}
+/// Do NOT implement both `NotPersistentActor` and `PersistentActor` on the same type.
+/// This is enforced by convention but not by the type system.
+pub trait NotPersistentActor {}
 
 /// Trait for types that can be converted into an actor instance.
 ///

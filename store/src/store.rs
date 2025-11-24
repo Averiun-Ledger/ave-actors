@@ -104,18 +104,6 @@ where
     }
 }
 
-/// Sealed module to enforce mutual exclusivity with NotPersistentActor.
-mod sealed_persistent {
-    /// Sealed trait that prevents external implementations.
-    /// This is used to make `PersistentActor` and `NotPersistentActor` mutually exclusive.
-    pub trait SealedPersistent {}
-
-    /// Marker type for persistent actors.
-    #[allow(dead_code)]
-    pub struct PersistentMarker;
-    impl SealedPersistent for PersistentMarker {}
-}
-
 /// Trait for actors that persist their state using event sourcing.
 /// PersistentActor extends the Actor trait with methods for persisting events,
 /// snapshotting state, and recovering from storage.
@@ -133,7 +121,6 @@ mod sealed_persistent {
 /// - Cloneable (for state snapshots)
 /// - Serializable (for persistence)
 /// - Debuggable (for logging)
-/// - **CANNOT implement NotPersistentActor** (enforced at compile time via sealed traits)
 ///
 /// # Usage
 ///
@@ -143,13 +130,12 @@ mod sealed_persistent {
 ///
 /// # Important
 ///
-/// Due to the sealed trait pattern, it is now **impossible at compile time** to implement
-/// both `PersistentActor` and `NotPersistentActor` on the same type. The Rust compiler
-/// will prevent this with a trait conflict error.
+/// Do NOT implement both `PersistentActor` and `NotPersistentActor` on the same type.
+/// This is enforced by convention but not by the type system.
 ///
 #[async_trait]
 pub trait PersistentActor:
-    Actor + Handler<Self> + Debug + Clone + Serialize + DeserializeOwned + sealed_persistent::SealedPersistent
+    Actor + Handler<Self> + Debug + Clone + Serialize + DeserializeOwned
 {
     /// The persistence strategy type (Light or Full).
     type Persistence: Persistence;
@@ -426,10 +412,6 @@ pub trait PersistentActor:
         }
     }
 }
-
-/// Blanket implementation that automatically provides the sealed trait for all
-/// types that implement PersistentActor.
-impl<T: PersistentActor> sealed_persistent::SealedPersistent for T {}
 
 /// Store actor that manages persistent storage for a PersistentActor.
 /// The Store handles event persistence, state snapshots, and recovery.

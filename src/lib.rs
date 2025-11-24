@@ -11,7 +11,7 @@ pub use actor::{
     FixedIntervalStrategy, Handler, Message, NoIntervalStrategy,
     Response, RetryActor, RetryMessage, RetryStrategy, Sink,
     Strategy, Subscriber, SupervisionStrategy, SystemEvent, SystemRef,
-    SystemRunner, EncryptedKey
+    SystemRunner, EncryptedKey, NotPersistentActor
 };
 
 #[cfg(any(feature = "rocksdb", feature = "sqlite"))]
