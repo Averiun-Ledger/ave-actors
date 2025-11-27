@@ -410,6 +410,7 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
     use tracing_test::traced_test;
+    use borsh::{BorshSerialize, BorshDeserialize};
 
     use std::time::Duration;
 
@@ -423,7 +424,7 @@ mod tests {
         Stop,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
     pub struct TestEvent;
 
     impl Event for TestEvent {}

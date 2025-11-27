@@ -19,6 +19,7 @@
 use actor::{Actor, ActorSystem, Handler, Message, Response, Event, ActorContext, ActorPath, NotPersistentActor};
 use store::store::{PersistentActor, FullPersistence};
 use serde::{Serialize, Deserialize};
+use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
@@ -27,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 // ============================================================================
 
 // Persistent Actor
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize)]
 struct MyPersistentActor {
     counter: i32,
 }
@@ -40,7 +41,7 @@ impl Message for PersistentMessage {}
 struct PersistentResponse;
 impl Response for PersistentResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize)]
 struct PersistentEvent;
 impl Event for PersistentEvent {}
 
@@ -278,7 +279,10 @@ fn test_type_safety_documentation() {
     _assert_non_persistent_has_trait::<MyNonPersistentActor>();
 
     // ✅ Allowed: Persistent actors implement PersistentActor
-    fn _assert_persistent_has_trait<T: PersistentActor>() {}
+    fn _assert_persistent_has_trait<T: PersistentActor>()
+    where
+        T::Event: BorshSerialize + BorshDeserialize,
+    {}
     _assert_persistent_has_trait::<MyPersistentActor>();
 
     // ⚠️ CONVENTION: Don't implement both traits on the same type

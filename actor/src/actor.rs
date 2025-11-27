@@ -515,6 +515,8 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
 
 /// Events that this actor will emit after processing a message. The events emitted by a message
 /// handler will be used to apply the event sourcing pattern.
+///
+/// Note: If you need persistence, the event type must also implement `BorshSerialize` and `BorshDeserialize`.
 pub trait Event:
     Serialize + DeserializeOwned + Debug + Clone + Send + Sync + 'static
 {

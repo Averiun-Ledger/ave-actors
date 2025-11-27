@@ -6,7 +6,7 @@ edition = { workspace = true }
 [dependencies]
 actor = { path = "../actor" }
 async-trait = { workspace = true }
-bincode = { workspace = true }
+borsh = { workspace = true }
 chacha20poly1305 = "0.10"
 zeroize = { workspace = true }
 memsecurity = { workspace = true }

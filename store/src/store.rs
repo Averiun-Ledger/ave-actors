@@ -20,12 +20,14 @@ use actor::{
 
 use async_trait::async_trait;
 
+use borsh::{BorshDeserialize, BorshSerialize};
+
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 
 use tracing::{debug, error};
 
@@ -98,6 +100,7 @@ impl<A> InitializedActor<A> {
 impl<A> IntoActor<A> for InitializedActor<A>
 where
     A: PersistentActor,
+    A::Event: BorshSerialize + BorshDeserialize,
 {
     fn into_actor(self) -> A {
         self.0
@@ -135,7 +138,9 @@ where
 ///
 #[async_trait]
 pub trait PersistentActor:
-    Actor + Handler<Self> + Debug + Clone + Serialize + DeserializeOwned
+    Actor + Handler<Self> + Debug + Clone + BorshSerialize + BorshDeserialize
+where
+    Self::Event: BorshSerialize + BorshDeserialize,
 {
     /// The persistence strategy type (Light or Full).
     type Persistence: Persistence;
@@ -430,6 +435,7 @@ pub trait PersistentActor:
 pub struct Store<P>
 where
     P: PersistentActor,
+    P::Event: BorshSerialize + BorshDeserialize,
 {
     /// Current event sequence number (auto-incrementing).
     event_counter: u64,
@@ -446,9 +452,17 @@ where
     _phantom: PhantomData<P>,
 }
 
-impl<P> actor::NotPersistentActor for Store<P> where P: PersistentActor {}
+impl<P> actor::NotPersistentActor for Store<P>
+where
+    P: PersistentActor,
+    P::Event: BorshSerialize + BorshDeserialize,
+{}
 
-impl<P: PersistentActor> Store<P> {
+impl<P> Store<P>
+where
+    P: PersistentActor,
+    P::Event: BorshSerialize + BorshDeserialize,
+{
     /// Creates a new store actor.
     ///
     /// # Arguments
@@ -514,16 +528,14 @@ impl<P: PersistentActor> Store<P> {
     ///
     fn persist<E>(&mut self, event: &E) -> Result<(), Error>
     where
-        E: Event + Serialize + DeserializeOwned,
+        E: Event + BorshSerialize + BorshDeserialize,
     {
         debug!("Persisting event: {:?}", event);
-        let bin_config = bincode::config::standard();
 
-        let bytes =
-            bincode::serde::encode_to_vec(event, bin_config).map_err(|e| {
-                error!("Can't encode event: {}", e);
-                Error::Store(format!("Can't encode event: {}", e))
-            })?;
+        let bytes = borsh::to_vec(event).map_err(|e| {
+            error!("Can't encode event: {}", e);
+            Error::Store(format!("Can't encode event: {}", e))
+        })?;
 
         let bytes = if let Some(key_box) = &self.key_box {
             self.encrypt(key_box, &bytes)?
@@ -573,16 +585,14 @@ impl<P: PersistentActor> Store<P> {
     ///
     fn persist_state<E>(&mut self, event: &E, state: &P) -> Result<(), Error>
     where
-        E: Event + Serialize + DeserializeOwned,
+        E: Event + BorshSerialize + BorshDeserialize,
     {
         debug!("Persisting event: {:?}", event);
-        let bin_config = bincode::config::standard();
 
-        let bytes =
-            bincode::serde::encode_to_vec(event, bin_config).map_err(|e| {
-                error!("Can't encode event: {}", e);
-                Error::Store(format!("Can't encode event: {}", e))
-            })?;
+        let bytes = borsh::to_vec(event).map_err(|e| {
+            error!("Can't encode event: {}", e);
+            Error::Store(format!("Can't encode event: {}", e))
+        })?;
 
         let bytes = if let Some(key_box) = &self.key_box {
             self.encrypt(key_box, &bytes)?
@@ -605,20 +615,16 @@ impl<P: PersistentActor> Store<P> {
     ///
     fn last_event(&self) -> Result<Option<P::Event>, Error> {
         if let Some((_, data)) = self.events.last() {
-            let bin_config = bincode::config::standard();
-
             let data = if let Some(key_box) = &self.key_box {
                 self.decrypt(key_box, data.as_slice())?
             } else {
                 data
             };
-            let event: P::Event =
-                bincode::serde::decode_from_slice(&data, bin_config)
-                    .map_err(|e| {
-                        error!("Can't decode event: {}", e);
-                        Error::Store(format!("Can't decode event: {}", e))
-                    })?
-                    .0;
+
+            let event: P::Event = borsh::from_slice(&data).map_err(|e| {
+                error!("Can't decode event: {}", e);
+                Error::Store(format!("Can't decode event: {}", e))
+            })?;
 
             Ok(Some(event))
         } else {
@@ -644,22 +650,17 @@ impl<P: PersistentActor> Store<P> {
             data
         };
 
-        let bin_config = bincode::config::standard();
+        let state: (P, u64) = borsh::from_slice(&bytes).map_err(|e| {
+            error!("Can't decode state: {}", e);
+            Error::Store(format!("Can't decode state: {}", e))
+        })?;
 
-        let state: (P, u64) =
-            bincode::serde::decode_from_slice(&bytes, bin_config)
-                .map_err(|e| {
-                    error!("Can't decode state: {}", e);
-                    Error::Store(format!("Can't decode state: {}", e))
-                })?
-                .0;
         Ok(Some(state))
     }
 
     /// Retrieve events.
     fn events(&mut self, from: u64, to: u64) -> Result<Vec<P::Event>, Error> {
         let mut events = Vec::new();
-        let bin_config = bincode::config::standard();
 
         for i in from..=to {
             if let Ok(data) = self.events.get(&format!("{:020}", i)) {
@@ -669,13 +670,10 @@ impl<P: PersistentActor> Store<P> {
                     data
                 };
 
-                let event: P::Event =
-                    bincode::serde::decode_from_slice(&data, bin_config)
-                        .map_err(|e| {
-                            error!("Can't decode event: {}", e);
-                            Error::Store(format!("Can't decode event: {}", e))
-                        })?
-                        .0;
+                let event: P::Event = borsh::from_slice(&data).map_err(|e| {
+                    error!("Can't decode event: {}", e);
+                    Error::Store(format!("Can't decode event: {}", e))
+                })?;
 
                 events.push(event);
             } else {
@@ -697,15 +695,10 @@ impl<P: PersistentActor> Store<P> {
     ///
     fn snapshot(&mut self, actor: &P) -> Result<(), Error> {
         debug!("Snapshotting state: {:?}", actor);
-        let bin_config = bincode::config::standard();
 
         self.state_counter = self.event_counter;
 
-        let data = bincode::serde::encode_to_vec(
-            (actor, self.state_counter),
-            bin_config,
-        )
-        .map_err(|e| {
+        let data = borsh::to_vec(&(actor, self.state_counter)).map_err(|e| {
             error!("Can't encode actor: {}", e);
             Error::Store(format!("Can't encode actor: {}", e))
         })?;
@@ -955,7 +948,8 @@ pub enum StoreCommand<P, E> {
 impl<P, E> Message for StoreCommand<P, E>
 where
     P: PersistentActor,
-    E: Event + Serialize + DeserializeOwned,
+    P::Event: BorshSerialize + BorshDeserialize,
+    E: Event + BorshSerialize + BorshDeserialize,
 {
 }
 
@@ -964,6 +958,7 @@ where
 pub enum StoreResponse<P>
 where
     P: PersistentActor,
+    P::Event: BorshSerialize + BorshDeserialize,
 {
     None,
     Persisted,
@@ -976,10 +971,14 @@ where
 }
 
 /// Implements `Response` for store response.
-impl<P: PersistentActor> Response for StoreResponse<P> {}
+impl<P> Response for StoreResponse<P>
+where
+    P: PersistentActor,
+    P::Event: BorshSerialize + BorshDeserialize,
+{}
 
 /// Store event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum StoreEvent {
     Persisted,
     Snapshotted,
@@ -992,6 +991,7 @@ impl Event for StoreEvent {}
 impl<P> Actor for Store<P>
 where
     P: PersistentActor,
+    P::Event: BorshSerialize + BorshDeserialize,
 {
     type Message = StoreCommand<P, P::Event>;
     type Response = StoreResponse<P>;
@@ -1002,6 +1002,7 @@ where
 impl<P> Handler<Store<P>> for Store<P>
 where
     P: PersistentActor,
+    P::Event: BorshSerialize + BorshDeserialize,
 {
     async fn handle_message(
         &mut self,
@@ -1101,13 +1102,13 @@ mod tests {
 
     use async_trait::async_trait;
 
-    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize, Default)]
     struct TestActor {
         pub version: usize,
         pub value: i32,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize, Default)]
     struct TestActorLight {
         pub data: Vec<i32>,
     }
@@ -1129,12 +1130,12 @@ mod tests {
     impl Message for TestMessage {}
     impl Message for TestMessageLight {}
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
     struct TestEvent(i32);
 
     impl Event for TestEvent {}
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
     struct TestEventLight(Vec<i32>);
 
     impl Event for TestEventLight {}

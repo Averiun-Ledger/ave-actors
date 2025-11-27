@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing_test::traced_test;
 
 // Test actor with encryption
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize, Default)]
 struct EncryptedActor {
     pub counter: usize,
     pub data: String,
@@ -47,7 +47,7 @@ enum EncryptedResponse {
 
 impl Response for EncryptedResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize)]
 struct EncryptedEvent {
     pub counter: usize,
     pub data: String,
@@ -156,7 +156,7 @@ impl Handler<EncryptedActor> for EncryptedActor {
 }
 
 // Test actor with light persistence
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize, Default)]
 struct LightActor {
     pub value: i32,
 }
@@ -566,7 +566,7 @@ async fn test_persist_actor_error_scenarios() {
     tokio::spawn(async move { runner.run().await });
 
     // Test actor without store child
-    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    #[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize, Default)]
     struct NoStoreActor {
         value: i32,
     }
