@@ -96,6 +96,7 @@ async fn test_event_counter_starts_at_zero() {
         "test_zero",
         MemoryManager::default(),
         None,
+        CounterTestActor::create_initial(()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -120,6 +121,7 @@ async fn test_event_counter_after_first_event() {
         "test_first",
         MemoryManager::default(),
         None,
+        CounterTestActor::create_initial(()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -160,6 +162,7 @@ async fn test_event_counter_multiple_events() {
         "test_multiple",
         MemoryManager::default(),
         None,
+        CounterTestActor::create_initial(()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -204,6 +207,7 @@ async fn test_state_counter_after_snapshot() {
         "test_snapshot",
         MemoryManager::default(),
         None,
+        CounterTestActor::create_initial(()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -243,6 +247,7 @@ async fn test_recovery_with_events_after_snapshot() {
         "test_recovery",
         MemoryManager::default(),
         None,
+        CounterTestActor::create_initial(()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -291,6 +296,7 @@ async fn test_recovery_without_snapshot() {
         "test_no_snapshot",
         MemoryManager::default(),
         None,
+        CounterTestActor::create_initial(()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -301,13 +307,17 @@ async fn test_recovery_without_snapshot() {
         store_ref.ask(StoreCommand::Persist(event)).await.unwrap();
     }
 
-    // Recover should return None since there's no snapshot
+    // Recover should now replay events even without snapshot (bug fix)
     let result = store_ref.ask(StoreCommand::Recover).await.unwrap();
     match result {
-        StoreResponse::State(None) => {
-            // This is expected - no snapshot means no recovery
+        StoreResponse::State(Some(state)) => {
+            // With the fix, should recover from events: 10 + 20 + 30 = 60
+            assert_eq!(state.value, 60, "Should recover state by replaying events");
         }
-        _ => panic!("Expected None for recovery without snapshot"),
+        StoreResponse::State(None) => {
+            panic!("Expected state recovery from events, got None");
+        }
+        _ => panic!("Unexpected response type"),
     }
 }
 
@@ -323,6 +333,7 @@ async fn test_snapshot_at_zero() {
         "test_snap_zero",
         MemoryManager::default(),
         None,
+        CounterTestActor::create_initial(()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -362,6 +373,7 @@ async fn test_last_events_from_positions() {
         "test_last_from",
         MemoryManager::default(),
         None,
+        CounterTestActor::create_initial(()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -415,6 +427,7 @@ async fn test_multiple_snapshots_and_recoveries() {
         "test_multi_snap",
         MemoryManager::default(),
         None,
+        CounterTestActor::create_initial(()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -476,6 +489,7 @@ async fn test_event_counter_with_encryption() {
         "test_encrypted",
         MemoryManager::default(),
         Some(encrypt_key),
+        CounterTestActor::create_initial(()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();

@@ -266,7 +266,6 @@ where
         let prev_state = self.clone();
 
         if let Err(e) = self.apply(event) {
-            error!("");
             self.update(prev_state);
             return Err(e);
         }
@@ -285,7 +284,6 @@ where
         match response {
             StoreResponse::Persisted => Ok(()),
             StoreResponse::Error(error) => {
-                error!("");
                 Err(ActorError::Store(error.to_string()))
             }
             _ => Err(ActorError::UnexpectedResponse(
@@ -368,7 +366,7 @@ where
             None => ctx.path().key(),
         };
 
-        let store = Store::<Self>::new(name, &prefix, manager, key_box)
+        let store = Store::<Self>::new(name, &prefix, manager, key_box, self.clone())
             .map_err(|e| ActorError::Store(e.to_string()))?;
         let store = ctx.create_child("store", store).await?;
         let response = store.ask(StoreCommand::Recover).await?;
@@ -448,6 +446,9 @@ where
     /// Encrypted password for data encryption (XChaCha20-Poly1305).
     /// If None, data is stored unencrypted.
     key_box: Option<EncryptedKey>,
+    /// Initial state to use when recovering without a snapshot.
+    /// This is the state created with `create_initial(params)`.
+    initial_state: P,
     /// Phantom data to associate with the PersistentActor type.
     _phantom: PhantomData<P>,
 }
@@ -468,7 +469,10 @@ where
     /// # Arguments
     ///
     /// - name: The name of the actor.
+    /// - prefix: The prefix for the database keys.
     /// - manager: The database manager.
+    /// - key_box: Optional encryption key.
+    /// - initial_state: The initial state to use when recovering without a snapshot.
     ///
     /// # Returns
     ///
@@ -483,6 +487,7 @@ where
         prefix: &str,
         manager: impl DbManager<C, S>,
         key_box: Option<EncryptedKey>,
+        initial_state: P,
     ) -> Result<Self, Error>
     where
         C: Collection + 'static,
@@ -512,6 +517,7 @@ where
             events: Box::new(events),
             states: Box::new(states),
             key_box,
+            initial_state,
             _phantom: PhantomData,
         })
     }
@@ -600,9 +606,37 @@ where
             bytes
         };
 
+        // Calculate next event position (0-indexed)
+        // event_counter works like vector.len(): 0 means empty, 1 means one event at position 0
+        let next_event_number = self.event_counter;
+
+        debug!(
+            "Persisting event {} at index {} with LightPersistence",
+            std::any::type_name::<E>(),
+            next_event_number
+        );
+
+        // 1. First persist the event
+        let result = self
+            .events
+            .put(&format!("{:020}", next_event_number), &bytes);
+
+        // 2. Only increment counter if persist was successful
+        if result.is_ok() {
+            self.event_counter += 1;
+            debug!(
+                "Successfully persisted event, event_counter now: {}",
+                self.event_counter
+            );
+        } else {
+            return result;
+        }
+
+        // 3. NOW create snapshot with the updated event_counter
+        // This ensures state_counter = event_counter after the snapshot
         self.snapshot(state)?;
-        self.events
-            .put(&format!("{:020}", self.event_counter), &bytes)
+
+        Ok(())
     }
 
     /// Returns the last event.
@@ -777,8 +811,51 @@ where
                 Ok(Some(state))
             }
         } else {
-            debug!("No previous state found, starting fresh");
-            Ok(None)
+            debug!("No previous state found");
+
+            // Check if there are any events in the database
+            if let Some((key, ..)) = self.events.last() {
+                debug!("No snapshot but events found - replaying from beginning");
+
+                self.event_counter = key.parse::<u64>().map_err(|e| {
+                    Error::Store(format!("Can't parse event key: {}", e))
+                })? + 1;
+                self.state_counter = 0;
+
+                debug!(
+                    "Using provided initial state and applying {} events",
+                    self.event_counter
+                );
+
+                // Use the initial state provided during Store creation
+                // This was created with create_initial(params) by the user
+                let mut state = self.initial_state.clone();
+
+                // Apply ALL events from the beginning
+                let events = self.events(0, self.event_counter - 1)?;
+                debug!("Replaying {} events from scratch", events.len());
+
+                for (i, event) in events.iter().enumerate() {
+                    debug!("Applying event {} of {}", i + 1, events.len());
+                    state
+                        .apply(event)
+                        .map_err(|e| Error::Store(e.to_string()))?;
+                }
+
+                // Create snapshot for future recoveries
+                debug!("Creating snapshot after replaying events");
+                self.snapshot(&state)?;
+
+                debug!(
+                    "Recovery completed. Final event_counter: {}",
+                    self.event_counter
+                );
+
+                Ok(Some(state))
+            } else {
+                debug!("No previous state and no events found, starting fresh");
+                Ok(None)
+            }
         }
     }
 
@@ -1175,6 +1252,7 @@ mod tests {
                 "prefix",
                 memory_db,
                 Some(encrypt_key),
+                Self::create_initial(()),
             )
             .unwrap();
 
@@ -1227,6 +1305,7 @@ mod tests {
                 "prefix",
                 MemoryManager::default(),
                 None,
+                Self::create_initial(()),
             )
             .unwrap();
             let store = ctx.create_child("store", db).await.unwrap();
@@ -1384,6 +1463,7 @@ mod tests {
             "test",
             MemoryManager::default(),
             Some(encrypt_key),
+            TestActor::create_initial(()),
         )
         .unwrap();
         let store = system.create_root_actor("store", db).await.unwrap();
@@ -1540,6 +1620,7 @@ mod tests {
             "test",
             MemoryManager::default(),
             Some(encrypt_key),
+            TestActor::create_initial(()),
         )
         .unwrap();
         let data = b"Hello, world!";

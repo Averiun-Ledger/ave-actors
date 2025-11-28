@@ -452,7 +452,7 @@ async fn test_store_error_scenarios() {
         fail_operations: false,
     };
 
-    let store_result = Store::<EncryptedActor>::new("test", "prefix", failing_manager, None);
+    let store_result = Store::<EncryptedActor>::new("test", "prefix", failing_manager, None, EncryptedActor::create_initial(()));
     assert!(store_result.is_err());
 
     // Test store operations failure
@@ -461,7 +461,7 @@ async fn test_store_error_scenarios() {
         fail_operations: true,
     };
 
-    let store = Store::<EncryptedActor>::new("test", "prefix", failing_manager, None).unwrap();
+    let store = Store::<EncryptedActor>::new("test", "prefix", failing_manager, None, EncryptedActor::create_initial(())).unwrap();
     let store_ref = system.create_root_actor("failing_store", store).await.unwrap();
 
     // Test persist failure
@@ -502,7 +502,7 @@ async fn test_store_commands_coverage() {
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<EncryptedActor>::new("test", "prefix", MemoryManager::default(), None).unwrap();
+    let store = Store::<EncryptedActor>::new("test", "prefix", MemoryManager::default(), None, EncryptedActor::create_initial(())).unwrap();
     let store_ref = system.create_root_actor("coverage_store", store).await.unwrap();
 
     // Test all store commands for coverage
@@ -679,7 +679,7 @@ async fn test_encryption_failure_scenarios() {
     tokio::spawn(async move { runner.run().await });
 
     let encrypt_key = EncryptedKey::new(&[0u8; 32]).unwrap();
-    let store = Store::<EncryptedActor>::new("test", "prefix", MemoryManager::default(), Some(encrypt_key)).unwrap();
+    let store = Store::<EncryptedActor>::new("test", "prefix", MemoryManager::default(), Some(encrypt_key), EncryptedActor::create_initial(())).unwrap();
     let store_ref = system.create_root_actor("encrypted_store", store).await.unwrap();
 
     // Test encryption/decryption by persisting and recovering
