@@ -5,6 +5,7 @@ edition = { workspace = true}
 
 [dependencies]
 rusqlite = { version = "0.37.0", features = ["bundled"]}
+num_cpus = "1.16"
 store = { path = "../../store" }
 tracing = {workspace = true }
 

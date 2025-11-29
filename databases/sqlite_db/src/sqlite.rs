@@ -16,7 +16,7 @@ use rusqlite::{Connection, OpenFlags, Result as SQLiteResult, params};
 use tracing::info;
 
 use std::sync::{Arc, Mutex};
-use std::{fs, path::Path};
+use std::{env, fs, path::Path};
 
 /// SQLite database manager for persistent actor storage.
 /// Manages SQLite database connections and provides factory methods
@@ -336,17 +336,130 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection, Error> {
         Error::Store(format!("SQLite failed to open connection: {}", e))
     })?;
 
+    let cores = num_cpus::get();
+    let ram_mb = detect_total_memory_mb().unwrap_or(4096);
+    let profile = resolve_profile(cores, ram_mb);
+    info!(
+        "SQLite profile {:?} detected (cores: {}, RAM MB: {})",
+        profile, cores, ram_mb
+    );
+
+    let sync_mode = if env_bool("SQLITE_STRONG_DURABILITY").unwrap_or(false) {
+        "FULL"
+    } else {
+        "NORMAL"
+    };
+
+    let tuning = match profile {
+        SqliteProfile::Small => SqliteTuning {
+            wal_autocheckpoint_pages: 256,          // ~1MB WAL
+            journal_size_limit_bytes: 64 * 1024 * 1024,
+            cache_size_kb: -16_384,                 // ~16MB
+            mmap_size_bytes: 64 * 1024 * 1024,      // 64MB
+        },
+        SqliteProfile::Large => SqliteTuning {
+            wal_autocheckpoint_pages: 2000,         // ~8MB WAL
+            journal_size_limit_bytes: 256 * 1024 * 1024,
+            cache_size_kb: -131_072,                // ~128MB
+            mmap_size_bytes: 256 * 1024 * 1024,     // 256MB
+        },
+    };
+
     conn.execute_batch(
-        "
-        PRAGMA journal_mode=WAL;
-        PRAGMA synchronous=NORMAL;
-        ",
+        format!(
+            "
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous={};
+            PRAGMA wal_autocheckpoint={};       -- pages
+            PRAGMA journal_size_limit={};       -- bytes
+            PRAGMA temp_store=MEMORY;
+            PRAGMA cache_size={};               -- negative = KB
+            PRAGMA mmap_size={};                -- bytes
+            ",
+            sync_mode,
+            tuning.wal_autocheckpoint_pages,
+            tuning.journal_size_limit_bytes,
+            tuning.cache_size_kb,
+            tuning.mmap_size_bytes,
+        )
+        .as_str(),
     )
     .map_err(|e| {
         Error::Store(format!("SQLite failed to execute batch: {}", e))
     })?;
 
     Ok(conn)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SqliteProfile {
+    Small,
+    Large,
+}
+
+#[derive(Clone, Copy)]
+struct SqliteTuning {
+    wal_autocheckpoint_pages: i64,
+    journal_size_limit_bytes: i64,
+    cache_size_kb: i64,
+    mmap_size_bytes: i64,
+}
+
+#[cfg(target_os = "linux")]
+fn detect_total_memory_mb() -> Option<u64> {
+    let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
+    for line in meminfo.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb_str = rest.trim().split_whitespace().next()?;
+            let kb: u64 = kb_str.parse().ok()?;
+            return Some(kb / 1024);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detect_total_memory_mb() -> Option<u64> {
+    None
+}
+
+fn resolve_profile(cores: usize, ram_mb: u64) -> SqliteProfile {
+    if let Some(override_profile) = profile_override_from_env() {
+        return override_profile;
+    }
+    if cores <= 2 || ram_mb <= 1024 {
+        SqliteProfile::Small
+    } else {
+        SqliteProfile::Large
+    }
+}
+
+fn profile_override_from_env() -> Option<SqliteProfile> {
+    match env::var("SQLITE_PROFILE") {
+        Ok(val) => match val.to_lowercase().as_str() {
+            "small" => Some(SqliteProfile::Small),
+            "large" => Some(SqliteProfile::Large),
+            "auto" => None,
+            _ => None,
+        },
+        Err(_) => None,
+    }
+}
+
+fn env_bool(var: &str) -> Option<bool> {
+    match env::var(var) {
+        Ok(val) => {
+            let v = val.to_lowercase();
+            if ["1", "true", "yes", "on"].contains(&v.as_str()) {
+                Some(true)
+            } else if ["0", "false", "no", "off"].contains(&v.as_str()) {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
 }
 
 #[cfg(test)]
