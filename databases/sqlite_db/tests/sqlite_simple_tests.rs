@@ -10,7 +10,7 @@ use tempfile::tempdir;
 fn test_sqlite_manager_edge_cases() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test");
-    let manager = SqliteManager::new(&db_path.to_string_lossy()).unwrap();
+    let manager = SqliteManager::new(&db_path).unwrap();
 
     // Test collection operations
     let mut collection = manager.create_collection("test", "prefix").unwrap();
@@ -40,7 +40,7 @@ fn test_sqlite_manager_edge_cases() {
 fn test_sqlite_state_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("state_test");
-    let manager = SqliteManager::new(&db_path.to_string_lossy()).unwrap();
+    let manager = SqliteManager::new(&db_path).unwrap();
 
     let mut state = manager.create_state("state", "prefix").unwrap();
 
@@ -63,7 +63,7 @@ fn test_sqlite_state_operations() {
 fn test_sqlite_iteration() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("iteration");
-    let manager = SqliteManager::new(&db_path.to_string_lossy()).unwrap();
+    let manager = SqliteManager::new(&db_path).unwrap();
 
     let mut collection = manager.create_collection("iter", "prefix").unwrap();
 
@@ -89,7 +89,7 @@ fn test_sqlite_iteration() {
 fn test_sqlite_flush_and_name() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("flush_test");
-    let manager = SqliteManager::new(&db_path.to_string_lossy()).unwrap();
+    let manager = SqliteManager::new(&db_path).unwrap();
 
     let collection = manager.create_collection("test_collection", "prefix").unwrap();
     let state = manager.create_state("test_state", "prefix").unwrap();

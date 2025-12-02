@@ -15,7 +15,7 @@ use store::{
 use rusqlite::{Connection, OpenFlags, Result as SQLiteResult, params};
 use tracing::info;
 
-use std::sync::{Arc, Mutex};
+use std::{path::PathBuf, sync::{Arc, Mutex}};
 use std::{env, fs, path::Path};
 
 /// SQLite database manager for persistent actor storage.
@@ -53,7 +53,7 @@ impl SqliteManager {
     /// - The directory cannot be created
     /// - The SQLite connection cannot be opened
     ///
-    pub fn new(path: &str) -> Result<Self, Error> {
+    pub fn new(path: &PathBuf) -> Result<Self, Error> {
         info!("Creating SQLite database manager");
         if !Path::new(&path).exists() {
             info!("Path does not exist, creating it");
@@ -65,8 +65,10 @@ impl SqliteManager {
             })?;
         }
 
+        let path = path.join("database.db");
+
         info!("Opening SQLite connection");
-        let conn = open(format!("{}/database.db", path)).map_err(|e| {
+        let conn = open(&path).map_err(|e| {
             Error::CreateStore(format!("fail SQLite open connection: {}", e))
         })?;
 

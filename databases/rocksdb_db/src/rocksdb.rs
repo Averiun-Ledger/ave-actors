@@ -14,7 +14,7 @@ use rocksdb::{
 };
 use tracing::info;
 
-use std::{env, fs, path::Path, sync::Arc};
+use std::{env, fs, path::{Path, PathBuf}, sync::Arc};
 
 #[derive(Clone, Copy, Debug)]
 enum MachineProfile {
@@ -68,7 +68,7 @@ impl RocksDbManager {
     /// - Lists and opens all existing column families
     /// - Enables "create_if_missing" option
     ///
-    pub fn new(path: &str) -> Result<Self, Error> {
+    pub fn new(path: &PathBuf) -> Result<Self, Error> {
         info!("Creating RockDB database manager");
         if !Path::new(&path).exists() {
             info!("Path does not exist, creating it");
@@ -531,7 +531,7 @@ mod tests {
             let dir = tempfile::tempdir()
                 .expect("Can not create temporal directory.");
             let path = dir.keep();
-            RocksDbManager::new(path.to_string_lossy().as_ref())
+            RocksDbManager::new(&path)
                 .expect("Can not create the database.")
         }
     }
