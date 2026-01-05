@@ -6,7 +6,7 @@
 //!
 
 //pub mod sqlite;
-
+#[cfg(feature = "sqlite")]
 mod db;
 
 #[cfg(feature = "sqlite")]
