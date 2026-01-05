@@ -16,8 +16,8 @@
 //! Do NOT implement both `NotPersistentActor` and `PersistentActor` on the same type.
 //! This is enforced by convention but not by the type system.
 
-use actor::{Actor, ActorSystem, Handler, Message, Response, Event, ActorContext, ActorPath, NotPersistentActor};
-use store::store::{PersistentActor, FullPersistence};
+use ave_actors_actor::{Actor, ActorSystem, Handler, Message, Response, Event, ActorContext, ActorPath, NotPersistentActor};
+use ave_actors_store::store::{PersistentActor, FullPersistence};
 use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;
@@ -59,7 +59,7 @@ impl Handler<MyPersistentActor> for MyPersistentActor {
         _sender: ActorPath,
         _msg: PersistentMessage,
         _ctx: &mut ActorContext<MyPersistentActor>,
-    ) -> Result<PersistentResponse, actor::Error> {
+    ) -> Result<PersistentResponse, ave_actors_actor::Error> {
         Ok(PersistentResponse)
     }
 }
@@ -73,7 +73,7 @@ impl PersistentActor for MyPersistentActor {
         Self { counter: initial_value }
     }
 
-    fn apply(&mut self, _event: &Self::Event) -> Result<(), actor::Error> {
+    fn apply(&mut self, _event: &Self::Event) -> Result<(), ave_actors_actor::Error> {
         Ok(())
     }
 }
@@ -113,7 +113,7 @@ impl Handler<MyNonPersistentActor> for MyNonPersistentActor {
         _sender: ActorPath,
         _msg: NonPersistentMessage,
         _ctx: &mut ActorContext<MyNonPersistentActor>,
-    ) -> Result<NonPersistentResponse, actor::Error> {
+    ) -> Result<NonPersistentResponse, ave_actors_actor::Error> {
         Ok(NonPersistentResponse)
     }
 }
@@ -134,7 +134,7 @@ impl Actor for ParentActor {
     type Response = ();
     type Event = ();
 
-    async fn pre_start(&mut self, _ctx: &mut ActorContext<Self>) -> Result<(), actor::Error> {
+    async fn pre_start(&mut self, _ctx: &mut ActorContext<Self>) -> Result<(), ave_actors_actor::Error> {
         Ok(())
     }
 }
@@ -146,7 +146,7 @@ impl Handler<ParentActor> for ParentActor {
         _sender: ActorPath,
         _msg: ParentMessage,
         _ctx: &mut ActorContext<ParentActor>,
-    ) -> Result<(), actor::Error> {
+    ) -> Result<(), ave_actors_actor::Error> {
         Ok(())
     }
 }

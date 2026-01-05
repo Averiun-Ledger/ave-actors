@@ -2,12 +2,12 @@
 
 //! Comprehensive edge case tests for Store module to increase coverage
 
-use store::{
+use ave_actors_store::{
     store::{Store, PersistentActor, StoreCommand, StoreResponse, LightPersistence, FullPersistence},
     database::{Collection, DbManager, State}, memory::MemoryManager, Error as StoreError,
 };
 
-use actor::{
+use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, EncryptedKey, Error as ActorError, Event, Handler, Message, Response
 };
 

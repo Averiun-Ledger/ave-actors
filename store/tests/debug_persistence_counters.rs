@@ -1,11 +1,11 @@
 //! Test to debug the state_counter and event_counter values during LightPersistence
 
-use store::{
+use ave_actors_store::{
     store::{Store, PersistentActor, StoreCommand, StoreResponse, LightPersistence},
     memory::MemoryManager,
 };
 
-use actor::{
+use ave_actors_actor::{
     Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler, Message, Response
 };
 
@@ -53,7 +53,7 @@ impl Actor for DebugActor {
 impl Handler<DebugActor> for DebugActor {
     async fn handle_message(
         &mut self,
-        _sender: actor::ActorPath,
+        _sender: ave_actors_actor::ActorPath,
         msg: DebugMessage,
         _ctx: &mut ActorContext<DebugActor>,
     ) -> Result<DebugResponse, ActorError> {

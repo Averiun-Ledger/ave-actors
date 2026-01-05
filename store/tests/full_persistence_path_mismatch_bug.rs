@@ -1,8 +1,8 @@
 //! Test if the problem is related to actor path/prefix mismatch
 
-use actor::{Actor, ActorContext, ActorSystem, Handler, Message, Response, Event, Error as ActorError, ActorPath};
-use store::store::{PersistentActor, FullPersistence};
-use store::memory::MemoryManager;
+use ave_actors_actor::{Actor, ActorContext, ActorSystem, Handler, Message, Response, Event, Error as ActorError, ActorPath};
+use ave_actors_store::store::{PersistentActor, FullPersistence};
+use ave_actors_store::memory::MemoryManager;
 use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;

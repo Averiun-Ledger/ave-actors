@@ -5,12 +5,12 @@
 //! - event_counter = 1 means one event at position 0
 //! - state_counter = event_counter after snapshot means all events are applied
 
-use store::{
+use ave_actors_store::{
     store::{Store, PersistentActor, StoreCommand, StoreResponse, FullPersistence},
     memory::MemoryManager,
 };
 
-use actor::{
+use ave_actors_actor::{
     Actor, ActorContext, ActorSystem, EncryptedKey, Error as ActorError, Event, Handler, Message, Response
 };
 
@@ -73,7 +73,7 @@ impl PersistentActor for CounterTestActor {
 impl Handler<CounterTestActor> for CounterTestActor {
     async fn handle_message(
         &mut self,
-        _sender: actor::ActorPath,
+        _sender: ave_actors_actor::ActorPath,
         msg: CounterMessage,
         _ctx: &mut ActorContext<CounterTestActor>,
     ) -> Result<CounterResponse, ActorError> {

@@ -1,8 +1,8 @@
 //! Test specific scenario: brand new actor, ONE event, graceful stop, no recovery
 
-use actor::{Actor, ActorContext, ActorSystem, Handler, Message, Response, Event, Error as ActorError, ActorPath};
-use store::store::{PersistentActor, FullPersistence};
-use store::memory::MemoryManager;
+use ave_actors_actor::{Actor, ActorContext, ActorSystem, Handler, Message, Response, Event, Error as ActorError, ActorPath};
+use ave_actors_store::store::{PersistentActor, FullPersistence};
+use ave_actors_store::memory::MemoryManager;
 use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;
@@ -148,7 +148,7 @@ async fn test_single_event_no_recovery() {
 
 #[tokio::test]
 async fn test_debug_event_counter_after_first_event() {
-    use store::store::{Store, StoreCommand, StoreResponse};
+    use ave_actors_store::store::{Store, StoreCommand, StoreResponse};
 
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });

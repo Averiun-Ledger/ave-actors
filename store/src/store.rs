@@ -13,7 +13,7 @@ use crate::{
     error::Error,
 };
 
-use actor::{
+use ave_actors_actor::{
     Actor, ActorContext, ActorPath, EncryptedKey, Error as ActorError, Event,
     Handler, IntoActor, Message, Response,
 };
@@ -453,7 +453,7 @@ where
     _phantom: PhantomData<P>,
 }
 
-impl<P> actor::NotPersistentActor for Store<P>
+impl<P> ave_actors_actor::NotPersistentActor for Store<P>
 where
     P: PersistentActor,
     P::Event: BorshSerialize + BorshDeserialize,
@@ -1175,7 +1175,7 @@ mod tests {
     use super::*;
     use crate::memory::MemoryManager;
 
-    use actor::{ActorRef, ActorSystem, Error as ActorError};
+    use ave_actors_actor::{ActorRef, ActorSystem, Error as ActorError};
 
     use async_trait::async_trait;
 

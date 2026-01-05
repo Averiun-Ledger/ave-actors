@@ -1,11 +1,11 @@
 //! Investigate if LastEventNumber might be returning 0 incorrectly
 
-use store::{
+use ave_actors_store::{
     store::{Store, PersistentActor, StoreCommand, StoreResponse, FullPersistence},
     memory::MemoryManager,
 };
 
-use actor::{
+use ave_actors_actor::{
     Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler, Message, Response
 };
 
@@ -41,7 +41,7 @@ impl Actor for TestActor {
 impl Handler<TestActor> for TestActor {
     async fn handle_message(
         &mut self,
-        _sender: actor::ActorPath,
+        _sender: ave_actors_actor::ActorPath,
         _msg: TestMessage,
         _ctx: &mut ActorContext<TestActor>,
     ) -> Result<TestResponse, ActorError> {

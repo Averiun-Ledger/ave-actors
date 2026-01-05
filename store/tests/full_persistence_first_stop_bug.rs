@@ -1,9 +1,9 @@
 //! Test to investigate why FullPersistence doesn't recover state after FIRST stop
 //! when there was no previous snapshot
 
-use actor::{Actor, ActorContext, ActorSystem, Handler, Message, Response, Event, Error as ActorError, ActorPath};
-use store::store::{PersistentActor, FullPersistence};
-use store::memory::MemoryManager;
+use ave_actors_actor::{Actor, ActorContext, ActorSystem, Handler, Message, Response, Event, Error as ActorError, ActorPath};
+use ave_actors_store::store::{PersistentActor, FullPersistence};
+use ave_actors_store::memory::MemoryManager;
 use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;
@@ -162,7 +162,7 @@ async fn test_full_persistence_first_stop_no_previous_snapshot() {
 
 #[tokio::test]
 async fn test_investigate_stop_store_snapshot_creation() {
-    use store::store::{Store, StoreCommand, StoreResponse};
+    use ave_actors_store::store::{Store, StoreCommand, StoreResponse};
 
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
