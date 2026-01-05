@@ -21,7 +21,7 @@ use crate::actor::{Actor, Handler};
 /// Simply add this to your non-persistent actor:
 ///
 /// ```rust
-/// use actor::NotPersistentActor;
+/// use ave_actors_actor::NotPersistentActor;
 ///
 /// struct MyActor;
 ///

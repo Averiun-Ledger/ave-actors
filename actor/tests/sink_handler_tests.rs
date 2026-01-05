@@ -2,7 +2,7 @@
 
 //! Comprehensive tests for Sink and Handler modules to increase coverage
 
-use actor::{
+use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler, Message,
     Response, Sink, Subscriber,
 };
@@ -27,7 +27,7 @@ pub struct TestActor {
     pub counter: u32,
 }
 
-impl actor::NotPersistentActor for TestActor {}
+impl ave_actors_actor::NotPersistentActor for TestActor {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TestMessage {
@@ -213,7 +213,7 @@ pub struct FailingHandlerActor {
     pub fail_with_timeout: bool,
 }
 
-impl actor::NotPersistentActor for FailingHandlerActor {}
+impl ave_actors_actor::NotPersistentActor for FailingHandlerActor {}
 
 #[async_trait]
 impl Actor for FailingHandlerActor {
@@ -285,7 +285,7 @@ async fn test_message_serialization_edge_cases() {
     #[derive(Debug, Clone)]
     pub struct ComplexHandlerActor;
 
-    impl actor::NotPersistentActor for ComplexHandlerActor {}
+    impl ave_actors_actor::NotPersistentActor for ComplexHandlerActor {}
 
     #[async_trait]
     impl Actor for ComplexHandlerActor {
@@ -339,7 +339,7 @@ async fn test_message_ordering_and_mailbox() {
         pub received_order: Vec<u32>,
     }
 
-    impl actor::NotPersistentActor for OrderingActor {}
+    impl ave_actors_actor::NotPersistentActor for OrderingActor {}
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct OrderedMessage {
@@ -400,7 +400,7 @@ async fn test_handler_context_operations() {
         pub system_accessed: bool,
     }
 
-    impl actor::NotPersistentActor for ContextActor {}
+    impl ave_actors_actor::NotPersistentActor for ContextActor {}
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum ContextMessage {

@@ -2,7 +2,7 @@
 
 //! Tests for ActorPath edge cases and concurrent scenarios
 
-use actor::{Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler, Message, Response};
+use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler, Message, Response};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -98,7 +98,7 @@ struct ConcurrentActor {
     messages_received: Arc<Mutex<Vec<String>>>,
 }
 
-impl actor::NotPersistentActor for ConcurrentActor {}
+impl ave_actors_actor::NotPersistentActor for ConcurrentActor {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum ConcurrentMessage {

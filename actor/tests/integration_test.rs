@@ -2,7 +2,7 @@
 
 // Integrations tests for the actor module
 
-use actor::{
+use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
     Event, Handler, Message, Response,
 };
@@ -17,7 +17,7 @@ pub struct TestActor {
     pub state: usize,
 }
 
-impl actor::NotPersistentActor for TestActor {}
+impl ave_actors_actor::NotPersistentActor for TestActor {}
 
 // Defines parent command
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,7 +132,7 @@ pub struct ChildActor {
     pub state: usize,
 }
 
-impl actor::NotPersistentActor for ChildActor {}
+impl ave_actors_actor::NotPersistentActor for ChildActor {}
 
 // Defines child command.
 #[derive(Debug, Clone, Serialize, Deserialize)]

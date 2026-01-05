@@ -1,7 +1,7 @@
 
 
 //! Comprehensive edge case tests for Actor module to increase coverage
-use actor::{
+use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, ChildAction, Error,
     Event, Handler, Message, Response, SupervisionStrategy, Strategy,
     FixedIntervalStrategy, NoIntervalStrategy, CustomIntervalStrategy,
@@ -22,7 +22,7 @@ pub struct EdgeCaseActor {
     pub fail_on_message: bool,
 }
 
-impl actor::NotPersistentActor for EdgeCaseActor {}
+impl ave_actors_actor::NotPersistentActor for EdgeCaseActor {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EdgeCaseCommand {
@@ -165,7 +165,7 @@ impl Handler<EdgeCaseActor> for EdgeCaseActor {
 #[derive(Debug, Clone)]
 pub struct FailingActor;
 
-impl actor::NotPersistentActor for FailingActor {}
+impl ave_actors_actor::NotPersistentActor for FailingActor {}
 
 #[async_trait]
 impl Actor for FailingActor {
