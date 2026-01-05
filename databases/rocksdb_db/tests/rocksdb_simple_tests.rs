@@ -2,8 +2,8 @@
 
 //! Simple edge case tests for RocksDB database to increase coverage
 
-use rocksdb_db::RocksDbManager;
-use store::database::{Collection, DbManager, State};
+use ave_actors_rocksdb::RocksDbManager;
+use ave_actors_store::database::{Collection, DbManager, State};
 use tempfile::tempdir;
 
 #[test]

@@ -3,7 +3,7 @@
 //! RocksDB store implementation.
 //!
 
-use store::{
+use ave_actors_store::{
     Error,
     database::{Collection, DbManager, State},
 };
@@ -537,8 +537,8 @@ mod tests {
     }
 
     use super::*;
-    use store::test_store_trait;
+    use ave_actors_store::test_store_trait;
     test_store_trait! {
-        unit_test_rocksdb_manager:crate::rocksdb::RocksDbManager:RocksDbStore
+        unit_test_rocksdb_manager:crate::db::RocksDbManager:RocksDbStore
     }
 }
