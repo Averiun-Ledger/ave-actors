@@ -7,7 +7,7 @@
 
 //use crate::error::NodeError;
 
-use store::{
+use ave_actors_store::{
     Error,
     database::{Collection, DbManager, State},
 };
@@ -500,7 +500,7 @@ mod tests {
     }
 
     use super::*;
-    use store::{
+    use ave_actors_store::{
         database::{Collection, DbManager},
         test_store_trait,
     };

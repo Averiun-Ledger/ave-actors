@@ -7,6 +7,9 @@
 
 //pub mod sqlite;
 
-mod sqlite;
+mod db;
 
-pub use sqlite::{SqliteCollection, SqliteManager};
+#[cfg(feature = "sqlite")]
+pub use db::{SqliteCollection, SqliteManager};
+#[cfg(feature = "export-sqlite")]
+pub use rusqlite;

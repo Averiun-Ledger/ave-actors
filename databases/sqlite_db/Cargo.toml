@@ -1,14 +1,28 @@
 [package]
-name = "sqlite_db"
-version = { workspace = true}
-edition = { workspace = true}
+name = "ave-actors-sqlite"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-rusqlite = { version = "0.37.0", features = ["bundled"]}
+rusqlite = { version = "0.38.0", features = ["bundled"]}
 num_cpus = "1.16"
-store = { path = "../../store" }
+ave-actors-store = { workspace = true }
 tracing = {workspace = true }
 
 [dev-dependencies]
 serde = { workspace = true, features = ["derive"] }
 tempfile = {workspace = true }
+ave-actors-sqlite = { path = ".", features = ["sqlite"]}
+
+
+[features]
+sqlite = []
+export-sqlite = []
