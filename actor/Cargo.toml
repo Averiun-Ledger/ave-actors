@@ -25,7 +25,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"], optional = true}
 
 [dev-dependencies]
-ave-actors-actor = {workspace = true, features = ["test"] }
+ave-actors-actor = {path = ".", features = ["test"] }
 
 [features]
 test = ["tracing-subscriber"]
