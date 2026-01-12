@@ -40,14 +40,16 @@ impl EncryptedKey {
     pub fn new(key: &[u8; 32]) -> Result<Self, Error> {
         let mut encrypted_mem = EncryptedMem::new();
 
-        // Encrypt the key
         encrypted_mem.encrypt(key).map_err(|_| {
-            Error::Helper("Failed to encrypt key".to_owned())
+            tracing::error!("Key encryption failed");
+            Error::Helper {
+                name: "encryption".to_owned(),
+                reason: "Failed to encrypt key".to_owned(),
+            }
         })?;
 
-        Ok(Self {
-            key: Arc::new(encrypted_mem),
-        })
+        tracing::debug!("EncryptedKey created");
+        Ok(Self { key: Arc::new(encrypted_mem) })
     }
 
     /// Get the decrypted 32-byte key in a zeroizing container.
@@ -66,15 +68,18 @@ impl EncryptedKey {
     /// Returns an error if decryption fails, which would indicate memory
     /// corruption or a bug in the encryption implementation.
     pub fn key(&self) -> Result<Zeroizing<[u8; 32]>, Error> {
-        let decrypted = self
-            .key
-            .decrypt()
-            .map_err(|_| Error::Helper("Failed to decrypt key".to_owned()))?;
+        let decrypted = self.key.decrypt().map_err(|_| {
+            tracing::error!("Key decryption failed, possible memory corruption");
+            Error::Helper {
+                name: "decryption".to_owned(),
+                reason: "Failed to decrypt key".to_owned(),
+            }
+        })?;
 
-        // Use Zeroizing immediately to protect the key in memory
         let mut key_array = Zeroizing::new([0u8; 32]);
         key_array.copy_from_slice(decrypted.as_ref());
 
+        tracing::debug!("Key accessed");
         Ok(key_array)
     }
 }

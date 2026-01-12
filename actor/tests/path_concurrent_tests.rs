@@ -2,9 +2,10 @@
 
 //! Tests for ActorPath edge cases and concurrent scenarios
 
-use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler, Message, Response};
+use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler, Message, Response, build_tracing_subscriber};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tracing::info_span;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -145,6 +146,10 @@ impl Actor for ConcurrentActor {
     type Message = ConcurrentMessage;
     type Response = ConcurrentResponse;
     type Event = ConcurrentEvent;
+
+    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        info_span!("ConcurrentActor", id = %id)
+    }
 }
 
 #[async_trait]
@@ -205,7 +210,7 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
                     let _response = child.ask(ConcurrentMessage::AddMessage(message.clone())).await?;
                     Ok(ConcurrentResponse::ChildResponse(format!("Sent '{}' to child", message)))
                 } else {
-                    Err(Error::Functional(format!("Child '{}' not found", child_name)))
+                    Err(Error::Functional { description: format!("Child '{}' not found", child_name) })
                 }
             }
         }
@@ -215,6 +220,7 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
 // Test concurrent message handling
 #[tokio::test]
 async fn test_concurrent_message_handling() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -256,6 +262,7 @@ async fn test_concurrent_message_handling() {
 // Test multiple actors communicating
 #[tokio::test]
 async fn test_multiple_actor_communication() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -303,6 +310,7 @@ async fn test_multiple_actor_communication() {
 // Test event subscription with multiple subscribers
 #[tokio::test]
 async fn test_multiple_event_subscribers() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -335,6 +343,7 @@ async fn test_multiple_event_subscribers() {
 // Test actor lifecycle with rapid creation/destruction
 #[tokio::test]
 async fn test_rapid_actor_lifecycle() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -367,6 +376,7 @@ async fn test_rapid_actor_lifecycle() {
 // Test error handling in concurrent scenarios
 #[tokio::test]
 async fn test_concurrent_error_handling() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -378,8 +388,8 @@ async fn test_concurrent_error_handling() {
 
     assert!(result.is_err());
 
-    if let Err(Error::Functional(msg)) = result {
-        assert!(msg.contains("Child 'nonexistent' not found"));
+    if let Err(Error::Functional { description }) = result {
+        assert!(description.contains("Child 'nonexistent' not found"));
     } else {
         panic!("Expected functional error");
     }
@@ -388,6 +398,7 @@ async fn test_concurrent_error_handling() {
 // Test system shutdown with active actors
 #[tokio::test]
 async fn test_system_shutdown_with_active_actors() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     let runner_handle = tokio::spawn(async move { runner.run().await });
 

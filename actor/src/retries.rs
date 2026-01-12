@@ -14,7 +14,7 @@ use crate::{
 use async_trait::async_trait;
 
 use std::fmt::Debug;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info_span, warn};
 
 /// Retry actor.
 pub struct RetryActor<T>
@@ -70,12 +70,16 @@ where
     type Response = ();
     type Event = ();
 
+    
+    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        info_span!("RetryActor", id = %id)
+    }
+
     async fn pre_start(
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
-        debug!("RetryActor pre_start");
-        let _ = ctx.create_child("target", self.target.clone()).await?;
+        ctx.create_child("target", self.target.clone()).await?;
         Ok(())
     }
 }
@@ -97,49 +101,42 @@ where
                     self.retries += 1;
                     if self.retries <= self.retry_strategy.max_retries() {
                         debug!(
-                            "Retry {}/{}.",
-                            self.retries,
-                            self.retry_strategy.max_retries()
+                            retry = self.retries,
+                            max_retries = self.retry_strategy.max_retries(),
+                            "Executing retry"
                         );
 
                         // Send retry to parent.
-                        if let Some(child) = ctx.get_child::<T>("target").await && child.tell(self.message.clone()).await.is_err() 
+                        if let Some(child) = ctx.get_child::<T>("target").await && child.tell(self.message.clone()).await.is_err()
                         {
-                            error!("Cannot initiate retry to send message");
-                            
+                            error!("Failed to send retry message to target");
                         }
 
                         if let Some(actor) = ctx.reference().await {
-                            if let Some(duration) =
-                                self.retry_strategy.next_backoff()
-                            {
+                            if let Some(duration) = self.retry_strategy.next_backoff() {
                                 let actor: ActorRef<RetryActor<T>> = actor;
                                 tokio::spawn(async move {
-                                    debug!("Backoff for {:?}", &duration);
                                     tokio::time::sleep(duration).await;
-                                    let _ =
-                                        actor.tell(RetryMessage::Retry).await;
+                                    let _ = actor.tell(RetryMessage::Retry).await;
                                 });
                             }
                         } else {
-                            let _ = ctx
-                                .emit_error(Error::Send(
-                                    "Cannot get retry actor in".to_owned(),
-                                ))
-                                .await;
+                            error!("Failed to get retry actor reference");
+                            let _ = ctx.emit_error(Error::Send {
+                                reason: "Cannot get retry actor reference".to_owned(),
+                            }).await;
                         };
                         // Next retry
                     } else {
-                        warn!("Max retries reached.");
-                        if let Err(e) = ctx.emit_error(Error::ReTry).await {
-                            error!("Error in emit_error {}", e);
+                        warn!("Max retries reached");
+                        if let Err(e) = ctx.emit_error(Error::Retry).await {
+                            error!(error = ?e, "Failed to emit retry error");
                         };
                     }
                 }
             }
             RetryMessage::End => {
                 self.is_end = true;
-                debug!("RetryActor end");
                 ctx.stop(None).await;
             }
         }
@@ -151,10 +148,11 @@ where
 mod tests {
 
     use tokio_util::sync::CancellationToken;
+    use tracing::info_span;
 
     use super::*;
 
-    use crate::{ActorSystem, Error, FixedIntervalStrategy};
+    use crate::{ActorSystem, Error, FixedIntervalStrategy, build_tracing_subscriber};
 
     use std::time::Duration;
 
@@ -169,9 +167,14 @@ mod tests {
 
     #[async_trait]
     impl Actor for SourceActor {
+
         type Message = SourceMessage;
         type Response = ();
         type Event = ();
+
+        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("SourceActor", id = %id)
+        }
 
         async fn pre_start(
             &mut self,
@@ -243,6 +246,10 @@ mod tests {
         type Message = TargetMessage;
         type Response = ();
         type Event = ();
+
+        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("TargetActor", id = %id)
+        }
     }
 
     #[async_trait]
@@ -272,6 +279,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_actor() {
+        build_tracing_subscriber();
         let (system, mut runner) = ActorSystem::create(CancellationToken::new());
 
         tokio::spawn(async move {

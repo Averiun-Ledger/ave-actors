@@ -6,13 +6,13 @@ use ave_actors_store::{
 };
 
 use ave_actors_actor::{
-    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler, Message, Response
+    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber
 };
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use tracing_test::traced_test;
+use tracing::info_span;
 
 #[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize, Default)]
 struct DebugActor {
@@ -47,6 +47,9 @@ impl Actor for DebugActor {
     type Message = DebugMessage;
     type Response = DebugResponse;
     type Event = DebugEvent;
+                        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("DebugActor", id = %id)
+        }
 }
 
 #[async_trait]
@@ -82,8 +85,9 @@ impl PersistentActor for DebugActor {
 }
 
 #[tokio::test]
-#[traced_test]
+
 async fn test_debug_light_persistence_counters() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 

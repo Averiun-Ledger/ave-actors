@@ -29,7 +29,7 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
         prefix: &str,
     ) -> Result<MemoryStore, Error> {
         let mut data_lock = self.data.write().map_err(|e| {
-            Error::Store(format!("Can not lock manager data: {}", e))
+            Error::Store { operation: "lock_manager_data".to_owned(), reason: format!("{}", e) }
         })?;
         let data = if let Some(data) = data_lock
             .get(&(name.to_owned(), prefix.to_owned()))
@@ -56,7 +56,7 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
         prefix: &str,
     ) -> Result<MemoryStore, Error> {
         let mut data_lock = self.data.write().map_err(|e| {
-            Error::Store(format!("Can not lock manager data: {}", e))
+            Error::Store { operation: "lock_manager_data".to_owned(), reason: format!("{}", e) }
         })?;
         let data = if let Some(data) = data_lock
             .get(&(name.to_owned(), prefix.to_owned()))
@@ -96,12 +96,12 @@ impl State for MemoryStore {
         let lock = self
             .data
             .read()
-            .map_err(|e| Error::Store(format!("Can not lock data: {}", e)))?;
+            .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?;
 
         match lock.get(&self.prefix) {
             Some(value) => Ok(value.clone()),
             None => {
-                Err(Error::EntryNotFound("Query returned no rows".to_owned()))
+                Err(Error::EntryNotFound { key: "Query returned no rows".to_owned() })
             }
         }
     }
@@ -110,7 +110,7 @@ impl State for MemoryStore {
         let mut lock = self
             .data
             .write()
-            .map_err(|e| Error::Store(format!("Can not lock data: {}", e)))?;
+            .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?;
         lock.insert(self.prefix.clone(), data.to_vec());
 
         Ok(())
@@ -120,11 +120,11 @@ impl State for MemoryStore {
         let mut lock = self
             .data
             .write()
-            .map_err(|e| Error::Store(format!("Can not lock data: {}", e)))?;
+            .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?;
         match lock.remove(&self.prefix) {
             Some(_) => Ok(()),
             None => {
-                Err(Error::EntryNotFound("Query returned no rows".to_owned()))
+                Err(Error::EntryNotFound { key: "Query returned no rows".to_owned() })
             }
         }
     }
@@ -133,7 +133,7 @@ impl State for MemoryStore {
         let mut lock = self
             .data
             .write()
-            .map_err(|e| Error::Store(format!("Can not lock data: {}", e)))?;
+            .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?;
 
         let keys_to_remove: Vec<String> = lock
             .keys()
@@ -157,12 +157,12 @@ impl Collection for MemoryStore {
         let lock = self
             .data
             .read()
-            .map_err(|e| Error::Store(format!("Can not lock data: {}", e)))?;
+            .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?;
 
         match lock.get(&key) {
             Some(value) => Ok(value.clone()),
             None => {
-                Err(Error::EntryNotFound("Query returned no rows".to_owned()))
+                Err(Error::EntryNotFound { key: "Query returned no rows".to_owned() })
             }
         }
     }
@@ -172,7 +172,7 @@ impl Collection for MemoryStore {
         let mut lock = self
             .data
             .write()
-            .map_err(|e| Error::Store(format!("Can not lock data: {}", e)))?;
+            .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?;
         lock.insert(key, data.to_vec());
 
         Ok(())
@@ -183,11 +183,11 @@ impl Collection for MemoryStore {
         let mut lock = self
             .data
             .write()
-            .map_err(|e| Error::Store(format!("Can not lock data: {}", e)))?;
+            .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?;
         match lock.remove(&key) {
             Some(_) => Ok(()),
             None => {
-                Err(Error::EntryNotFound("Query returned no rows".to_owned()))
+                Err(Error::EntryNotFound { key: "Query returned no rows".to_owned() })
             }
         }
     }
@@ -196,7 +196,7 @@ impl Collection for MemoryStore {
         let mut lock = self
             .data
             .write()
-            .map_err(|e| Error::Store(format!("Can not lock data: {}", e)))?;
+            .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?;
 
         let keys_to_remove: Vec<String> = lock
             .keys()

@@ -1,13 +1,14 @@
 //! Test to investigate why FullPersistence doesn't recover state after FIRST stop
 //! when there was no previous snapshot
 
-use ave_actors_actor::{Actor, ActorContext, ActorSystem, Handler, Message, Response, Event, Error as ActorError, ActorPath};
+use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber};
 use ave_actors_store::store::{PersistentActor, FullPersistence};
 use ave_actors_store::memory::MemoryManager;
 use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -40,6 +41,10 @@ impl Actor for TestActor {
     type Message = TestMessage;
     type Response = TestResponse;
     type Event = AddEvent;
+
+    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("TestActor", id = %id)
+        }
 
     async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
         let manager_ref = SHARED_MANAGER_FIRST_STOP.get_or_init(|| {
@@ -94,6 +99,7 @@ impl PersistentActor for TestActor {
 
 #[tokio::test]
 async fn test_full_persistence_first_stop_no_previous_snapshot() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -162,6 +168,7 @@ async fn test_full_persistence_first_stop_no_previous_snapshot() {
 
 #[tokio::test]
 async fn test_investigate_stop_store_snapshot_creation() {
+    build_tracing_subscriber();
     use ave_actors_store::store::{Store, StoreCommand, StoreResponse};
 
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());

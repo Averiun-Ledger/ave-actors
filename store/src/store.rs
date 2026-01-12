@@ -29,7 +29,7 @@ use chacha20poly1305::{
 
 use serde::{Deserialize, Serialize};
 
-use tracing::{debug, error};
+use tracing::{debug, error, info_span, warn};
 
 use std::{fmt::Debug, marker::PhantomData};
 
@@ -257,9 +257,9 @@ where
         let store = match ctx.get_child::<Store<Self>>("store").await {
             Some(store) => store,
             None => {
-                return Err(ActorError::Store(
-                    "Can't get store actor".to_string(),
-                ));
+                return Err(ActorError::NotFound {
+                    path: ctx.path().clone() / "store",
+                });
             }
         };
 
@@ -274,22 +274,29 @@ where
             PersistenceType::Light => store
                 .ask(StoreCommand::PersistLight(event.clone(), self.clone()))
                 .await
-                .map_err(|e| ActorError::Store(e.to_string()))?,
+                .map_err(|e| ActorError::StoreOperation {
+                    operation: "persist ligth".to_owned(),
+                    reason: e.to_string(),
+                })?,
             PersistenceType::Full => store
                 .ask(StoreCommand::Persist(event.clone()))
                 .await
-                .map_err(|e| ActorError::Store(e.to_string()))?,
+                .map_err(|e| ActorError::StoreOperation {
+                    operation: "persist".to_owned(),
+                    reason: e.to_string(),
+                })?,
         };
 
         match response {
             StoreResponse::Persisted => Ok(()),
-            StoreResponse::Error(error) => {
-                Err(ActorError::Store(error.to_string()))
-            }
-            _ => Err(ActorError::UnexpectedResponse(
-                ActorPath::from(format!("{}/store", ctx.path().clone())),
-                "StoreResponse::Persisted".to_owned(),
-            )),
+            StoreResponse::Error(error) => Err(ActorError::StoreOperation {
+                operation: "response".to_owned(),
+                reason: error.to_string(),
+            }),
+            _ => Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from(format!("{}/store", ctx.path().clone())),
+                expected: "StoreResponse::Persisted".to_owned(),
+            }),
         }
     }
 
@@ -314,15 +321,18 @@ where
         let store = match ctx.get_child::<Store<Self>>("store").await {
             Some(store) => store,
             None => {
-                return Err(ActorError::Store(
-                    "Can't get store actor".to_string(),
-                ));
+                return Err(ActorError::NotFound {
+                    path: ctx.path().clone() / "store",
+                });
             }
         };
         store
             .ask(StoreCommand::Snapshot(self.clone()))
             .await
-            .map_err(|e| ActorError::Store(e.to_string()))?;
+            .map_err(|e| ActorError::StoreOperation {
+                operation: "snapshot".to_owned(),
+                reason: e.to_string(),
+            })?;
         Ok(())
     }
 
@@ -366,8 +376,12 @@ where
             None => ctx.path().key(),
         };
 
-        let store = Store::<Self>::new(name, &prefix, manager, key_box, self.clone())
-            .map_err(|e| ActorError::Store(e.to_string()))?;
+        let store =
+            Store::<Self>::new(name, &prefix, manager, key_box, self.clone())
+                .map_err(|e| ActorError::StoreOperation {
+                operation: "store_operation".to_owned(),
+                reason: e.to_string(),
+            })?;
         let store = ctx.create_child("store", store).await?;
         let response = store.ask(StoreCommand::Recover).await?;
 
@@ -404,14 +418,19 @@ where
                 // Only snapshot if there are events
                 let response = store.ask(StoreCommand::LastEventNumber).await?;
                 if let StoreResponse::LastEventNumber(count) = response
-                    && count > 0 {
-                        let _ = store.ask(StoreCommand::Snapshot(self.clone())).await?;
-                    }
+                    && count > 0
+                {
+                    let _ =
+                        store.ask(StoreCommand::Snapshot(self.clone())).await?;
+                }
             }
 
             store.ask_stop().await
         } else {
-            Err(ActorError::Store("Can't get store".to_string()))
+            Err(ActorError::StoreOperation {
+                operation: "get_store".to_owned(),
+                reason: "Can't get store".to_string(),
+            })
         }
     }
 }
@@ -457,7 +476,8 @@ impl<P> ave_actors_actor::NotPersistentActor for Store<P>
 where
     P: PersistentActor,
     P::Event: BorshSerialize + BorshDeserialize,
-{}
+{
+}
 
 impl<P> Store<P>
 where
@@ -540,7 +560,10 @@ where
 
         let bytes = borsh::to_vec(event).map_err(|e| {
             error!("Can't encode event: {}", e);
-            Error::Store(format!("Can't encode event: {}", e))
+            Error::Store {
+                operation: "encode_event".to_owned(),
+                reason: format!("{}", e),
+            }
         })?;
 
         let bytes = if let Some(key_box) = &self.key_box {
@@ -597,7 +620,10 @@ where
 
         let bytes = borsh::to_vec(event).map_err(|e| {
             error!("Can't encode event: {}", e);
-            Error::Store(format!("Can't encode event: {}", e))
+            Error::Store {
+                operation: "encode_event".to_owned(),
+                reason: format!("{}", e),
+            }
         })?;
 
         let bytes = if let Some(key_box) = &self.key_box {
@@ -657,7 +683,10 @@ where
 
             let event: P::Event = borsh::from_slice(&data).map_err(|e| {
                 error!("Can't decode event: {}", e);
-                Error::Store(format!("Can't decode event: {}", e))
+                Error::Store {
+                    operation: "decode_event".to_owned(),
+                    reason: format!("{}", e),
+                }
             })?;
 
             Ok(Some(event))
@@ -670,7 +699,7 @@ where
         let data = match self.states.get() {
             Ok(data) => data,
             Err(e) => {
-                if let Error::EntryNotFound(_) = e {
+                if let Error::EntryNotFound { .. } = e {
                     return Ok(None);
                 } else {
                     return Err(e);
@@ -686,7 +715,10 @@ where
 
         let state: (P, u64) = borsh::from_slice(&bytes).map_err(|e| {
             error!("Can't decode state: {}", e);
-            Error::Store(format!("Can't decode state: {}", e))
+            Error::Store {
+                operation: "decode_state".to_owned(),
+                reason: format!("{}", e),
+            }
         })?;
 
         Ok(Some(state))
@@ -704,10 +736,14 @@ where
                     data
                 };
 
-                let event: P::Event = borsh::from_slice(&data).map_err(|e| {
-                    error!("Can't decode event: {}", e);
-                    Error::Store(format!("Can't decode event: {}", e))
-                })?;
+                let event: P::Event =
+                    borsh::from_slice(&data).map_err(|e| {
+                        error!("Can't decode event: {}", e);
+                        Error::Store {
+                            operation: "decode_event".to_owned(),
+                            reason: format!("{}", e),
+                        }
+                    })?;
 
                 events.push(event);
             } else {
@@ -732,13 +768,17 @@ where
 
         self.state_counter = self.event_counter;
 
-        let data = borsh::to_vec(&(actor, self.state_counter)).map_err(|e| {
-            error!("Can't encode actor: {}", e);
-            Error::Store(format!("Can't encode actor: {}", e))
-        })?;
+        let data =
+            borsh::to_vec(&(actor, self.state_counter)).map_err(|e| {
+                error!("Can't encode actor: {}", e);
+                Error::Store {
+                    operation: "encode_actor".to_owned(),
+                    reason: format!("{}", e),
+                }
+            })?;
 
         let bytes = if let Some(key_box) = &self.key_box {
-            self.encrypt(key_box ,data.as_slice())?
+            self.encrypt(key_box, data.as_slice())?
         } else {
             data
         };
@@ -762,9 +802,11 @@ where
             debug!("Recovered state with counter: {}", counter);
 
             if let Some((key, ..)) = self.events.last() {
-                self.event_counter = key.parse::<u64>().map_err(|e| {
-                    Error::Store(format!("Can't parse event key: {}", e))
-                })? + 1;
+                self.event_counter =
+                    key.parse::<u64>().map_err(|e| Error::Store {
+                        operation: "parse_event_key".to_owned(),
+                        reason: format!("{}", e),
+                    })? + 1;
 
                 debug!(
                     "Recovery state: event_counter={}, state_counter={}",
@@ -772,6 +814,11 @@ where
                 );
 
                 if self.event_counter != self.state_counter {
+                    warn!(
+                        event_counter = self.event_counter,
+                        state_counter = self.state_counter,
+                        "State mismatch detected, replaying events"
+                    );
                     debug!(
                         "Applying events from {} to {}",
                         self.state_counter,
@@ -783,9 +830,10 @@ where
 
                     for (i, event) in events.iter().enumerate() {
                         debug!("Applying event {} of {}", i + 1, events.len());
-                        state
-                            .apply(event)
-                            .map_err(|e| Error::Store(e.to_string()))?;
+                        state.apply(event).map_err(|e| Error::Store {
+                            operation: "apply_event".to_owned(),
+                            reason: e.to_string(),
+                        })?;
                     }
 
                     debug!(
@@ -815,11 +863,15 @@ where
 
             // Check if there are any events in the database
             if let Some((key, ..)) = self.events.last() {
-                debug!("No snapshot but events found - replaying from beginning");
+                debug!(
+                    "No snapshot but events found - replaying from beginning"
+                );
 
-                self.event_counter = key.parse::<u64>().map_err(|e| {
-                    Error::Store(format!("Can't parse event key: {}", e))
-                })? + 1;
+                self.event_counter =
+                    key.parse::<u64>().map_err(|e| Error::Store {
+                        operation: "parse_event_key".to_owned(),
+                        reason: format!("{}", e),
+                    })? + 1;
                 self.state_counter = 0;
 
                 debug!(
@@ -837,9 +889,10 @@ where
 
                 for (i, event) in events.iter().enumerate() {
                     debug!("Applying event {} of {}", i + 1, events.len());
-                    state
-                        .apply(event)
-                        .map_err(|e| Error::Store(e.to_string()))?;
+                    state.apply(event).map_err(|e| Error::Store {
+                        operation: "apply_event".to_owned(),
+                        reason: e.to_string(),
+                    })?;
                 }
 
                 // Create snapshot for future recoveries
@@ -905,10 +958,14 @@ where
         if let Ok(key) = key_box.key() {
             // Validate key size (XChaCha20-Poly1305 requires exactly 32 bytes)
             if key.len() != 32 {
-                return Err(Error::Store(format!(
-                    "Invalid key length: expected 32 bytes, got {}",
-                    key.len()
-                )));
+                error!(expected = 32, got = key.len(), "Invalid encryption key length");
+                return Err(Error::Store {
+                    operation: "validate_key_length".to_owned(),
+                    reason: format!(
+                        "Invalid key length: expected 32 bytes, got {}",
+                        key.len()
+                    ),
+                });
             }
 
             // Create cipher from key
@@ -920,16 +977,25 @@ where
 
             // Encrypt and authenticate the data
             // XChaCha20-Poly1305 provides both confidentiality and authenticity
-            let ciphertext: Vec<u8> =
-                cipher.encrypt(&nonce, bytes.as_ref()).map_err(|e| {
-                    Error::Store(format!("Encryption failed: {}", e))
+            let ciphertext: Vec<u8> = cipher
+                .encrypt(&nonce, bytes.as_ref())
+                .map_err(|e| {
+                    error!(error = %e, "Encryption failed");
+                    Error::Store {
+                        operation: "encrypt_data".to_owned(),
+                        reason: format!("{}", e),
+                    }
                 })?;
 
             // Prepend nonce to ciphertext for storage
             // Format: [nonce (24 bytes) || ciphertext || poly1305_tag (16 bytes)]
             Ok([nonce.to_vec(), ciphertext].concat())
         } else {
-            Err(Error::Store("Can't decrypt key".to_owned()))
+            error!("Failed to decrypt encryption key");
+            Err(Error::Store {
+                operation: "decrypt_key".to_owned(),
+                reason: "Can't decrypt key".to_owned(),
+            })
         }
     }
 
@@ -965,20 +1031,32 @@ where
     ) -> Result<Vec<u8>, Error> {
         // Validate ciphertext length (nonce + tag minimum = 24 + 16 = 40 bytes)
         if ciphertext.len() < NONCE_SIZE + 16 {
-            return Err(Error::Store(format!(
-                "Invalid ciphertext length: expected at least {} bytes, got {}",
-                NONCE_SIZE + 16,
-                ciphertext.len()
-            )));
+            warn!(
+                expected_min = NONCE_SIZE + 16,
+                got = ciphertext.len(),
+                "Invalid ciphertext length, possible corruption"
+            );
+            return Err(Error::Store {
+                operation: "validate_ciphertext".to_owned(),
+                reason: format!(
+                    "Invalid ciphertext length: expected at least {} bytes, got {}",
+                    NONCE_SIZE + 16,
+                    ciphertext.len()
+                ),
+            });
         }
 
         if let Ok(key) = key_box.key() {
             // Validate key size (XChaCha20-Poly1305 requires exactly 32 bytes)
             if key.len() != 32 {
-                return Err(Error::Store(format!(
-                    "Invalid key length: expected 32 bytes, got {}",
-                    key.len()
-                )));
+                error!(expected = 32, got = key.len(), "Invalid decryption key length");
+                return Err(Error::Store {
+                    operation: "validate_key_length".to_owned(),
+                    reason: format!(
+                        "Invalid key length: expected 32 bytes, got {}",
+                        key.len()
+                    ),
+                });
             }
 
             // Extract nonce from the beginning of ciphertext
@@ -994,15 +1072,23 @@ where
             // This will fail if data has been tampered with or corrupted
             let plaintext =
                 cipher.decrypt(nonce, ciphertext_data).map_err(|e| {
-                    Error::Store(format!(
-                        "Decryption failed (possible tampering): {}",
-                        e
-                    ))
+                    warn!(error = %e, "Decryption failed, possible tampering or corruption");
+                    Error::Store {
+                        operation: "decrypt_data".to_owned(),
+                        reason: format!(
+                            "Decryption failed (possible tampering): {}",
+                            e
+                        ),
+                    }
                 })?;
 
             Ok(plaintext)
         } else {
-            Err(Error::Store("Can't decrypt key".to_owned()))
+            error!("Failed to decrypt decryption key");
+            Err(Error::Store {
+                operation: "decrypt_key".to_owned(),
+                reason: "Can't decrypt key".to_owned(),
+            })
         }
     }
 }
@@ -1052,10 +1138,13 @@ impl<P> Response for StoreResponse<P>
 where
     P: PersistentActor,
     P::Event: BorshSerialize + BorshDeserialize,
-{}
+{
+}
 
 /// Store event.
-#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum StoreEvent {
     Persisted,
     Snapshotted,
@@ -1073,6 +1162,10 @@ where
     type Message = StoreCommand<P, P::Event>;
     type Response = StoreResponse<P>;
     type Event = StoreEvent;
+
+    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        info_span!("Store", id = %id)
+    }
 }
 
 #[async_trait]
@@ -1125,10 +1218,10 @@ where
             },
             StoreCommand::GetEvents { from, to } => {
                 let events = self.events(from, to).map_err(|e| {
-                    ActorError::Store(format!(
-                        "Unable to get events range: {}",
-                        e
-                    ))
+                    ActorError::StoreOperation {
+                        operation: "get_events_range".to_owned(),
+                        reason: format!("Unable to get events range: {}", e),
+                    }
                 })?;
                 Ok(StoreResponse::Events(events))
             }
@@ -1156,10 +1249,13 @@ where
             StoreCommand::LastEventsFrom(from) => {
                 let events =
                     self.events(from, self.event_counter).map_err(|e| {
-                        ActorError::Store(format!(
-                            "Unable to get the latest events: {}",
-                            e
-                        ))
+                        ActorError::StoreOperation {
+                            operation: "get_latest_events".to_owned(),
+                            reason: format!(
+                                "Unable to get the latest events: {}",
+                                e
+                            ),
+                        }
                     })?;
                 Ok(StoreResponse::Events(events))
             }
@@ -1171,21 +1267,38 @@ where
 mod tests {
     use std::vec;
     use tokio_util::sync::CancellationToken;
+    use tracing::info_span;
 
     use super::*;
     use crate::memory::MemoryManager;
 
-    use ave_actors_actor::{ActorRef, ActorSystem, Error as ActorError};
+    use ave_actors_actor::{ActorRef, ActorSystem, Error as ActorError, build_tracing_subscriber};
 
     use async_trait::async_trait;
 
-    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize, Default)]
+    #[derive(
+        Debug,
+        Clone,
+        Serialize,
+        Deserialize,
+        BorshSerialize,
+        BorshDeserialize,
+        Default,
+    )]
     struct TestActor {
         pub version: usize,
         pub value: i32,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize, Default)]
+    #[derive(
+        Debug,
+        Clone,
+        Serialize,
+        Deserialize,
+        BorshSerialize,
+        BorshDeserialize,
+        Default,
+    )]
     struct TestActorLight {
         pub data: Vec<i32>,
     }
@@ -1207,12 +1320,16 @@ mod tests {
     impl Message for TestMessage {}
     impl Message for TestMessageLight {}
 
-    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+    #[derive(
+        Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+    )]
     struct TestEvent(i32);
 
     impl Event for TestEvent {}
 
-    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+    #[derive(
+        Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+    )]
     struct TestEventLight(Vec<i32>);
 
     impl Event for TestEventLight {}
@@ -1237,6 +1354,10 @@ mod tests {
         type Message = TestMessageLight;
         type Event = TestEventLight;
         type Response = TestResponseLight;
+
+        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("TestActorLight", id = %id)
+        }
 
         async fn pre_start(
             &mut self,
@@ -1285,7 +1406,10 @@ mod tests {
             if let StoreResponse::Snapshotted = response {
                 store.ask_stop().await
             } else {
-                Err(ActorError::Store("Can't snapshot state".to_string()))
+                Err(ActorError::StoreOperation {
+                    operation: "snapshot_state".to_owned(),
+                    reason: "Can't snapshot state".to_string(),
+                })
             }
         }
     }
@@ -1295,6 +1419,10 @@ mod tests {
         type Message = TestMessage;
         type Event = TestEvent;
         type Response = TestResponse;
+
+        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("TestActor", id = %id)
+        }
 
         async fn pre_start(
             &mut self,
@@ -1331,7 +1459,10 @@ mod tests {
             if let StoreResponse::Snapshotted = response {
                 store.ask_stop().await
             } else {
-                Err(ActorError::Store("Can't snapshot state".to_string()))
+                Err(ActorError::StoreOperation {
+                    operation: "snapshot_state".to_owned(),
+                    reason: "Can't snapshot state".to_string(),
+                })
             }
         }
     }
@@ -1342,9 +1473,7 @@ mod tests {
         type InitParams = ();
 
         fn create_initial(_: ()) -> Self {
-            Self {
-                data: Vec::new(),
-            }
+            Self { data: Vec::new() }
         }
 
         fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
@@ -1450,14 +1579,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_actor() {
+        build_tracing_subscriber();
         let (system, mut runner) =
             ActorSystem::create(CancellationToken::new());
         // Init runner.
         tokio::spawn(async move {
             runner.run().await;
         });
-        
-        let encrypt_key = EncryptedKey::new(b"0123456789abcdef0123456789abcdef").unwrap();
+
+        let encrypt_key =
+            EncryptedKey::new(b"0123456789abcdef0123456789abcdef").unwrap();
         let db = Store::<TestActor>::new(
             "store",
             "test",
@@ -1534,6 +1665,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_persistent_light_actor() {
+        build_tracing_subscriber();
         let (system, ..) = ActorSystem::create(CancellationToken::new());
 
         system.add_helper("db", MemoryManager::default()).await;
@@ -1569,8 +1701,8 @@ mod tests {
     }
 
     #[tokio::test]
-    //#[traced_test]
     async fn test_persistent_actor() {
+        build_tracing_subscriber();
         let (system, mut runner) =
             ActorSystem::create(CancellationToken::new());
         // Init runner.
@@ -1613,6 +1745,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_encrypt_decrypt() {
+        build_tracing_subscriber();
         let encrypt_key = EncryptedKey::new(&[0u8; 32]).unwrap();
 
         let store = Store::<TestActor>::new(
@@ -1624,8 +1757,12 @@ mod tests {
         )
         .unwrap();
         let data = b"Hello, world!";
-        let encrypted = store.encrypt(&store.key_box.clone().unwrap(), data).unwrap();
-        let decrypted = store.decrypt(&store.key_box.clone().unwrap(), &encrypted).unwrap();
+        let encrypted = store
+            .encrypt(&store.key_box.clone().unwrap(), data)
+            .unwrap();
+        let decrypted = store
+            .decrypt(&store.key_box.clone().unwrap(), &encrypted)
+            .unwrap();
         assert_eq!(data, decrypted.as_slice());
     }
 }

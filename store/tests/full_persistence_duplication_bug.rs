@@ -1,12 +1,13 @@
 //! Test to investigate if Full persistence also has the duplication bug.
 
-use ave_actors_actor::{Actor, ActorContext, ActorSystem, Handler, Message, Response, Event, Error as ActorError, ActorPath};
+use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber};
 use ave_actors_store::store::{PersistentActor, FullPersistence};
 use ave_actors_store::memory::MemoryManager;
 use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -41,6 +42,10 @@ impl Actor for VectorActorFull {
     type Message = VectorMessageFull;
     type Response = VectorResponseFull;
     type Event = NumberAddedFull;
+
+                            fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("VectorActorFull", id = %id)
+        }
 
     async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
         let manager_ref = SHARED_MANAGER_FULL.get_or_init(|| {
@@ -100,6 +105,7 @@ impl PersistentActor for VectorActorFull {
 
 #[tokio::test]
 async fn test_full_persistence_duplication_on_restart() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 

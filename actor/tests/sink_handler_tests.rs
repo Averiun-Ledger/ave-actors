@@ -1,17 +1,15 @@
-
-
 //! Comprehensive tests for Sink and Handler modules to increase coverage
 
-use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler, Message,
-    Response, Sink, Subscriber,
-};
 use async_trait::async_trait;
+use ave_actors_actor::{
+    Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler,
+    Message, Response, Sink, Subscriber, build_tracing_subscriber,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing_test::traced_test;
+use tracing::info_span;
 
 // Test structures for sink and handler testing
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +47,10 @@ impl Actor for TestActor {
     type Message = TestMessage;
     type Response = TestResponse;
     type Event = SinkTestEvent;
+
+    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        info_span!("TestActor", id = %id)
+    }
 }
 
 #[async_trait]
@@ -63,9 +65,13 @@ impl Handler<TestActor> for TestActor {
             TestMessage::Emit(id, data) => {
                 self.counter += 1;
                 ctx.publish_event(SinkTestEvent { id, data }).await?;
-                Ok(TestResponse { value: self.counter })
+                Ok(TestResponse {
+                    value: self.counter,
+                })
             }
-            TestMessage::GetCounter => Ok(TestResponse { value: self.counter }),
+            TestMessage::GetCounter => Ok(TestResponse {
+                value: self.counter,
+            }),
         }
     }
 }
@@ -112,8 +118,8 @@ impl Subscriber<SinkTestEvent> for CollectingSubscriber {
 // Tests for Sink functionality
 
 #[tokio::test]
-#[traced_test]
 async fn test_sink_basic_functionality() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -131,9 +137,18 @@ async fn test_sink_basic_functionality() {
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Emit some events
-    actor_ref.tell(TestMessage::Emit(1, "test1".to_string())).await.unwrap();
-    actor_ref.tell(TestMessage::Emit(2, "test2".to_string())).await.unwrap();
-    actor_ref.tell(TestMessage::Emit(3, "test3".to_string())).await.unwrap();
+    actor_ref
+        .tell(TestMessage::Emit(1, "test1".to_string()))
+        .await
+        .unwrap();
+    actor_ref
+        .tell(TestMessage::Emit(2, "test2".to_string()))
+        .await
+        .unwrap();
+    actor_ref
+        .tell(TestMessage::Emit(3, "test3".to_string()))
+        .await
+        .unwrap();
 
     // Wait for events to be processed
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -150,13 +165,16 @@ async fn test_sink_basic_functionality() {
 }
 
 #[tokio::test]
-#[traced_test]
 async fn test_sink_with_failing_subscriber() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = TestActor { counter: 0 };
-    let actor_ref = system.create_root_actor("failing_sink_test", actor).await.unwrap();
+    let actor_ref = system
+        .create_root_actor("failing_sink_test", actor)
+        .await
+        .unwrap();
 
     let subscriber = CollectingSubscriber::new_failing();
 
@@ -168,7 +186,10 @@ async fn test_sink_with_failing_subscriber() {
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Emit event - this should not crash the system even though subscriber fails
-    actor_ref.tell(TestMessage::Emit(1, "test".to_string())).await.unwrap();
+    actor_ref
+        .tell(TestMessage::Emit(1, "test".to_string()))
+        .await
+        .unwrap();
 
     // Wait and verify system is still running
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -179,11 +200,15 @@ async fn test_sink_with_failing_subscriber() {
 
 #[tokio::test]
 async fn test_sink_with_closed_receiver() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = TestActor { counter: 0 };
-    let actor_ref = system.create_root_actor("closed_sink_test", actor).await.unwrap();
+    let actor_ref = system
+        .create_root_actor("closed_sink_test", actor)
+        .await
+        .unwrap();
 
     let subscriber = CollectingSubscriber::new();
     let receiver = actor_ref.subscribe();
@@ -220,6 +245,10 @@ impl Actor for FailingHandlerActor {
     type Message = TestMessage;
     type Response = TestResponse;
     type Event = SinkTestEvent;
+
+    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        info_span!("FailingHandlerActor", id = %id)
+    }
 }
 
 #[async_trait]
@@ -231,7 +260,9 @@ impl Handler<FailingHandlerActor> for FailingHandlerActor {
         _ctx: &mut ActorContext<FailingHandlerActor>,
     ) -> Result<TestResponse, Error> {
         if self.fail_on_message {
-            return Err(Error::Functional("Handler intentionally failed".to_string()));
+            return Err(Error::Functional {
+                description: "Handler intentionally failed".to_string(),
+            });
         }
 
         if self.fail_with_timeout {
@@ -248,6 +279,7 @@ impl Handler<FailingHandlerActor> for FailingHandlerActor {
 
 #[tokio::test]
 async fn test_handler_error_scenarios() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -256,15 +288,18 @@ async fn test_handler_error_scenarios() {
         fail_with_timeout: false,
     };
 
-    let actor_ref = system.create_root_actor("failing_handler", actor).await.unwrap();
+    let actor_ref = system
+        .create_root_actor("failing_handler", actor)
+        .await
+        .unwrap();
 
     // This should return an error
     let result = actor_ref.ask(TestMessage::GetCounter).await;
     assert!(result.is_err());
 
     match result {
-        Err(Error::Functional(msg)) => {
-            assert_eq!(msg, "Handler intentionally failed");
+        Err(Error::Functional { description }) => {
+            assert_eq!(description, "Handler intentionally failed");
         }
         _ => panic!("Expected functional error"),
     }
@@ -272,6 +307,7 @@ async fn test_handler_error_scenarios() {
 
 #[tokio::test]
 async fn test_message_serialization_edge_cases() {
+    build_tracing_subscriber();
     // Test with complex message structures
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ComplexMessage {
@@ -292,6 +328,10 @@ async fn test_message_serialization_edge_cases() {
         type Message = ComplexMessage;
         type Response = TestResponse;
         type Event = SinkTestEvent;
+
+        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("ComplexHandlerActor", id = %id)
+        }
     }
 
     #[async_trait]
@@ -307,7 +347,9 @@ async fn test_message_serialization_edge_cases() {
             assert!(msg.optional.is_some());
             assert_eq!(msg.tuple.0, 42);
 
-            Ok(TestResponse { value: msg.nested.len() as u32 })
+            Ok(TestResponse {
+                value: msg.nested.len() as u32,
+            })
         }
     }
 
@@ -315,7 +357,10 @@ async fn test_message_serialization_edge_cases() {
     tokio::spawn(async move { runner.run().await });
 
     let actor = ComplexHandlerActor;
-    let actor_ref = system.create_root_actor("complex_handler", actor).await.unwrap();
+    let actor_ref = system
+        .create_root_actor("complex_handler", actor)
+        .await
+        .unwrap();
 
     let mut nested = std::collections::HashMap::new();
     nested.insert("key1".to_string(), 100);
@@ -334,6 +379,7 @@ async fn test_message_serialization_edge_cases() {
 // Test mailbox behavior and message ordering
 #[tokio::test]
 async fn test_message_ordering_and_mailbox() {
+    build_tracing_subscriber();
     #[derive(Debug, Clone)]
     pub struct OrderingActor {
         pub received_order: Vec<u32>,
@@ -353,6 +399,10 @@ async fn test_message_ordering_and_mailbox() {
         type Message = OrderedMessage;
         type Response = TestResponse;
         type Event = SinkTestEvent;
+
+        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("OrderingActor", id = %id)
+        }
     }
 
     #[async_trait]
@@ -365,7 +415,7 @@ async fn test_message_ordering_and_mailbox() {
         ) -> Result<TestResponse, Error> {
             self.received_order.push(msg.sequence);
             Ok(TestResponse {
-                value: self.received_order.len() as u32
+                value: self.received_order.len() as u32,
             })
         }
     }
@@ -376,11 +426,17 @@ async fn test_message_ordering_and_mailbox() {
     let actor = OrderingActor {
         received_order: Vec::new(),
     };
-    let actor_ref = system.create_root_actor("ordering_actor", actor).await.unwrap();
+    let actor_ref = system
+        .create_root_actor("ordering_actor", actor)
+        .await
+        .unwrap();
 
     // Send messages in sequence
     for i in 1..=5 {
-        actor_ref.tell(OrderedMessage { sequence: i }).await.unwrap();
+        actor_ref
+            .tell(OrderedMessage { sequence: i })
+            .await
+            .unwrap();
     }
 
     // Wait for all messages to be processed
@@ -394,6 +450,7 @@ async fn test_message_ordering_and_mailbox() {
 // Test for handler with context operations
 #[tokio::test]
 async fn test_handler_context_operations() {
+    build_tracing_subscriber();
     #[derive(Debug, Clone)]
     pub struct ContextActor {
         pub path_checked: bool,
@@ -416,6 +473,10 @@ async fn test_handler_context_operations() {
         type Message = ContextMessage;
         type Response = TestResponse;
         type Event = SinkTestEvent;
+
+        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("ContextActor", id = %id)
+        }
     }
 
     #[async_trait]
@@ -441,7 +502,8 @@ async fn test_handler_context_operations() {
                     Ok(TestResponse { value: 2 })
                 }
                 ContextMessage::GetState => {
-                    let state = (self.path_checked as u32) + (self.system_accessed as u32);
+                    let state = (self.path_checked as u32)
+                        + (self.system_accessed as u32);
                     Ok(TestResponse { value: state })
                 }
             }
@@ -455,7 +517,10 @@ async fn test_handler_context_operations() {
         path_checked: false,
         system_accessed: false,
     };
-    let actor_ref = system.create_root_actor("context_actor", actor).await.unwrap();
+    let actor_ref = system
+        .create_root_actor("context_actor", actor)
+        .await
+        .unwrap();
 
     // Test path checking
     let result = actor_ref.ask(ContextMessage::CheckPath).await.unwrap();

@@ -20,8 +20,7 @@ use tokio::sync::{broadcast::Receiver as EventReceiver, mpsc, oneshot};
 use async_trait::async_trait;
 
 use serde::{Serialize, de::DeserializeOwned};
-
-use tracing::debug;
+use tracing::Span;
 
 use std::fmt::Debug;
 
@@ -42,6 +41,8 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     inner_sender: InnerSender<A>,
     /// Child action senders.
     child_senders: Vec<StopSender>,
+
+    span: tracing::Span
 }
 
 impl<A> ActorContext<A>
@@ -68,8 +69,10 @@ where
         system: SystemRef,
         error_sender: ChildErrorSender,
         inner_sender: InnerSender<A>,
+        span: Span,
     ) -> Self {
         Self {
+            span,
             stop,
             path,
             system,
@@ -101,7 +104,12 @@ where
     where
         A: Actor,
     {
-        actor.pre_restart(self, error).await
+        tracing::warn!(error = ?error, "Actor restarting");
+        let result = actor.pre_restart(self, error).await;
+        if let Err(ref e) = result {
+            tracing::error!(error = ?e, "Actor restart failed");
+        }
+        result
     }
     /// Returns the actor reference.
     ///
@@ -156,9 +164,14 @@ where
     /// - If sending fails, continues with the next child.
     ///
     pub(crate) async fn stop_childs(&mut self) {
+        let child_count = self.child_senders.len();
+        if child_count > 0 {
+            tracing::debug!(child_count, "Stopping child actors");
+        }
         while let Some(sender) = self.child_senders.pop() {
             let (stop_sender, stop_receiver) = oneshot::channel();
             if sender.send(Some(stop_sender)).await.is_err() {
+                tracing::warn!("Failed to send stop signal to child");
                 continue;
             } else {
                 let _ = stop_receiver.await;
@@ -189,7 +202,6 @@ where
     ///   If None, the stop is fire-and-forget.
     ///
     pub async fn stop(&self, sender: Option<oneshot::Sender<()>>) {
-        debug!("Stopping actor from handle reference.");
 
         let _ = self.stop.send(sender).await;
     }
@@ -211,26 +223,10 @@ where
     pub async fn publish_event(&self, event: A::Event) -> Result<(), Error> {
         self.inner_sender
             .send(InnerAction::Event(event))
-            .map_err(|e| Error::SendEvent(e.to_string())) // GRCOV-LINE
-    }
-
-    /// Emits an event to inner handler.
-    ///
-    /// # Arguments
-    ///
-    /// * `event` - The event to emit.
-    ///
-    /// # Returns
-    ///
-    /// Returns a void result.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the event could not be emitted.
-    ///
-    #[deprecated(since = "0.5.0", note = "please use `publish_event` instead")]
-    pub async fn event(&self, event: A::Event) -> Result<(), Error> {
-        self.publish_event(event).await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to publish event");
+                Error::SendEvent { reason: e.to_string() }
+            })
     }
 
     /// Emits an error.
@@ -248,9 +244,13 @@ where
     /// Returns an error if the error could not be emitted.
     ///
     pub async fn emit_error(&mut self, error: Error) -> Result<(), Error> {
+        tracing::warn!(error = ?error, "Emitting error");
         self.inner_sender
             .send(InnerAction::Error(error))
-            .map_err(|e| Error::Send(e.to_string())) // GRCOV-LINE
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to emit error");
+                Error::Send { reason: e.to_string() }
+            })
     }
 
     /// Emits a fail.
@@ -269,12 +269,16 @@ where
     /// Returns an error if the fail could not be emitted.
     ///
     pub async fn emit_fail(&mut self, error: Error) -> Result<(), Error> {
+        tracing::error!(error = ?error, "Actor failing");
         // Store error to stop message handling.
         self.set_error(error.clone());
         // Send fail to parent actor.
         self.inner_sender
             .send(InnerAction::Fail(error.clone()))
-            .map_err(|e| Error::Send(e.to_string())) // GRCOV-LINE
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to emit fail");
+                Error::Send { reason: e.to_string() }
+            })
     }
 
     /// Create a child actor under this actor.
@@ -301,15 +305,25 @@ where
         C: Actor + Handler<C>,
         I: crate::IntoActor<C>,
     {
+        tracing::debug!(child_name = %name, "Creating child actor");
         let actor = actor_init.into_actor();
         let path = self.path.clone() / name;
-        let (actor_ref, stop_sender) = self
+        let result = self
             .system
-            .create_actor_path(path, actor, Some(self.error_sender.clone()))
-            .await?;
+            .create_actor_path(path, actor, Some(self.error_sender.clone()), C::get_span(&self.path.key(), Some(self.span.clone())))
+            .await;
 
-        self.child_senders.push(stop_sender);
-        Ok(actor_ref)
+        match result {
+            Ok((actor_ref, stop_sender)) => {
+                self.child_senders.push(stop_sender);
+                tracing::debug!(child_name = %name, "Child actor created");
+                Ok(actor_ref)
+            }
+            Err(e) => {
+                tracing::error!(child_name = %name, error = ?e, "Failed to create child actor");
+                Err(e)
+            }
+        }
     }
 
     /// Retrieve a child actor running under this actor.
@@ -426,6 +440,8 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
     /// message.
     type Response: Response;
 
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span;
+
     /// Defines the supervision strategy to use for this actor. By default it is
     /// `Stop` which simply stops the actor if an error occurs at startup or when an
     /// error or fault is issued from a handler.
@@ -509,7 +525,7 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
 
     /// Create event from response.
     fn from_response(_response: Self::Response) -> Result<Self::Event, Error> {
-        Err(Error::Functional("Not implemented".to_string()))
+        Err(Error::Functional { description: "Not implemented".to_string() })
     }
 }
 
@@ -590,7 +606,7 @@ pub trait Handler<A: Actor + Handler<A>>: Send + Sync {
         error: Error,
         _ctx: &mut ActorContext<A>,
     ) {
-        debug!("Handling error: {:?}", error);
+        tracing::error!(error = ?error, "Child actor error");
         // Default implementation from child actor errors.
         //self.on_child_fault(error, ctx).await;
     }
@@ -616,8 +632,8 @@ pub trait Handler<A: Actor + Handler<A>>: Send + Sync {
         error: Error,
         _ctx: &mut ActorContext<A>,
     ) -> ChildAction {
+        tracing::error!(error = ?error, "Child actor fault, stopping child");
         // Default implementation from child actor errors.
-        debug!("Handling fault: {:?}", error);
         ChildAction::Stop
     }
 }
@@ -680,7 +696,10 @@ where
     /// Returns a () if success.
     ///
     pub async fn tell(&self, message: A::Message) -> Result<(), Error> {
-        self.sender.tell(self.path(), message).await
+        self.sender.tell(self.path(), message).await.map_err(|e| {
+            tracing::error!(error = ?e, "Failed to tell message");
+            e
+        })
     }
 
     /// Asks a message to the actor.
@@ -698,7 +717,10 @@ where
     /// Returns an error if the message could not be sent.
     ///
     pub async fn ask(&self, message: A::Message) -> Result<A::Response, Error> {
-        self.sender.ask(self.path(), message).await
+        self.sender.ask(self.path(), message).await.map_err(|e| {
+            tracing::error!(error = ?e, "Failed to ask message");
+            e
+        })
     }
 
     /// Stops the actor.
@@ -706,15 +728,18 @@ where
     /// The actor will not be able to receive any more messages.
     ///
     pub async fn ask_stop(&self) -> Result<(), Error> {
-        debug!("Stopping actor from handle reference.");
+        tracing::debug!("Stopping actor");
         let (response_sender, response_receiver) = oneshot::channel();
 
         if self.stop_sender.send(Some(response_sender)).await.is_err() {
             Ok(())
         } else {
-            Ok(response_receiver
+            response_receiver
                 .await
-                .map_err(|error| Error::Send(error.to_string()))?)
+                .map_err(|error| {
+                    tracing::error!(error = %error, "Failed to confirm actor stop");
+                    Error::Send { reason: error.to_string() }
+                })
         }
     }
 
@@ -728,8 +753,6 @@ where
     /// continue immediately without waiting for the actor to complete its shutdown.
     ///
     pub async fn tell_stop(&self) {
-        debug!("Stopping actor from handle reference.");
-
         let _ = self.stop_sender.send(None).await;
     }
 
@@ -786,11 +809,12 @@ mod test {
 
     use super::*;
 
-    use crate::sink::{Sink, Subscriber};
+    use crate::{build_tracing_subscriber, sink::{Sink, Subscriber}};
 
     use serde::{Deserialize, Serialize};
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
+    use tracing::info_span;
 
     #[derive(Debug, Clone)]
     struct TestActor {
@@ -819,6 +843,10 @@ mod test {
         type Message = TestMessage;
         type Event = TestEvent;
         type Response = TestResponse;
+
+        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("TestActor", id = %id)
+        }
     }
 
     #[async_trait]
@@ -845,13 +873,13 @@ mod test {
     #[async_trait]
     impl Subscriber<TestEvent> for TestSubscriber {
         async fn notify(&self, event: TestEvent) {
-            debug!("Received event: {:?}", event);
             assert!(event.0 > 0);
         }
     }
 
     #[tokio::test]
     async fn test_actor() {
+        build_tracing_subscriber();
         let (event_sender, _event_receiver) = mpsc::channel(100);
         let system = SystemRef::new(event_sender, CancellationToken::new());
         let actor = TestActor { counter: 0 };

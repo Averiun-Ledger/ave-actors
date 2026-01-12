@@ -16,12 +16,13 @@
 //! Do NOT implement both `NotPersistentActor` and `PersistentActor` on the same type.
 //! This is enforced by convention but not by the type system.
 
-use ave_actors_actor::{Actor, ActorSystem, Handler, Message, Response, Event, ActorContext, ActorPath, NotPersistentActor};
+use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorSystem, Event, Handler, Message, NotPersistentActor, Response, build_tracing_subscriber};
 use ave_actors_store::store::{PersistentActor, FullPersistence};
 use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 
 // ============================================================================
 // Test Actors
@@ -50,6 +51,10 @@ impl Actor for MyPersistentActor {
     type Message = PersistentMessage;
     type Response = PersistentResponse;
     type Event = PersistentEvent;
+
+            fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("MyPersistentActor", id = %id)
+        }
 }
 
 #[async_trait]
@@ -104,6 +109,10 @@ impl Actor for MyNonPersistentActor {
     type Message = NonPersistentMessage;
     type Response = NonPersistentResponse;
     type Event = NonPersistentEvent;
+
+                fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("MyNonPersistentActor", id = %id)
+        }
 }
 
 #[async_trait]
@@ -133,6 +142,9 @@ impl Actor for ParentActor {
     type Message = ParentMessage;
     type Response = ();
     type Event = ();
+                    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("ParentActor", id = %id)
+        }
 
     async fn pre_start(&mut self, _ctx: &mut ActorContext<Self>) -> Result<(), ave_actors_actor::Error> {
         Ok(())
@@ -158,6 +170,7 @@ impl Handler<ParentActor> for ParentActor {
 /// ✅ SUCCESS: Non-persistent actor with direct instance
 #[tokio::test]
 async fn test_create_root_actor_non_persistent_direct() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -171,6 +184,7 @@ async fn test_create_root_actor_non_persistent_direct() {
 /// ✅ SUCCESS: Persistent actor with initial() wrapper
 #[tokio::test]
 async fn test_create_root_actor_persistent_initial() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -187,6 +201,7 @@ async fn test_create_root_actor_persistent_initial() {
 /// ```compile_fail
 /// #[tokio::test]
 /// async fn test_create_root_actor_persistent_direct_fails() {
+///     build_tracing_subscriber();
 ///     let (system, _runner) = ActorSystem::create(CancellationToken::new());
 ///
 ///     // This WILL NOT compile because MyPersistentActor doesn't implement NotPersistentActor
@@ -204,6 +219,7 @@ async fn test_create_root_actor_persistent_initial() {
 /// ✅ SUCCESS: Non-persistent child with direct instance
 #[tokio::test]
 async fn test_create_child_non_persistent_direct() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -223,6 +239,7 @@ async fn test_create_child_non_persistent_direct() {
 /// ✅ SUCCESS: Persistent child with initial() wrapper
 #[tokio::test]
 async fn test_create_child_persistent_initial() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -251,6 +268,7 @@ async fn test_create_child_persistent_initial() {
 
 #[tokio::test]
 async fn test_all_valid_combinations() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 

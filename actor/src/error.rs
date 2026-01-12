@@ -2,71 +2,113 @@
 
 //! # Errors module
 //!
+//! This module defines error types for the actor system using `thiserror`.
 
 use crate::ActorPath;
-
 use thiserror::Error;
-// GRCOV-START
-// TODO: We should improve the error handling in the actor system.
 
 /// Error type for the actor system.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum Error {
-    /// An error occurred while sending a message to an actor.
-    #[error("An error occurred while sending a message to actor: {0}.")]
-    Send(String),
-    /// An error occurred while receiving a response from an actor.
-    #[error(
-        "Actor {0} returned a response that was not expected, expected response: {1}"
-    )]
-    UnexpectedResponse(ActorPath, String),
-    /// An error occurred while creating an actor.
-    #[error("An error occurred while creating an actor: {0}/{1}.")]
-    Create(ActorPath, String),
-    /// An error occurred while retrieving an actor.
-    #[error("Actor {0} exist.")]
-    Exists(ActorPath),
-    /// Actor not found error.
-    #[error("Actor {0} not found.")]
-    NotFound(ActorPath),
-    /// An error occurred while stopping an actor.
-    #[error("An error occurred while stopping an actor.")]
-    Stop,
-    /// An error occurred while starting the actor system.
-    #[error("An error occurred while starting the actor system: {0}")]
-    Start(String),
-    /// An error occurred while sending an envent to event bus.
-    #[error("An error occurred while sending an event to event bus: {0}")]
-    SendEvent(String),
-    /// Create store error.
-    #[error("Can't create store: {0}")]
-    CreateStore(String),
-    /// Get data error.
-    #[error("Get error: {0}")]
-    Get(String),
-    /// Entry not found error.
-    #[error("Entry not found: {0}")]
-    EntryNotFound(String),
-    /// Store  Error.
-    #[error("Store error: {0}")]
-    Store(String),
-    /// Helper  Error.
-    #[error("Helper error: {0}")]
-    Helper(String),
-    /// Error that does not compromise the operation of the system.
-    #[error("Error: {0}")]
-    Functional(String),
-    /// Error that does compromise the operation of the system.
-    #[error("Error: {0}")]
-    FunctionalFail(String),
-    /// An error that affects the state. Contains the valid state.
-    #[error("State error: {0}")]
-    State(String),
-    /// The maximum number of retries has been reached.
-    #[error("The maximum number of retries has been reached.")]
-    ReTry,
-    /// Can not get a helper.
-    #[error("Helper {0} could not be accessed.")]
-    NotHelper(String),
+    // ===== Actor Lifecycle Errors =====
+    /// Actor already exists at the specified path.
+    ///
+    /// This error indicates an attempt to create an actor at a path
+    /// that is already occupied.
+    #[error("actor '{path}' already exists")]
+    Exists {
+        /// The path where the actor already exists.
+        path: ActorPath,
+    },
+
+    /// Actor not found at the specified path.
+    ///
+    /// This error indicates that no actor exists at the requested path.
+    #[error("actor '{path}' not found")]
+    NotFound {
+        /// The path where the actor was expected but not found.
+        path: ActorPath,
+    },
+
+    // ===== Message Passing Errors =====
+    /// Failed to send a message to an actor.
+    ///
+    /// This error occurs when a message cannot be delivered to an actor's mailbox.
+    #[error("failed to send message: {reason}")]
+    Send {
+        /// The reason why message sending failed.
+        reason: String,
+    },
+
+    /// Actor returned an unexpected response type.
+    ///
+    /// This error occurs when an actor's response doesn't match the expected type.
+    #[error("actor '{path}' returned unexpected response, expected: {expected}")]
+    UnexpectedResponse {
+        /// The path of the actor that sent the unexpected response.
+        path: ActorPath,
+        /// Description of the expected response type.
+        expected: String,
+    },
+
+    /// Failed to send an event to the event bus.
+    ///
+    /// This error occurs when an event cannot be published to the event bus.
+    #[error("failed to send event to event bus: {reason}")]
+    SendEvent {
+        /// The reason why event sending failed.
+        reason: String,
+    },
+
+    /// A store operation failed.
+    ///
+    /// This error covers various store operations that don't fit into
+    /// more specific error categories.
+    #[error("store operation '{operation}' failed: {reason}")]
+    StoreOperation {
+        /// The operation that was being performed.
+        operation: String,
+        /// The reason why the operation failed.
+        reason: String,
+    },
+
+    // ===== Helper Errors =====
+    /// Failed to access a helper.
+    ///
+    /// This error occurs when a required helper cannot be accessed.
+    #[error("failed to access helper '{name}': {reason}")]
+    Helper {
+        /// The name of the helper that could not be accessed.
+        name: String,
+        /// The reason why helper access failed.
+        reason: String,
+    },
+
+    /// Maximum number of retry attempts reached.
+    ///
+    /// This error occurs when an operation has been retried the maximum
+    /// allowed number of times without success.
+    #[error("maximum retry attempts reached")]
+    Retry,
+
+    // ===== Functional Errors =====
+    /// A recoverable functional error.
+    ///
+    /// This error indicates a problem that doesn't compromise the system's
+    /// overall operation and may be recoverable.
+    #[error("functional error (recoverable): {description}")]
+    Functional {
+        /// Description of the functional error.
+        description: String,
+    },
+
+    /// A critical functional error.
+    ///
+    /// This error indicates a problem that compromises the system's operation
+    /// and requires intervention.
+    #[error("critical functional error: {description}")]
+    FunctionalCritical {
+        /// Description of the critical error.
+        description: String,
+    },
 }
-// GRCOV-END

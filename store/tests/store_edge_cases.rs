@@ -1,29 +1,40 @@
-
-
 //! Comprehensive edge case tests for Store module to increase coverage
 
 use ave_actors_store::{
-    store::{Store, PersistentActor, StoreCommand, StoreResponse, LightPersistence, FullPersistence},
-    database::{Collection, DbManager, State}, memory::MemoryManager, Error as StoreError,
+    Error as StoreError,
+    database::{Collection, DbManager, State},
+    memory::MemoryManager,
+    store::{
+        FullPersistence, LightPersistence, PersistentActor, Store,
+        StoreCommand, StoreResponse,
+    },
 };
 
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, EncryptedKey, Error as ActorError, Event, Handler, Message, Response
+    Actor, ActorContext, ActorPath, ActorSystem, EncryptedKey,
+    Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber,
 };
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tokio_util::sync::CancellationToken;
-use tracing_test::traced_test;
+use tracing::info_span;
 
 // Test actor with encryption
-#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
+    Default,
+)]
 struct EncryptedActor {
     pub counter: usize,
     pub data: String,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum EncryptedMessage {
@@ -47,7 +58,14 @@ enum EncryptedResponse {
 
 impl Response for EncryptedResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
+)]
 struct EncryptedEvent {
     pub counter: usize,
     pub data: String,
@@ -60,14 +78,33 @@ impl Actor for EncryptedActor {
     type Message = EncryptedMessage;
     type Response = EncryptedResponse;
     type Event = EncryptedEvent;
-
-    async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
-        let memory_db = MemoryManager::default();
-        let encrypt_key = EncryptedKey::new(&[1u8; 32]).unwrap();
-        self.start_store("encrypted_test", None, ctx, memory_db, Some(encrypt_key)).await
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("EncryptedActor", id = %id)
     }
 
-    async fn pre_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let memory_db = MemoryManager::default();
+        let encrypt_key = EncryptedKey::new(&[1u8; 32]).unwrap();
+        self.start_store(
+            "encrypted_test",
+            None,
+            ctx,
+            memory_db,
+            Some(encrypt_key),
+        )
+        .await
+    }
+
+    async fn pre_stop(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         self.stop_store(ctx).await
     }
 }
@@ -116,20 +153,21 @@ impl Handler<EncryptedActor> for EncryptedActor {
                 self.persist(&event, ctx).await?;
                 Ok(EncryptedResponse::Success)
             }
-            EncryptedMessage::GetState => {
-                Ok(EncryptedResponse::State {
-                    counter: self.counter,
-                    data: self.data.clone(),
-                })
-            }
+            EncryptedMessage::GetState => Ok(EncryptedResponse::State {
+                counter: self.counter,
+                data: self.data.clone(),
+            }),
             EncryptedMessage::TriggerRecovery => {
-                if let Some(store) = ctx.get_child::<Store<Self>>("store").await {
+                if let Some(store) = ctx.get_child::<Store<Self>>("store").await
+                {
                     let response = store.ask(StoreCommand::Recover).await?;
                     if let StoreResponse::State(Some(state)) = response {
                         self.update(state);
                         Ok(EncryptedResponse::Success)
                     } else {
-                        Ok(EncryptedResponse::Error("No state to recover".to_string()))
+                        Ok(EncryptedResponse::Error(
+                            "No state to recover".to_string(),
+                        ))
                     }
                 } else {
                     Ok(EncryptedResponse::Error("No store found".to_string()))
@@ -144,7 +182,8 @@ impl Handler<EncryptedActor> for EncryptedActor {
                 Ok(EncryptedResponse::Success)
             }
             EncryptedMessage::Purge => {
-                if let Some(store) = ctx.get_child::<Store<Self>>("store").await {
+                if let Some(store) = ctx.get_child::<Store<Self>>("store").await
+                {
                     store.ask(StoreCommand::Purge).await?;
                     Ok(EncryptedResponse::Success)
                 } else {
@@ -156,11 +195,18 @@ impl Handler<EncryptedActor> for EncryptedActor {
 }
 
 // Test actor with light persistence
-#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
+    Default,
+)]
 struct LightActor {
     pub value: i32,
 }
-
 
 #[async_trait]
 impl Actor for LightActor {
@@ -168,12 +214,26 @@ impl Actor for LightActor {
     type Response = EncryptedResponse;
     type Event = EncryptedEvent;
 
-    async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
-        let memory_db = MemoryManager::default();
-        self.start_store("light_test", None, ctx, memory_db, None).await
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("LightActor", id = %id)
     }
 
-    async fn pre_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let memory_db = MemoryManager::default();
+        self.start_store("light_test", None, ctx, memory_db, None)
+            .await
+    }
+
+    async fn pre_stop(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         self.stop_store(ctx).await
     }
 }
@@ -210,12 +270,10 @@ impl Handler<LightActor> for LightActor {
                 self.persist(&event, ctx).await?;
                 Ok(EncryptedResponse::Success)
             }
-            EncryptedMessage::GetState => {
-                Ok(EncryptedResponse::State {
-                    counter: self.value as usize,
-                    data: "light".to_string(),
-                })
-            }
+            EncryptedMessage::GetState => Ok(EncryptedResponse::State {
+                counter: self.value as usize,
+                data: "light".to_string(),
+            }),
             _ => Ok(EncryptedResponse::Success),
         }
     }
@@ -250,15 +308,23 @@ impl Collection for FailingCollection {
 
     fn get(&self, _key: &str) -> Result<Vec<u8>, StoreError> {
         if self.fail_operations {
-            Err(StoreError::Store("Intentional failure".to_string()))
+            Err(StoreError::Store {
+                operation: "test".to_owned(),
+                reason: "Intentional failure".to_string(),
+            })
         } else {
-            Err(StoreError::EntryNotFound("Not found".to_string()))
+            Err(StoreError::EntryNotFound {
+                key: "Not found".to_string(),
+            })
         }
     }
 
     fn put(&mut self, key: &str, data: &[u8]) -> Result<(), StoreError> {
         if self.fail_operations {
-            Err(StoreError::Store("Intentional failure".to_string()))
+            Err(StoreError::Store {
+                operation: "test".to_owned(),
+                reason: "Intentional failure".to_string(),
+            })
         } else {
             self.data.insert(key.to_string(), data.to_vec());
             Ok(())
@@ -267,7 +333,10 @@ impl Collection for FailingCollection {
 
     fn del(&mut self, _key: &str) -> Result<(), StoreError> {
         if self.fail_operations {
-            Err(StoreError::Store("Intentional failure".to_string()))
+            Err(StoreError::Store {
+                operation: "test".to_owned(),
+                reason: "Intentional failure".to_string(),
+            })
         } else {
             Ok(())
         }
@@ -275,14 +344,20 @@ impl Collection for FailingCollection {
 
     fn purge(&mut self) -> Result<(), StoreError> {
         if self.fail_operations {
-            Err(StoreError::Store("Intentional failure".to_string()))
+            Err(StoreError::Store {
+                operation: "test".to_owned(),
+                reason: "Intentional failure".to_string(),
+            })
         } else {
             self.data.clear();
             Ok(())
         }
     }
 
-    fn iter<'a>(&'a self, _reverse: bool) -> Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a> {
+    fn iter<'a>(
+        &'a self,
+        _reverse: bool,
+    ) -> Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a> {
         Box::new(self.data.iter().map(|(k, v)| (k.clone(), v.clone())))
     }
 }
@@ -294,15 +369,23 @@ impl State for FailingCollection {
 
     fn get(&self) -> Result<Vec<u8>, StoreError> {
         if self.fail_operations {
-            Err(StoreError::Store("Intentional failure".to_string()))
+            Err(StoreError::Store {
+                operation: "test".to_owned(),
+                reason: "Intentional failure".to_string(),
+            })
         } else {
-            Err(StoreError::EntryNotFound("Not found".to_string()))
+            Err(StoreError::EntryNotFound {
+                key: "Not found".to_string(),
+            })
         }
     }
 
     fn put(&mut self, data: &[u8]) -> Result<(), StoreError> {
         if self.fail_operations {
-            Err(StoreError::Store("Intentional failure".to_string()))
+            Err(StoreError::Store {
+                operation: "test".to_owned(),
+                reason: "Intentional failure".to_string(),
+            })
         } else {
             self.data.insert("state".to_string(), data.to_vec());
             Ok(())
@@ -311,7 +394,10 @@ impl State for FailingCollection {
 
     fn del(&mut self) -> Result<(), StoreError> {
         if self.fail_operations {
-            Err(StoreError::Store("Intentional failure".to_string()))
+            Err(StoreError::Store {
+                operation: "test".to_owned(),
+                reason: "Intentional failure".to_string(),
+            })
         } else {
             self.data.remove("state");
             Ok(())
@@ -320,7 +406,10 @@ impl State for FailingCollection {
 
     fn purge(&mut self) -> Result<(), StoreError> {
         if self.fail_operations {
-            Err(StoreError::Store("Intentional failure".to_string()))
+            Err(StoreError::Store {
+                operation: "test".to_owned(),
+                reason: "Intentional failure".to_string(),
+            })
         } else {
             self.data.clear();
             Ok(())
@@ -329,9 +418,16 @@ impl State for FailingCollection {
 }
 
 impl DbManager<FailingCollection, FailingCollection> for FailingManager {
-    fn create_collection(&self, name: &str, _prefix: &str) -> Result<FailingCollection, StoreError> {
+    fn create_collection(
+        &self,
+        name: &str,
+        _prefix: &str,
+    ) -> Result<FailingCollection, StoreError> {
         if self.fail_create {
-            Err(StoreError::Store("Failed to create collection".to_string()))
+            Err(StoreError::Store {
+                operation: "create_collection".to_owned(),
+                reason: "Failed to create collection".to_string(),
+            })
         } else {
             Ok(FailingCollection {
                 name: name.to_string(),
@@ -341,9 +437,16 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
         }
     }
 
-    fn create_state(&self, name: &str, _prefix: &str) -> Result<FailingCollection, StoreError> {
+    fn create_state(
+        &self,
+        name: &str,
+        _prefix: &str,
+    ) -> Result<FailingCollection, StoreError> {
         if self.fail_create {
-            Err(StoreError::Store("Failed to create state".to_string()))
+            Err(StoreError::Store {
+                operation: "create_state".to_owned(),
+                reason: "Failed to create state".to_string(),
+            })
         } else {
             Ok(FailingCollection {
                 name: name.to_string(),
@@ -358,6 +461,7 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
 
 #[tokio::test]
 async fn test_encrypted_store_operations() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -367,7 +471,10 @@ async fn test_encrypted_store_operations() {
         .unwrap();
 
     // Test increment with encryption
-    actor_ref.tell(EncryptedMessage::Increment(5)).await.unwrap();
+    actor_ref
+        .tell(EncryptedMessage::Increment(5))
+        .await
+        .unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     let response = actor_ref.ask(EncryptedMessage::GetState).await.unwrap();
@@ -379,7 +486,10 @@ async fn test_encrypted_store_operations() {
     }
 
     // Test data update
-    actor_ref.tell(EncryptedMessage::SetData("updated".to_string())).await.unwrap();
+    actor_ref
+        .tell(EncryptedMessage::SetData("updated".to_string()))
+        .await
+        .unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     let response = actor_ref.ask(EncryptedMessage::GetState).await.unwrap();
@@ -391,10 +501,16 @@ async fn test_encrypted_store_operations() {
     }
 
     // Test recovery
-    actor_ref.ask(EncryptedMessage::TriggerRecovery).await.unwrap();
+    actor_ref
+        .ask(EncryptedMessage::TriggerRecovery)
+        .await
+        .unwrap();
 
     // Test snapshot
-    actor_ref.ask(EncryptedMessage::TestSnapshotFailure).await.unwrap();
+    actor_ref
+        .ask(EncryptedMessage::TestSnapshotFailure)
+        .await
+        .unwrap();
 
     // Test purge
     actor_ref.ask(EncryptedMessage::Purge).await.unwrap();
@@ -402,6 +518,7 @@ async fn test_encrypted_store_operations() {
 
 #[tokio::test]
 async fn test_light_persistence() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -411,7 +528,10 @@ async fn test_light_persistence() {
         .unwrap();
 
     // Test light persistence (should only keep last state)
-    actor_ref.tell(EncryptedMessage::Increment(10)).await.unwrap();
+    actor_ref
+        .tell(EncryptedMessage::Increment(10))
+        .await
+        .unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     let response = actor_ref.ask(EncryptedMessage::GetState).await.unwrap();
@@ -443,6 +563,7 @@ async fn test_light_persistence() {
 
 #[tokio::test]
 async fn test_store_error_scenarios() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -452,7 +573,13 @@ async fn test_store_error_scenarios() {
         fail_operations: false,
     };
 
-    let store_result = Store::<EncryptedActor>::new("test", "prefix", failing_manager, None, EncryptedActor::create_initial(()));
+    let store_result = Store::<EncryptedActor>::new(
+        "test",
+        "prefix",
+        failing_manager,
+        None,
+        EncryptedActor::create_initial(()),
+    );
     assert!(store_result.is_err());
 
     // Test store operations failure
@@ -461,8 +588,18 @@ async fn test_store_error_scenarios() {
         fail_operations: true,
     };
 
-    let store = Store::<EncryptedActor>::new("test", "prefix", failing_manager, None, EncryptedActor::create_initial(())).unwrap();
-    let store_ref = system.create_root_actor("failing_store", store).await.unwrap();
+    let store = Store::<EncryptedActor>::new(
+        "test",
+        "prefix",
+        failing_manager,
+        None,
+        EncryptedActor::create_initial(()),
+    )
+    .unwrap();
+    let store_ref = system
+        .create_root_actor("failing_store", store)
+        .await
+        .unwrap();
 
     // Test persist failure
     let event = EncryptedEvent {
@@ -472,7 +609,7 @@ async fn test_store_error_scenarios() {
 
     let result = store_ref.ask(StoreCommand::Persist(event)).await.unwrap();
     match result {
-        StoreResponse::Error(_) => {}, // Expected
+        StoreResponse::Error(_) => {} // Expected
         _ => panic!("Expected error response"),
     }
 
@@ -484,33 +621,44 @@ async fn test_store_error_scenarios() {
 
     let result = store_ref.ask(StoreCommand::Snapshot(actor)).await.unwrap();
     match result {
-        StoreResponse::Error(_) => {}, // Expected
+        StoreResponse::Error(_) => {} // Expected
         _ => panic!("Expected error response"),
     }
 
     // Test recover with no state
     let result = store_ref.ask(StoreCommand::Recover).await.unwrap();
     match result {
-        StoreResponse::State(None) => {}, // Expected for empty store
-        StoreResponse::Error(_) => {}, // Also acceptable due to failing operations
+        StoreResponse::State(None) => {} // Expected for empty store
+        StoreResponse::Error(_) => {} // Also acceptable due to failing operations
         _ => panic!("Expected None state or error response"),
     }
 }
 
 #[tokio::test]
 async fn test_store_commands_coverage() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<EncryptedActor>::new("test", "prefix", MemoryManager::default(), None, EncryptedActor::create_initial(())).unwrap();
-    let store_ref = system.create_root_actor("coverage_store", store).await.unwrap();
+    let store = Store::<EncryptedActor>::new(
+        "test",
+        "prefix",
+        MemoryManager::default(),
+        None,
+        EncryptedActor::create_initial(()),
+    )
+    .unwrap();
+    let store_ref = system
+        .create_root_actor("coverage_store", store)
+        .await
+        .unwrap();
 
     // Test all store commands for coverage
 
     // LastEvent
     let result = store_ref.ask(StoreCommand::LastEvent).await.unwrap();
     match result {
-        StoreResponse::LastEvent(None) => {}, // Expected for empty store
+        StoreResponse::LastEvent(None) => {} // Expected for empty store
         _ => panic!("Expected None for last event"),
     }
 
@@ -535,14 +683,20 @@ async fn test_store_commands_coverage() {
     store_ref.ask(StoreCommand::Persist(event)).await.unwrap();
 
     // GetEvents
-    let result = store_ref.ask(StoreCommand::GetEvents { from: 0, to: 1 }).await.unwrap();
+    let result = store_ref
+        .ask(StoreCommand::GetEvents { from: 0, to: 1 })
+        .await
+        .unwrap();
     match result {
         StoreResponse::Events(events) => assert_eq!(events.len(), 2),
         _ => panic!("Expected Events response"),
     }
 
     // LastEventsFrom
-    let result = store_ref.ask(StoreCommand::LastEventsFrom(0)).await.unwrap();
+    let result = store_ref
+        .ask(StoreCommand::LastEventsFrom(0))
+        .await
+        .unwrap();
     match result {
         StoreResponse::Events(events) => assert_eq!(events.len(), 2),
         _ => panic!("Expected Events response"),
@@ -554,29 +708,44 @@ async fn test_store_commands_coverage() {
         StoreResponse::LastEvent(Some(event)) => {
             assert_eq!(event.counter, 2);
             assert_eq!(event.data, "test2");
-        },
+        }
         _ => panic!("Expected Some event for last event"),
     }
 }
 
 #[tokio::test]
-#[traced_test]
+
 async fn test_persist_actor_error_scenarios() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     // Test actor without store child
-    #[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize, Default)]
+    #[derive(
+        Debug,
+        Clone,
+        Serialize,
+        Deserialize,
+        borsh::BorshSerialize,
+        borsh::BorshDeserialize,
+        Default,
+    )]
     struct NoStoreActor {
         value: i32,
     }
-
 
     #[async_trait]
     impl Actor for NoStoreActor {
         type Message = EncryptedMessage;
         type Response = EncryptedResponse;
         type Event = EncryptedEvent;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("NoStoreActor", id = %id)
+        }
     }
 
     #[async_trait]
@@ -610,10 +779,12 @@ async fn test_persist_actor_error_scenarios() {
                     };
                     // This should fail because no store child exists
                     match self.persist(&event, ctx).await {
-                        Err(ActorError::Store(msg)) => {
-                            assert!(msg.contains("Can't get store actor"));
-                            Ok(EncryptedResponse::Error(msg))
-                        },
+                        Err(ActorError::NotFound { path }) => {
+                            Ok(EncryptedResponse::Error(format!(
+                                "Not found: {}",
+                                path
+                            )))
+                        }
                         _ => panic!("Expected store error"),
                     }
                 }
@@ -629,13 +800,16 @@ async fn test_persist_actor_error_scenarios() {
 
     let result = actor_ref.ask(EncryptedMessage::Increment(1)).await.unwrap();
     match result {
-        EncryptedResponse::Error(msg) => assert!(msg.contains("Can't get store actor")),
+        EncryptedResponse::Error(msg) => {
+            assert!(msg.contains("/user/no_store/store"))
+        }
         _ => panic!("Expected error response"),
     }
 }
 
 #[tokio::test]
 async fn test_memory_collection_edge_cases() {
+    build_tracing_subscriber();
     let manager = MemoryManager::default();
 
     // Test collection operations
@@ -650,11 +824,15 @@ async fn test_memory_collection_edge_cases() {
     Collection::put(&mut collection, "key3", b"value3").unwrap();
 
     // Test range from specific key
-    let result = collection.get_by_range(Some("key1".to_string()), 2).unwrap();
+    let result = collection
+        .get_by_range(Some("key1".to_string()), 2)
+        .unwrap();
     assert_eq!(result.len(), 2);
 
     // Test reverse range
-    let result = collection.get_by_range(Some("key3".to_string()), -2).unwrap();
+    let result = collection
+        .get_by_range(Some("key3".to_string()), -2)
+        .unwrap();
     assert_eq!(result.len(), 2);
 
     // Test range from non-existent key
@@ -674,13 +852,24 @@ async fn test_memory_collection_edge_cases() {
 
 #[tokio::test]
 async fn test_encryption_failure_scenarios() {
+    build_tracing_subscriber();
     // Test with invalid key size (this would be a compile-time error, so we test valid scenario)
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let encrypt_key = EncryptedKey::new(&[0u8; 32]).unwrap();
-    let store = Store::<EncryptedActor>::new("test", "prefix", MemoryManager::default(), Some(encrypt_key), EncryptedActor::create_initial(())).unwrap();
-    let store_ref = system.create_root_actor("encrypted_store", store).await.unwrap();
+    let store = Store::<EncryptedActor>::new(
+        "test",
+        "prefix",
+        MemoryManager::default(),
+        Some(encrypt_key),
+        EncryptedActor::create_initial(()),
+    )
+    .unwrap();
+    let store_ref = system
+        .create_root_actor("encrypted_store", store)
+        .await
+        .unwrap();
 
     // Test encryption/decryption by persisting and recovering
     let event = EncryptedEvent {
@@ -688,7 +877,10 @@ async fn test_encryption_failure_scenarios() {
         data: "encrypted_test".to_string(),
     };
 
-    store_ref.ask(StoreCommand::Persist(event.clone())).await.unwrap();
+    store_ref
+        .ask(StoreCommand::Persist(event.clone()))
+        .await
+        .unwrap();
 
     let actor = EncryptedActor {
         counter: 0,
@@ -702,7 +894,7 @@ async fn test_encryption_failure_scenarios() {
             // Should have recovered the actor state, not the event
             assert_eq!(recovered.counter, 0);
             assert_eq!(recovered.data, "");
-        },
+        }
         _ => panic!("Expected recovered state"),
     }
 }

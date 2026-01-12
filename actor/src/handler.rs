@@ -1,5 +1,3 @@
-
-
 use crate::{
     ActorPath, Error,
     actor::{Actor, ActorContext, Handler},
@@ -9,7 +7,7 @@ use async_trait::async_trait;
 
 use tokio::sync::{mpsc, oneshot};
 
-use tracing::{debug, error};
+use tracing::{error};
 
 use std::marker::PhantomData;
 
@@ -69,7 +67,6 @@ where
         sender: ActorPath,
         rsvp: Option<oneshot::Sender<Result<A::Response, Error>>>,
     ) -> Self {
-        debug!("Creating new internal actor message.");
         Self {
             message,
             sender,
@@ -96,18 +93,14 @@ where
     /// * `ctx` - The actor's execution context.
     ///
     async fn handle(&mut self, actor: &mut A, ctx: &mut ActorContext<A>) {
-        debug!("Handling internal message.");
-
-        debug!("Handling message.");
         let result = actor
             .handle_message(self.sender.clone(), self.message.clone(), ctx)
             .await;
 
         if let Some(rsvp) = self.rsvp.take() {
-            debug!("Sending back response (if any).");
-            rsvp.send(result).unwrap_or_else(|_failed| {
-                error!("Failed to send back response!"); // GRCOV-LINE
-            }) // GRCOV-LINE
+            if let Err(_) = rsvp.send(result) {
+                error!("Failed to send response back to caller");
+            }
         }
     }
 }
@@ -163,7 +156,6 @@ where
     /// Returns a new HandleHelper instance.
     ///
     pub(crate) fn new(sender: MailboxSender<A>) -> Self {
-        debug!("Creating new handle reference.");
         Self { sender }
     }
 
@@ -188,16 +180,13 @@ where
         sender: ActorPath,
         message: A::Message,
     ) -> Result<(), Error> {
-        debug!("Telling message to actor from handle reference.");
         let msg = ActorMessage::new(message, sender, None);
-        if let Err(error) = self.sender.send(Box::new(msg)) {
-            debug!("Failed to tell message! {}", error.to_string()); // GRCOV-START
-            Err(Error::Send(error.to_string()))
-        } else {
-            // GRCOV-END
-            debug!("Message sent successfully.");
-            Ok(())
-        }
+        self.sender.send(Box::new(msg)).map_err(|error| {
+            error!(error = %error, "Failed to tell message");
+            Error::Send {
+                reason: error.to_string(),
+            }
+        })
     }
 
     /// Sends a message to the actor and waits for a response (request-response).
@@ -222,18 +211,22 @@ where
         sender: ActorPath,
         message: A::Message,
     ) -> Result<A::Response, Error> {
-        debug!("Asking message to actor from handle reference.");
         let (response_sender, response_receiver) = oneshot::channel();
         let msg = ActorMessage::new(message, sender, Some(response_sender));
-        if let Err(error) = self.sender.send(Box::new(msg)) {
-            error!("Failed to ask message! {}", error.to_string()); // GRCOV-START
-            Err(Error::Send(error.to_string()))
-        } else {
-            // GRCOV-END
-            response_receiver
-                .await
-                .map_err(|error| Error::Send(error.to_string()))? // GRCOV-LINE
-        }
+
+        self.sender.send(Box::new(msg)).map_err(|error| {
+            error!(error = %error, "Failed to ask message");
+            Error::Send {
+                reason: error.to_string(),
+            }
+        })?;
+
+        response_receiver.await.map_err(|error| {
+            error!(error = %error, "Response channel closed");
+            Error::Send {
+                reason: error.to_string(),
+            }
+        })?
     }
 
     /// Waits for the sender to be closed.

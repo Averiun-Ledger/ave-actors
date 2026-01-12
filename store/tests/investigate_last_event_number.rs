@@ -6,12 +6,13 @@ use ave_actors_store::{
 };
 
 use ave_actors_actor::{
-    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler, Message, Response
+    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber
 };
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 
 #[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize, Default)]
 struct TestActor {
@@ -35,6 +36,10 @@ impl Actor for TestActor {
     type Message = TestMessage;
     type Response = TestResponse;
     type Event = TestEvent;
+
+         fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("TestActor", id = %id)
+        }
 }
 
 #[async_trait]
@@ -66,6 +71,7 @@ impl PersistentActor for TestActor {
 
 #[tokio::test]
 async fn test_last_event_number_after_persist() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 

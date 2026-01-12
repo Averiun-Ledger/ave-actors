@@ -11,13 +11,13 @@ use ave_actors_store::{
 };
 
 use ave_actors_actor::{
-    Actor, ActorContext, ActorSystem, EncryptedKey, Error as ActorError, Event, Handler, Message, Response
+    Actor, ActorContext, ActorSystem, EncryptedKey, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber
 };
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use tracing_test::traced_test;
+use tracing::info_span;
 
 #[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize, Default)]
 struct CounterTestActor {
@@ -52,6 +52,10 @@ impl Actor for CounterTestActor {
     type Message = CounterMessage;
     type Response = CounterResponse;
     type Event = CounterEvent;
+
+                        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("CounterTestActor", id = %id)
+        }
 }
 
 #[async_trait]
@@ -86,8 +90,8 @@ impl Handler<CounterTestActor> for CounterTestActor {
 
 /// Test that event_counter starts at 0 for a new store
 #[tokio::test]
-#[traced_test]
 async fn test_event_counter_starts_at_zero() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -111,8 +115,9 @@ async fn test_event_counter_starts_at_zero() {
 
 /// Test that event_counter = 1 after persisting first event
 #[tokio::test]
-#[traced_test]
+
 async fn test_event_counter_after_first_event() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -152,8 +157,9 @@ async fn test_event_counter_after_first_event() {
 
 /// Test event_counter increments correctly for multiple events
 #[tokio::test]
-#[traced_test]
+
 async fn test_event_counter_multiple_events() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -197,8 +203,9 @@ async fn test_event_counter_multiple_events() {
 
 /// Test state_counter after snapshot
 #[tokio::test]
-#[traced_test]
+
 async fn test_state_counter_after_snapshot() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -237,8 +244,9 @@ async fn test_state_counter_after_snapshot() {
 
 /// Test recovery with events after snapshot
 #[tokio::test]
-#[traced_test]
+
 async fn test_recovery_with_events_after_snapshot() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -286,8 +294,9 @@ async fn test_recovery_with_events_after_snapshot() {
 
 /// Test that recovery without snapshot works correctly
 #[tokio::test]
-#[traced_test]
+
 async fn test_recovery_without_snapshot() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -323,8 +332,9 @@ async fn test_recovery_without_snapshot() {
 
 /// Test edge case: snapshot at event_counter = 0
 #[tokio::test]
-#[traced_test]
+
 async fn test_snapshot_at_zero() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -363,8 +373,9 @@ async fn test_snapshot_at_zero() {
 
 /// Test LastEventsFrom with different positions
 #[tokio::test]
-#[traced_test]
+
 async fn test_last_events_from_positions() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -417,8 +428,9 @@ async fn test_last_events_from_positions() {
 
 /// Test complex scenario: multiple snapshots and recoveries
 #[tokio::test]
-#[traced_test]
+
 async fn test_multiple_snapshots_and_recoveries() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -477,8 +489,9 @@ async fn test_multiple_snapshots_and_recoveries() {
 
 /// Test that event_counter works correctly with encryption
 #[tokio::test]
-#[traced_test]
+
 async fn test_event_counter_with_encryption() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 

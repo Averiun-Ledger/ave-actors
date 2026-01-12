@@ -2,16 +2,13 @@
 
 //! Comprehensive edge case tests for Actor module to increase coverage
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, ChildAction, Error,
-    Event, Handler, Message, Response, SupervisionStrategy, Strategy,
-    FixedIntervalStrategy, NoIntervalStrategy, CustomIntervalStrategy,
-    RetryActor, RetryMessage, RetryStrategy
+    Actor, ActorContext, ActorPath, ActorSystem, ChildAction, CustomIntervalStrategy, Error, Event, FixedIntervalStrategy, Handler, Message, NoIntervalStrategy, Response, RetryActor, RetryMessage, RetryStrategy, Strategy, SupervisionStrategy, build_tracing_subscriber
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tracing::info_span;
 use std::{collections::VecDeque, time::Duration};
 use tokio_util::sync::CancellationToken;
-use tracing_test::traced_test;
 
 // Test actors for edge cases
 #[derive(Debug, Clone)]
@@ -56,6 +53,10 @@ impl Actor for EdgeCaseActor {
     type Response = EdgeCaseResponse;
     type Event = EdgeCaseEvent;
 
+    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        info_span!("EdgeCaseActor", id = %id)
+    }
+
     fn supervision_strategy() -> SupervisionStrategy {
         SupervisionStrategy::Retry(Strategy::FixedInterval(
             FixedIntervalStrategy::new(2, Duration::from_millis(50))
@@ -65,21 +66,21 @@ impl Actor for EdgeCaseActor {
     async fn pre_start(&mut self, _ctx: &mut ActorContext<Self>) -> Result<(), Error> {
         if self.fail_on_start {
             self.fail_on_start = false; // Only fail once
-            return Err(Error::Start("Intentional start failure".to_owned()));
+            return Err(Error::FunctionalCritical { description: "Intentional start failure".to_owned() });
         }
         Ok(())
     }
 
     async fn pre_restart(&mut self, ctx: &mut ActorContext<Self>, _error: Option<&Error>) -> Result<(), Error> {
         if self.fail_on_restart {
-            return Err(Error::Start("Intentional restart failure".to_owned()));
+            return Err(Error::FunctionalCritical { description: "Intentional restart failure".to_owned() });
         }
         self.pre_start(ctx).await
     }
 
     async fn pre_stop(&mut self, _ctx: &mut ActorContext<Self>) -> Result<(), Error> {
         if self.fail_on_stop {
-            return Err(Error::Stop);
+            return Err(Error::FunctionalCritical { description: "Can not stop".to_string() });
         }
         Ok(())
     }
@@ -91,7 +92,7 @@ impl Actor for EdgeCaseActor {
     fn from_response(response: Self::Response) -> Result<Self::Event, Error> {
         match response {
             EdgeCaseResponse::Value(val) => Ok(EdgeCaseEvent(val)),
-            _ => Err(Error::Functional("Cannot convert response to event".to_string()))
+            _ => Err(Error::Functional { description: "Cannot convert response to event".to_string() })
         }
     }
 }
@@ -105,16 +106,16 @@ impl Handler<EdgeCaseActor> for EdgeCaseActor {
         ctx: &mut ActorContext<EdgeCaseActor>,
     ) -> Result<EdgeCaseResponse, Error> {
         if self.fail_on_message {
-            return Err(Error::Functional("Intentional message failure".to_owned()));
+            return Err(Error::Functional { description: "Intentional message failure".to_owned() });
         }
 
         match msg {
             EdgeCaseCommand::TriggerError => {
-                ctx.emit_error(Error::Functional("Test error".to_owned())).await?;
+                ctx.emit_error(Error::Functional { description: "Test error".to_owned() }).await?;
                 Ok(EdgeCaseResponse::Success)
             }
             EdgeCaseCommand::TriggerFault => {
-                ctx.emit_fail(Error::Functional("Test fault".to_owned())).await?;
+                ctx.emit_fail(Error::Functional { description: "Test fault".to_owned() }).await?;
                 Ok(EdgeCaseResponse::Success)
             }
             EdgeCaseCommand::GetValue => Ok(EdgeCaseResponse::Value(42)),
@@ -154,8 +155,8 @@ impl Handler<EdgeCaseActor> for EdgeCaseActor {
     async fn on_child_fault(&mut self, error: Error, _ctx: &mut ActorContext<EdgeCaseActor>) -> ChildAction {
         // Return different actions based on error type
         match error {
-            Error::Functional(_) => ChildAction::Restart,
-            Error::Stop => ChildAction::Stop,
+            Error::Functional { .. } => ChildAction::Restart,
+            Error::FunctionalCritical { .. } => ChildAction::Stop,
             _ => ChildAction::Delegate,
         }
     }
@@ -173,12 +174,16 @@ impl Actor for FailingActor {
     type Response = EdgeCaseResponse;
     type Event = EdgeCaseEvent;
 
+    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        info_span!("FailingActor", id = %id)
+    }
+
     fn supervision_strategy() -> SupervisionStrategy {
         SupervisionStrategy::Stop
     }
 
     async fn pre_start(&mut self, _ctx: &mut ActorContext<Self>) -> Result<(), Error> {
-        Err(Error::Start("Always fails".to_owned()))
+        Err(Error::FunctionalCritical { description: "Always fails".to_owned() } )
     }
 }
 
@@ -196,8 +201,9 @@ impl Handler<FailingActor> for FailingActor {
 
 // Test supervision strategies
 #[tokio::test]
-#[traced_test]
 async fn test_actor_with_retry_supervision() {
+    build_tracing_subscriber();
+
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -219,6 +225,7 @@ async fn test_actor_with_retry_supervision() {
 
 #[tokio::test]
 async fn test_actor_with_stop_supervision() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -231,6 +238,7 @@ async fn test_actor_with_stop_supervision() {
 
 #[tokio::test]
 async fn test_custom_interval_strategy() {
+    build_tracing_subscriber();
     let mut strategy = Strategy::CustomIntervalStrategy(
         CustomIntervalStrategy::new(VecDeque::from([
             Duration::from_millis(10),
@@ -248,6 +256,7 @@ async fn test_custom_interval_strategy() {
 
 #[tokio::test]
 async fn test_no_interval_strategy() {
+    build_tracing_subscriber();
     let mut strategy = Strategy::NoInterval(NoIntervalStrategy::new(5));
     assert_eq!(strategy.max_retries(), 5);
     assert_eq!(strategy.next_backoff(), None);
@@ -255,6 +264,7 @@ async fn test_no_interval_strategy() {
 
 #[tokio::test]
 async fn test_actor_ref_operations() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -285,6 +295,7 @@ async fn test_actor_ref_operations() {
 
 #[tokio::test]
 async fn test_event_subscription() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -307,6 +318,7 @@ async fn test_event_subscription() {
 
 #[tokio::test]
 async fn test_child_actor_management() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -336,6 +348,7 @@ async fn test_child_actor_management() {
 
 #[tokio::test]
 async fn test_error_and_fault_handling() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -373,6 +386,7 @@ async fn test_error_and_fault_handling() {
 
 #[tokio::test]
 async fn test_system_helpers() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -395,6 +409,7 @@ async fn test_system_helpers() {
 
 #[tokio::test]
 async fn test_system_children_listing() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -419,6 +434,7 @@ async fn test_system_children_listing() {
 
 #[tokio::test]
 async fn test_retry_actor_functionality() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -448,6 +464,7 @@ async fn test_retry_actor_functionality() {
 
 #[tokio::test]
 async fn test_system_stop() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     let runner_handle = tokio::spawn(async move { runner.run().await });
 

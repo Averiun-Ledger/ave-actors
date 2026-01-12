@@ -1,6 +1,6 @@
 [package]
 name = "ave-actors-actor"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -22,7 +22,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"], optional = true}
 
 [dev-dependencies]
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
-tracing-test = { workspace = true }
+ave-actors-actor = {workspace = true, features = ["test"] }
+
+[features]
+test = ["tracing-subscriber"]

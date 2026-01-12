@@ -1,5 +1,3 @@
-
-
 //! # Actor system
 //!
 //! The `system` module provides the `ActorSystem` type. The `ActorSystem` type is the responsible for
@@ -16,7 +14,7 @@ use crate::{
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use tracing::{debug, error};
+use tracing::{Instrument, Span, debug, error, warn};
 
 use std::{any::Any, collections::HashMap, sync::Arc};
 
@@ -92,7 +90,7 @@ pub struct SystemRef {
     root_senders: Arc<RwLock<Vec<StopSender>>>,
 
     /// Cancellation token for system-wide shutdown coordination.
-    token: CancellationToken
+    token: CancellationToken,
 }
 
 impl SystemRef {
@@ -126,18 +124,21 @@ impl SystemRef {
 
         tokio::spawn(async move {
             token_clone.cancelled().await;
-            debug!("Stopping actor system...");
+            debug!("Stopping actor system");
             let mut root_senders = root_sender_clone.write().await;
             while let Some(sender) = root_senders.pop() {
                 let (stop_sender, stop_receiver) = oneshot::channel();
                 if sender.send(Some(stop_sender)).await.is_err() {
+                    warn!("Failed to send stop signal to root actor");
                     return;
                 } else {
                     let _ = stop_receiver.await;
                 };
             }
 
-            let _ = event_sender.send(SystemEvent::StopSystem).await;
+            if let Err(e) = event_sender.send(SystemEvent::StopSystem).await {
+                error!(error = ?e, "Failed to send StopSystem event");
+            }
         });
 
         SystemRef {
@@ -176,6 +177,7 @@ impl SystemRef {
         path: ActorPath,
         actor: A,
         parent_error_sender: Option<ChildErrorSender>,
+        span: Span,
     ) -> Result<(ActorRef<A>, StopSender), Error>
     where
         A: Actor + Handler<A>,
@@ -184,8 +186,8 @@ impl SystemRef {
         {
             let actors = self.actors.read().await;
             if actors.contains_key(&path) {
-                error!("Actor '{}' already exists!", &path);
-                return Err(Error::Exists(path));
+                error!(path = %path, "Actor already exists");
+                return Err(Error::Exists { path });
             }
         }
         // Create the actor runner and init it.
@@ -202,14 +204,33 @@ impl SystemRef {
         let (sender, receiver) = oneshot::channel::<bool>();
 
         let stop_sender_clone = stop_sender.clone();
-        tokio::spawn(async move {
-            runner.init(system, stop_sender_clone, Some(sender)).await;
-        });
+        let span_clone = span.clone();
+        tokio::spawn(
+            async move {
+                runner
+                    .init(system, stop_sender_clone, Some(sender), span_clone)
+                    .await;
+            }
+            .instrument(span),
+        );
 
-        if receiver.await.map_err(|e| Error::Start(e.to_string()))? {
-            Ok((actor_ref, stop_sender))
-        } else {
-            Err(Error::Start(format!("Runner can not init {}", path)))
+        match receiver.await {
+            Ok(true) => {
+                debug!(path = %path, "Actor initialized successfully");
+                Ok((actor_ref, stop_sender))
+            }
+            Ok(false) => {
+                error!(path = %path, "Actor runner failed to initialize");
+                Err(Error::FunctionalCritical {
+                    description: format!("Runner can not init {}", path),
+                })
+            }
+            Err(e) => {
+                error!(path = %path, error = ?e, "Failed to receive initialization signal");
+                Err(Error::FunctionalCritical {
+                    description: e.to_string(),
+                })
+            }
         }
     }
 
@@ -242,8 +263,11 @@ impl SystemRef {
     {
         let actor = actor_init.into_actor();
         let path = ActorPath::from("/user") / name;
-        let (actor_ref, stop_sender, ..) =
-            self.create_actor_path::<A>(path, actor, None).await?;
+        let id = &path.key();
+
+        let (actor_ref, stop_sender, ..) = self
+            .create_actor_path::<A>(path, actor, None, A::get_span(id, None))
+            .await?;
         let mut senders = self.root_senders.write().await;
         senders.push(stop_sender);
         Ok(actor_ref)
@@ -393,12 +417,12 @@ impl SystemRunner {
     /// - Returns when the system is stopped.
     ///
     pub async fn run(&mut self) {
-        debug!("Running actor system...");
-            tokio::select! {
-                Some(event) = self.event_receiver.recv() => {
-                    match event {
-                        SystemEvent::StopSystem => {
-                            debug!("Actor system stopped.");
+        debug!("Running actor system");
+        tokio::select! {
+            Some(event) = self.event_receiver.recv() => {
+                match event {
+                    SystemEvent::StopSystem => {
+                        debug!("Actor system stopped");
                     }
                 }
             }
@@ -406,33 +430,45 @@ impl SystemRunner {
     }
 }
 
+#[cfg(feature = "test")]
+use tracing_subscriber::{
+    EnvFilter,
+    fmt::{self, format::FmtSpan},
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
+};
+
+#[cfg(feature = "test")]
+use std::sync::Once;
+
+#[cfg(feature = "test")]
+static INIT: Once = Once::new();
+
+#[cfg(feature = "test")]
+#[allow(dead_code)]
+pub fn build_tracing_subscriber() {
+    INIT.call_once(|| {
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info"));
+
+        let layer = fmt::layer().with_test_writer().with_span_events(FmtSpan::NONE);
+
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(layer)
+            .try_init()
+            .ok();
+    });
+}
+
 #[cfg(test)]
 mod tests {
 
     use super::*;
 
-    use tracing_test::traced_test;
-
-    #[tokio::test]
-    #[traced_test]
-    async fn test_stop_actor_system() {
-        let token = CancellationToken::new();
-        let (_system, mut runner) = ActorSystem::create(token.clone());
-
-        tokio::spawn(async move {
-            runner.run().await;
-        });
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        assert!(logs_contain("Running actor system..."));
-        token.cancel();
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-        assert!(logs_contain("Stopping actor system..."));
-        assert!(logs_contain("Actor system stopped."));
-    }
-
     #[tokio::test]
     async fn test_helpers() {
+        build_tracing_subscriber();
         let (system, _) = ActorSystem::create(CancellationToken::new());
         let helper = TestHelper { value: 42 };
         system.add_helper("test", helper).await;

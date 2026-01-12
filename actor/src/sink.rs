@@ -11,7 +11,7 @@ use crate::Event;
 use async_trait::async_trait;
 use tokio::sync::broadcast::{Receiver as EventReceiver, error::RecvError};
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// A sink that receives events from an actor and notifies a subscriber.
 /// The Sink runs in its own task and processes events asynchronously,
@@ -65,18 +65,16 @@ impl<E: Event> Sink<E> {
         loop {
             match self.event_receiver.recv().await {
                 Ok(event) => {
-                    debug!(
-                        "Received event: {:?}. Notify to the subscriber.",
-                        event
-                    );
                     self.subscriber.notify(event).await;
                 }
                 Err(error) => {
                     match error {
-                        RecvError::Closed => break,
-                        RecvError::Lagged(_) => {
-                            // If the receiver is lagging, we should try to catch up
-                            // by processing the events that are still in the channel.
+                        RecvError::Closed => {
+                            debug!("Event channel closed, sink stopping");
+                            break;
+                        }
+                        RecvError::Lagged(skipped) => {
+                            warn!(skipped, "Sink lagged, skipped events");
                             continue;
                         }
                     }

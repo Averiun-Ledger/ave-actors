@@ -1,12 +1,13 @@
 //! Test specific scenario: brand new actor, ONE event, graceful stop, no recovery
 
-use ave_actors_actor::{Actor, ActorContext, ActorSystem, Handler, Message, Response, Event, Error as ActorError, ActorPath};
+use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber};
 use ave_actors_store::store::{PersistentActor, FullPersistence};
 use ave_actors_store::memory::MemoryManager;
 use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -39,6 +40,10 @@ impl Actor for SingleEventActor {
     type Message = Msg;
     type Response = Resp;
     type Event = DataSet;
+
+     fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+            info_span!("SingleEventActor", id = %id)
+        }
 
     async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
         println!("  [PRE_START] Actor starting, current data: '{}'", self.data);
@@ -96,6 +101,7 @@ impl PersistentActor for SingleEventActor {
 
 #[tokio::test]
 async fn test_single_event_no_recovery() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
@@ -148,6 +154,7 @@ async fn test_single_event_no_recovery() {
 
 #[tokio::test]
 async fn test_debug_event_counter_after_first_event() {
+    build_tracing_subscriber();
     use ave_actors_store::store::{Store, StoreCommand, StoreResponse};
 
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());

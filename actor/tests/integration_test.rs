@@ -4,11 +4,12 @@
 
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
-    Event, Handler, Message, Response,
+    Event, Handler, Message, Response, build_tracing_subscriber,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 use tracing_subscriber::EnvFilter;
 
 // Defines parent actor
@@ -53,6 +54,10 @@ impl Actor for TestActor {
     type Message = TestCommand;
     type Response = TestResponse;
     type Event = TestEvent;
+
+    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        info_span!("TestActor", id = %id)
+    }
 
     async fn pre_start(
         &mut self,
@@ -107,7 +112,7 @@ impl Handler<TestActor> for TestActor {
         error: Error,
         ctx: &mut ActorContext<TestActor>,
     ) {
-        assert_eq!(error, Error::Functional("Value is too high".to_owned()));
+        assert_eq!(error, Error::Functional { description: "Value is too high".to_owned() });
         ctx.publish_event(TestEvent(0)).await.unwrap();
     }
 
@@ -119,7 +124,7 @@ impl Handler<TestActor> for TestActor {
     ) -> ChildAction {
         assert_eq!(
             error,
-            Error::Functional("Value produces a fault".to_owned())
+            Error::Functional { description: "Value produces a fault".to_owned() }
         );
         ctx.publish_event(TestEvent(100)).await.unwrap();
         ChildAction::Stop
@@ -167,6 +172,11 @@ impl Actor for ChildActor {
     type Message = ChildCommand;
     type Response = ChildResponse;
     type Event = ChildEvent;
+
+    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        info_span!("ChildActor", id = %id)
+    }
+
 }
 
 // Implements handler for child actor.
@@ -185,16 +195,16 @@ impl Handler<ChildActor> for ChildActor {
                     ctx.publish_event(ChildEvent(self.state)).await.unwrap();
                     Ok(ChildResponse::None)
                 } else if value > 10 && value < 100 {
-                    ctx.emit_error(Error::Functional(
-                        "Value is too high".to_owned(),
-                    ))
+                    ctx.emit_error(Error::Functional {
+                        description: "Value is too high".to_owned(),
+                    })
                     .await
                     .unwrap();
                     Ok(ChildResponse::State(100))
                 } else {
-                    ctx.emit_fail(Error::Functional(
-                        "Value produces a fault".to_owned(),
-                    ))
+                    ctx.emit_fail(Error::Functional {
+                        description: "Value produces a fault".to_owned(),
+                    })
                     .await
                     .unwrap();
                     Ok(ChildResponse::None)
@@ -207,6 +217,7 @@ impl Handler<ChildActor> for ChildActor {
 
 #[tokio::test]
 async fn test_actor() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     // Init runner.
     tokio::spawn(async move {
@@ -245,6 +256,7 @@ async fn test_actor() {
 
 #[tokio::test]
 async fn test_actor_error() {
+    build_tracing_subscriber();
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     // Init runner.
     tokio::spawn(async move {
@@ -267,6 +279,7 @@ async fn test_actor_error() {
 
 #[tokio::test]
 async fn test_actor_fault() {
+    build_tracing_subscriber();
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();

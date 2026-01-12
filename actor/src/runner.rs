@@ -23,7 +23,7 @@ use tokio::{
         mpsc, oneshot,
     },
 };
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 /// Inner sender and receiver types.
 pub type InnerSender<A> = mpsc::UnboundedSender<InnerAction<A>>;
@@ -65,7 +65,6 @@ where
         actor: A,
         parent_sender: Option<ChildErrorSender>,
     ) -> (Self, ActorRef<A>, StopSender) {
-        debug!("Creating new actor runner.");
         let (sender, receiver) = mailbox();
         let (stop_sender, stop_receiver) = mpsc::channel(100);
         let (error_sender, error_receiver) = mpsc::unbounded_channel();
@@ -103,17 +102,16 @@ where
         system: SystemRef,
         stop_sender: StopSender,
         mut sender: Option<oneshot::Sender<bool>>,
+        span: tracing::Span,
     ) {
-        debug!("Initializing actor {} runner.", &self.path);
-
         // Create the actor context.
-        debug!("Creating actor {} context.", &self.path);
         let mut ctx: ActorContext<A> = ActorContext::new(
             stop_sender,
             self.path.clone(),
             system.clone(),
             self.error_sender.clone(),
             self.inner_sender.clone(),
+            span
         );
 
         // Main loop of the actor.
@@ -122,21 +120,14 @@ where
             match self.lifecycle {
                 // State: CREATED
                 ActorLifecycle::Created => {
-                    debug!("Actor {} is created.", &self.path);
                     // Pre-start hook.
                     match self.actor.pre_start(&mut ctx).await {
                         Ok(_) => {
-                            debug!(
-                                "Actor '{}' has started successfully.",
-                                &self.path
-                            );
+                            debug!("Actor started");
                             self.lifecycle = ActorLifecycle::Started;
                         }
                         Err(err) => {
-                            error!(
-                                "Actor {} failed to start: {:?}",
-                                &self.path, err
-                            );
+                            error!(error = ?err, "Actor failed to start");
                             ctx.set_error(err);
                             self.lifecycle = ActorLifecycle::Failed;
                         }
@@ -144,11 +135,10 @@ where
                 }
                 // State: STARTED
                 ActorLifecycle::Started => {
-                    debug!("Actor {} is started.", &self.path);
                     if let Some(sender) = sender.take() {
-                        sender.send(true).unwrap_or_else(|err| {
-                            error!("Failed to send signal: {:?}", err);
-                        });
+                        if let Err(err) = sender.send(true) {
+                            error!(error = ?err, "Failed to send start signal");
+                        }
                     }
                     self.run(&mut ctx).await;
                     if ctx.error().is_some() {
@@ -167,16 +157,15 @@ where
                 }
                 // State: STOPPED
                 ActorLifecycle::Stopped => {
-                    debug!("Actor {} is stopped.", &self.path);
                     // Post stop hook.
-                    if self.actor.post_stop(&mut ctx).await.is_err() {
-                        error!("Actor '{}' failed to stop!", &self.path);
+                    if let Err(e) = self.actor.post_stop(&mut ctx).await {
+                        error!(error = ?e, "Actor failed post_stop");
                     }
                     self.lifecycle = ActorLifecycle::Terminated;
                 }
                 // State: FAILED
                 ActorLifecycle::Failed => {
-                    debug!("Actor {} is faulty.", &self.path);
+                    warn!("Actor failed");
                     if self.parent_sender.is_none() {
                         self.lifecycle = ActorLifecycle::Restarted;
                     } else {
@@ -186,12 +175,12 @@ where
                 }
                 // State: TERMINATED
                 ActorLifecycle::Terminated => {
-                    debug!("Actor {} is terminated.", &self.path);
+                    debug!("Actor terminated");
                     ctx.system().remove_actor(&self.path.clone()).await;
                     if let Some(sender) = sender.take() {
-                        sender.send(false).unwrap_or_else(|err| {
-                            error!("Failed to send signal: {:?}", err);
-                        });
+                        if let Err(err) = sender.send(false) {
+                            error!(error = ?err, "Failed to send termination signal");
+                        }
                     }
                     break;
                 }
@@ -210,15 +199,12 @@ where
     /// * `ctx` - The actor context.
     ///
     pub(crate) async fn run(&mut self, ctx: &mut ActorContext<A>) {
-        debug!("Running actor {}.", &self.path);
-
         loop {
             select! {
                 stop = self.stop_receiver.recv() => {
-                    debug!("Stopping actor.");
-                    if self.actor.pre_stop(ctx).await.is_err() {
-                        error!("Failed to stop actor!");
-                        let _ = ctx.emit_fail(Error::Stop).await;
+                    if let Err(e) = self.actor.pre_stop(ctx).await {
+                        error!(error = ?e, "pre_stop failed");
+                        let _ = ctx.emit_fail(e).await;
                     }
 
                     ctx.stop_childs().await;
@@ -237,11 +223,15 @@ where
                 error =  self.error_receiver.recv(), if !self.stop_signal => {
                     if let Some(error) = error {
                         match error {
-                            ChildError::Error { error } => self.actor.on_child_error(error, ctx).await,
+                            ChildError::Error { error } => {
+                                debug!(error = ?error, "Child error received");
+                                self.actor.on_child_error(error, ctx).await
+                            },
                             ChildError::Fault { error, sender } => {
+                                warn!(error = ?error, "Child fault received");
                                 let action = self.actor.on_child_fault(error, ctx).await;
                                 if sender.send(action).is_err() {
-                                    error!("Can not send action to child!");
+                                    error!("Failed to send action to child");
                                 }
                             },
                         }
@@ -280,55 +270,36 @@ where
     ) {
         match event {
             InnerAction::Event(event) => {
-                match self.event_sender.send(event.clone()) {
-                    Ok(size) => {
-                        debug!(
-                            "Event sent successfully to {} subscribers.",
-                            size
-                        );
-                    }
-                    Err(_err) => {
-                        error!("Failed to send event");
-                    }
+                if let Err(_) = self.event_sender.send(event.clone()) {
+                    error!("Failed to broadcast event");
                 }
             }
             InnerAction::Error(error) => {
                 if let Some(parent_helper) = self.parent_sender.as_mut() {
-                    // Send error to parent.
-                    parent_helper
-                        .send(ChildError::Error { error })
-                        .unwrap_or_else(|err| {
-                            error!(
-                                "Failed to send error to parent actor: {:?}",
-                                err
-                            );
-                        });
+                    if let Err(err) = parent_helper.send(ChildError::Error { error }) {
+                        error!(error = ?err, "Failed to send error to parent");
+                    }
                 }
             }
             InnerAction::Fail(error) => {
                 // If the actor has a parent, send the fail to the parent.
                 if let Some(parent_helper) = self.parent_sender.as_mut() {
                     let (action_sender, action_receiver) = oneshot::channel();
-                    //self.action_receiver = Some(action_receiver);
-                    parent_helper
-                        .send(ChildError::Fault {
-                            error,
-                            sender: action_sender,
-                        })
-                        .unwrap_or_else(|err| {
-                            error!(
-                                "Failed to send fail to parent actor: {:?}",
-                                err
-                            );
-                        });
-                    // Sets the state from action.
-                    if let Ok(action) = action_receiver.await {
-                        // Clean error.
-                        ctx.clean_error();
-                        match action {
-                            ChildAction::Stop => {}
-                            ChildAction::Restart | ChildAction::Delegate => {
-                                self.lifecycle = ActorLifecycle::Restarted;
+                    if let Err(err) = parent_helper.send(ChildError::Fault {
+                        error,
+                        sender: action_sender,
+                    }) {
+                        error!(error = ?err, "Failed to send fail to parent");
+                    } else {
+                        // Sets the state from action.
+                        if let Ok(action) = action_receiver.await {
+                            ctx.clean_error();
+                            match action {
+                                ChildAction::Stop => {}
+                                ChildAction::Restart | ChildAction::Delegate => {
+                                    debug!("Parent requested actor restart");
+                                    self.lifecycle = ActorLifecycle::Restarted;
+                                }
                             }
                         }
                     }
@@ -350,18 +321,14 @@ where
     ) {
         match strategy {
             SupervisionStrategy::Stop => {
-                error!("Actor '{}' failed to start!", &self.path);
+                error!("Actor failed, supervision strategy is Stop");
                 self.lifecycle = ActorLifecycle::Stopped;
             }
             SupervisionStrategy::Retry(mut retry_strategy) => {
-                debug!(
-                    "Restarting actor with retry strategy: {:?}",
-                    &retry_strategy
-                );
                 if *retries < retry_strategy.max_retries() {
-                    debug!("retries: {}", &retries);
+                    debug!(retries = *retries, max_retries = retry_strategy.max_retries(), "Applying retry strategy");
                     if let Some(duration) = retry_strategy.next_backoff() {
-                        debug!("Backoff for {:?}", &duration);
+                        debug!(backoff = ?duration, "Waiting before retry");
                         tokio::time::sleep(duration).await;
                     }
                     *retries += 1;
@@ -376,6 +343,7 @@ where
                         }
                     }
                 } else {
+                    error!(retries = *retries, "Max retries exceeded, stopping actor");
                     self.lifecycle = ActorLifecycle::Stopped;
                 }
             }
@@ -400,16 +368,13 @@ mod tests {
     use super::*;
 
     use crate::{
-        Error,
-        actor::{Actor, ActorContext, Event, Handler, Message},
-        supervision::{FixedIntervalStrategy, Strategy, SupervisionStrategy},
-        system::SystemRef,
+        Error, actor::{Actor, ActorContext, Event, Handler, Message}, build_tracing_subscriber, supervision::{FixedIntervalStrategy, Strategy, SupervisionStrategy}, system::SystemRef
     };
     use async_trait::async_trait;
     use serde::{Deserialize, Serialize};
 
     use tokio_util::sync::CancellationToken;
-    use tracing_test::traced_test;
+    use tracing::{Instrument, info, info_span};
     use borsh::{BorshSerialize, BorshDeserialize};
 
     use std::time::Duration;
@@ -440,6 +405,10 @@ mod tests {
         type Response = ();
         type Event = TestEvent;
 
+            fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        info_span!("TestActor", id = %id)
+    }
+
         fn supervision_strategy() -> SupervisionStrategy {
             SupervisionStrategy::Retry(Strategy::FixedInterval(
                 FixedIntervalStrategy::new(3, Duration::from_secs(1)),
@@ -451,7 +420,7 @@ mod tests {
             _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             if self.failed {
-                Err(Error::Start("PreStart failed".to_owned()))
+                Err(Error::FunctionalCritical { description: "PreStart failed".to_owned() })
             } else {
                 Ok(())
             }
@@ -488,6 +457,7 @@ mod tests {
             debug!("Handling empty message");
             match msg {
                 TestMessage(ErrorMessage::Stop) => {
+                    info!("Stopped");
                     ctx.stop(None).await;
                     debug!("Actor stopped");
                 }
@@ -497,8 +467,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[traced_test]
     async fn test_actor_root_failed() {
+        build_tracing_subscriber();
         let (event_sender, _) = mpsc::channel(100);
 
         let system = SystemRef::new(event_sender, CancellationToken::new());
@@ -510,8 +480,8 @@ mod tests {
 
         // Init the actor runner.
         tokio::spawn(async move {
-            runner.init(inner_system, stop_sender, None).await;
-        });
+            runner.init(inner_system, stop_sender, None, TestActor::get_span("id", None)).await;
+        }.instrument(TestActor::get_span("spawn", None)));
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         actor_ref
@@ -520,47 +490,6 @@ mod tests {
             .unwrap();
 
         tokio::time::sleep(Duration::from_secs(2)).await;
-
-        assert!(logs_contain("Actor /user/test is terminated"));
-
-        assert!(
-            system
-                .get_actor::<TestActor>(&ActorPath::from("/user/test"))
-                .await
-                .is_none()
-        );
-
-        let actor = TestActor { failed: true };
-
-        let (mut runner, actor_ref, stop_sender) =
-            ActorRunner::create(ActorPath::from("/user/test"), actor, None);
-        let inner_system = system.clone();
-
-        // Init the actor runner.
-        tokio::spawn(async move {
-            runner.init(inner_system, stop_sender, None).await;
-        });
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        assert!(logs_contain("Creating new actor runner"));
-        assert!(logs_contain("Creating new handle reference"));
-        assert!(logs_contain("Initializing actor /user/test runner"));
-        assert!(logs_contain("Creating actor /user/test context"));
-        assert!(logs_contain("Actor /user/test is created"));
-        assert!(logs_contain("Actor /user/test failed to start"));
-        assert!(logs_contain("Actor /user/test is faulty"));
-        assert!(logs_contain("Restarting actor with retry strategy"));
-        assert!(logs_contain("Actor /user/test is started"));
-        assert!(logs_contain("Running actor /user/test"));
-
-        actor_ref
-            .tell(TestMessage(ErrorMessage::Stop))
-            .await
-            .unwrap();
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        assert!(logs_contain("Actor /user/test is terminated"));
 
         assert!(
             system

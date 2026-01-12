@@ -12,7 +12,7 @@ use rocksdb::{
     ColumnFamilyDescriptor, DB, DBCompactionStyle, DBCompressionType,
     DBIteratorWithThreadMode, IteratorMode, LogLevel, Options, WriteOptions,
 };
-use tracing::info;
+use tracing::{debug, error, info, warn};
 
 use std::{env, fs, path::{Path, PathBuf}, sync::Arc};
 
@@ -69,14 +69,17 @@ impl RocksDbManager {
     /// - Enables "create_if_missing" option
     ///
     pub fn new(path: &PathBuf) -> Result<Self, Error> {
-        info!("Creating RockDB database manager");
+        info!("Creating RocksDB database manager");
         if !Path::new(&path).exists() {
-            info!("Path does not exist, creating it");
+            debug!("Path does not exist, creating it");
             fs::create_dir_all(path).map_err(|e| {
-                Error::CreateStore(format!(
+                error!(path = ?path, error = %e, "Failed to create RocksDB directory");
+                Error::CreateStore {
+                    reason: format!(
                     "fail RockDB create directory: {}",
                     e
-                ))
+                ),
+                }
             })?;
         }
 
@@ -99,8 +102,14 @@ impl RocksDbManager {
         }
 
         let cfs = match DB::list_cf(&options, path) {
-            Ok(cf_names) => cf_names,
-            Err(_) => vec!["default".to_string()], // Si la base de datos no existe, usamos solo `default`
+            Ok(cf_names) => {
+                debug!(count = cf_names.len(), "Found existing column families");
+                cf_names
+            }
+            Err(_) => {
+                debug!("No existing column families, using default");
+                vec!["default".to_string()]
+            }
         };
 
         // Crear descriptores para cada column family
@@ -111,11 +120,14 @@ impl RocksDbManager {
             .collect();
 
         // Abrir la base de datos con las column families existentes
+        debug!(path = ?path, "Opening RocksDB database");
         let db = DB::open_cf_descriptors(&options, path, cf_descriptors)
             .map_err(|e| {
-                Error::CreateStore(format!("Can not open RockDB: {}", e))
+                error!(path = ?path, error = ?e, "Failed to open RocksDB");
+                Error::CreateStore { reason: format!("Can not open RockDB: {}", e) }
             })?;
 
+        debug!("RocksDB database manager created successfully");
         Ok(Self {
             opts: options,
             db: Arc::new(db),
@@ -251,10 +263,15 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         prefix: &str,
     ) -> Result<RocksDbStore, Error> {
         if self.db.cf_handle(name).is_none() {
+            debug!(cf = name, "Creating column family for collection");
             self.db
                 .create_cf(name, &self.opts)
-                .map_err(|e| Error::CreateStore(format!("{:?}", e)))?;
+                .map_err(|e| {
+                    error!(cf = name, error = ?e, "Failed to create collection column family");
+                    Error::CreateStore { reason: format!("{:?}", e) }
+                })?;
         }
+        debug!(cf = name, prefix = prefix, "Collection created");
         Ok(RocksDbStore {
             name: name.to_owned(),
             prefix: prefix.to_owned(),
@@ -269,10 +286,15 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         prefix: &str,
     ) -> Result<RocksDbStore, Error> {
         if self.db.cf_handle(name).is_none() {
+            debug!(cf = name, "Creating column family for state");
             self.db
                 .create_cf(name, &self.opts)
-                .map_err(|e| Error::CreateStore(format!("{:?}", e)))?;
+                .map_err(|e| {
+                    error!(cf = name, error = ?e, "Failed to create state column family");
+                    Error::CreateStore { reason: format!("{:?}", e) }
+                })?;
         }
+        debug!(cf = name, prefix = prefix, "State created");
         Ok(RocksDbStore {
             name: name.to_owned(),
             prefix: prefix.to_owned(),
@@ -316,17 +338,22 @@ impl State for RocksDbStore {
             let result = self
                 .store
                 .get_cf(&handle, self.prefix.clone())
-                .map_err(|e| Error::Get(format!("{:?}", e)))?;
+                .map_err(|e| {
+                    error!(cf = %self.name, error = ?e, "Failed to get state");
+                    Error::Get { key: "unknown".to_owned(), reason: format!("{:?}", e) }
+                })?;
             match result {
                 Some(value) => Ok(value),
-                _ => Err(Error::EntryNotFound(
-                    "Query returned no rows".to_owned(),
-                )),
+                _ => Err(Error::EntryNotFound {
+                    key: "Query returned no rows".to_owned(),
+                }),
             }
         } else {
-            Err(Error::Store(
-                "RocksDB column for the store does not exist.".to_owned(),
-            ))
+            error!(cf = %self.name, "Column family not found for state get");
+            Err(Error::Store {
+                operation: "column_access".to_owned(),
+                reason: "RocksDB column for the store does not exist.".to_owned(),
+            })
         }
     }
 
@@ -336,11 +363,16 @@ impl State for RocksDbStore {
             Ok(self
                 .store
                 .put_cf_opt(&handle, self.prefix.clone(), data, &wopts)
-                .map_err(|e| Error::Store(format!("{:?}", e)))?)
+                .map_err(|e| {
+                    error!(cf = %self.name, error = ?e, "Failed to put state");
+                    Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
+                })?)
         } else {
-            Err(Error::Store(
-                "RocksDB column for the store does not exist.".to_owned(),
-            ))
+            error!(cf = %self.name, "Column family not found for state put");
+            Err(Error::Store {
+                operation: "column_access".to_owned(),
+                reason: "RocksDB column for the store does not exist.".to_owned(),
+            })
         }
     }
 
@@ -350,11 +382,16 @@ impl State for RocksDbStore {
             Ok(self
                 .store
                 .delete_cf_opt(&handle, self.prefix.clone(), &wopts)
-                .map_err(|e| Error::Store(format!("{:?}", e)))?)
+                .map_err(|e| {
+                    warn!(cf = %self.name, error = ?e, "Failed to delete state");
+                    Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
+                })?)
         } else {
-            Err(Error::Store(
-                "RocksDB column for the store does not exist.".to_owned(),
-            ))
+            error!(cf = %self.name, "Column family not found for state delete");
+            Err(Error::Store {
+                operation: "column_access".to_owned(),
+                reason: "RocksDB column for the store does not exist.".to_owned(),
+            })
         }
     }
 
@@ -365,11 +402,16 @@ impl State for RocksDbStore {
             // even if someone reused/anidated prefixes.
             self.store
                 .delete_cf_opt(&handle, self.prefix.clone(), &wopts)
-                .map_err(|e| Error::Store(format!("{:?}", e)))
+                .map_err(|e| {
+                    error!(cf = %self.name, error = ?e, "Failed to purge state");
+                    Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
+                })
         } else {
-            Err(Error::Store(
-                "RocksDB column for the store does not exist.".to_owned(),
-            ))
+            error!(cf = %self.name, "Column family not found for state purge");
+            Err(Error::Store {
+                operation: "column_access".to_owned(),
+                reason: "RocksDB column for the store does not exist.".to_owned(),
+            })
         }
     }
 
@@ -378,11 +420,16 @@ impl State for RocksDbStore {
             Ok(self
                 .store
                 .flush_cf(&handle)
-                .map_err(|e| Error::Store(format!("{:?}", e)))?)
+                .map_err(|e| {
+                    error!(cf = %self.name, error = ?e, "Failed to flush state");
+                    Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
+                })?)
         } else {
-            Err(Error::Store(
-                "RocksDB column for the store does not exist.".to_owned(),
-            ))
+            error!(cf = %self.name, "Column family not found for state flush");
+            Err(Error::Store {
+                operation: "column_access".to_owned(),
+                reason: "RocksDB column for the store does not exist.".to_owned(),
+            })
         }
     }
 }
@@ -398,17 +445,22 @@ impl Collection for RocksDbStore {
             let result = self
                 .store
                 .get_cf(&handle, key)
-                .map_err(|e| Error::Get(format!("{:?}", e)))?;
+                .map_err(|e| {
+                    error!(cf = %self.name, error = ?e, "Failed to get collection entry");
+                    Error::Get { key: "unknown".to_owned(), reason: format!("{:?}", e) }
+                })?;
             match result {
                 Some(value) => Ok(value),
-                _ => Err(Error::EntryNotFound(
-                    "Query returned no rows".to_owned(),
-                )),
+                _ => Err(Error::EntryNotFound {
+                    key: "Query returned no rows".to_owned(),
+                }),
             }
         } else {
-            Err(Error::Store(
-                "RocksDB column for the store does not exist.".to_owned(),
-            ))
+            error!(cf = %self.name, "Column family not found for collection get");
+            Err(Error::Store {
+                operation: "column_access".to_owned(),
+                reason: "RocksDB column for the store does not exist.".to_owned(),
+            })
         }
     }
 
@@ -419,11 +471,16 @@ impl Collection for RocksDbStore {
             Ok(self
                 .store
                 .put_cf_opt(&handle, key, data, &wopts)
-                .map_err(|e| Error::Store(format!("{:?}", e)))?)
+                .map_err(|e| {
+                    error!(cf = %self.name, error = ?e, "Failed to put collection entry");
+                    Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
+                })?)
         } else {
-            Err(Error::Store(
-                "RocksDB column for the store does not exist.".to_owned(),
-            ))
+            error!(cf = %self.name, "Column family not found for collection put");
+            Err(Error::Store {
+                operation: "column_access".to_owned(),
+                reason: "RocksDB column for the store does not exist.".to_owned(),
+            })
         }
     }
 
@@ -434,11 +491,16 @@ impl Collection for RocksDbStore {
             Ok(self
                 .store
                 .delete_cf_opt(&handle, key, &wopts)
-                .map_err(|e| Error::Store(format!("{:?}", e)))?)
+                .map_err(|e| {
+                    warn!(cf = %self.name, error = ?e, "Failed to delete collection entry");
+                    Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
+                })?)
         } else {
-            Err(Error::Store(
-                "RocksDB column for the store does not exist.".to_owned(),
-            ))
+            error!(cf = %self.name, "Column family not found for collection delete");
+            Err(Error::Store {
+                operation: "column_access".to_owned(),
+                reason: "RocksDB column for the store does not exist.".to_owned(),
+            })
         }
     }
 
@@ -451,13 +513,19 @@ impl Collection for RocksDbStore {
             // Contract: todas las claves de colección deben seguir "{prefix}.{key}"
             // y no debe haber claves en esta CF que no empiecen por "{prefix}.";
             // este rango asume ese layout para borrar solo los eventos de este actor.
+            debug!(cf = %self.name, "Purging collection with range delete");
             self.store
                 .delete_range_cf_opt(&handle, start, end, &wopts)
-                .map_err(|e| Error::Store(format!("{:?}", e)))
+                .map_err(|e| {
+                    error!(cf = %self.name, error = ?e, "Failed to purge collection");
+                    Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
+                })
         } else {
-            Err(Error::Store(
-                "RocksDB column for the store does not exist.".to_owned(),
-            ))
+            error!(cf = %self.name, "Column family not found for collection purge");
+            Err(Error::Store {
+                operation: "column_access".to_owned(),
+                reason: "RocksDB column for the store does not exist.".to_owned(),
+            })
         }
     }
 
@@ -478,11 +546,16 @@ impl Collection for RocksDbStore {
             Ok(self
                 .store
                 .flush_cf(&handle)
-                .map_err(|e| Error::Store(format!("{:?}", e)))?)
+                .map_err(|e| {
+                    error!(cf = %self.name, error = ?e, "Failed to flush collection");
+                    Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
+                })?)
         } else {
-            Err(Error::Store(
-                "RocksDB column for the store does not exist.".to_owned(),
-            ))
+            error!(cf = %self.name, "Column family not found for collection flush");
+            Err(Error::Store {
+                operation: "column_access".to_owned(),
+                reason: "RocksDB column for the store does not exist.".to_owned(),
+            })
         }
     }
 }
