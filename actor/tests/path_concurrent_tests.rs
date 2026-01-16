@@ -206,7 +206,7 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
                 Ok(ConcurrentResponse::Success)
             }
             ConcurrentMessage::SendToChild(child_name, message) => {
-                if let Some(child) = ctx.get_child::<ConcurrentActor>(&child_name).await {
+                if let Ok(child) = ctx.get_child::<ConcurrentActor>(&child_name).await {
                     let _response = child.ask(ConcurrentMessage::AddMessage(message.clone())).await?;
                     Ok(ConcurrentResponse::ChildResponse(format!("Sent '{}' to child", message)))
                 } else {
@@ -288,18 +288,18 @@ async fn test_multiple_actor_communication() {
     let child1_ref = system.get_actor::<ConcurrentActor>(&child1_path).await;
     let child2_ref = system.get_actor::<ConcurrentActor>(&child2_path).await;
 
-    assert!(child1_ref.is_some());
-    assert!(child2_ref.is_some());
+    assert!(child1_ref.is_ok());
+    assert!(child2_ref.is_ok());
 
     // Verify children received messages
-    if let Some(child1) = child1_ref {
+    if let Ok(child1) = child1_ref {
         let response = child1.ask(ConcurrentMessage::GetMessages).await.unwrap();
         if let ConcurrentResponse::Messages(messages) = response {
             assert!(messages.contains(&"Hello child1".to_string()));
         }
     }
 
-    if let Some(child2) = child2_ref {
+    if let Ok(child2) = child2_ref {
         let response = child2.ask(ConcurrentMessage::GetMessages).await.unwrap();
         if let ConcurrentResponse::Messages(messages) = response {
             assert!(messages.contains(&"Hello child2".to_string()));

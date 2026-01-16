@@ -121,7 +121,7 @@ impl Handler<EdgeCaseActor> for EdgeCaseActor {
             EdgeCaseCommand::GetValue => Ok(EdgeCaseResponse::Value(42)),
             EdgeCaseCommand::TestParent => {
                 // Test parent access
-                if ctx.parent::<EdgeCaseActor>().await.is_some() {
+                if ctx.get_parent::<EdgeCaseActor>().await.is_ok() {
                     Ok(EdgeCaseResponse::Success)
                 } else {
                     Ok(EdgeCaseResponse::Error("No parent".to_string()))
@@ -337,10 +337,10 @@ async fn test_child_actor_management() {
 
     // Verify child exists
     let child = system.get_actor::<EdgeCaseActor>(&ActorPath::from("/user/parent/test_child")).await;
-    assert!(child.is_some());
+    assert!(child.is_ok());
 
     // Test parent access from child
-    if let Some(child_ref) = child {
+    if let Ok(child_ref) = child {
         let response = child_ref.ask(EdgeCaseCommand::TestParent).await.unwrap();
         assert_eq!(response, EdgeCaseResponse::Success);
     }

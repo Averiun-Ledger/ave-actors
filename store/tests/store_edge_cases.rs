@@ -158,7 +158,7 @@ impl Handler<EncryptedActor> for EncryptedActor {
                 data: self.data.clone(),
             }),
             EncryptedMessage::TriggerRecovery => {
-                if let Some(store) = ctx.get_child::<Store<Self>>("store").await
+                if let Ok(store) = ctx.get_child::<Store<Self>>("store").await
                 {
                     let response = store.ask(StoreCommand::Recover).await?;
                     if let StoreResponse::State(Some(state)) = response {
@@ -182,7 +182,7 @@ impl Handler<EncryptedActor> for EncryptedActor {
                 Ok(EncryptedResponse::Success)
             }
             EncryptedMessage::Purge => {
-                if let Some(store) = ctx.get_child::<Store<Self>>("store").await
+                if let Ok(store) = ctx.get_child::<Store<Self>>("store").await
                 {
                     store.ask(StoreCommand::Purge).await?;
                     Ok(EncryptedResponse::Success)

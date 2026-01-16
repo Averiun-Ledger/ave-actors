@@ -117,7 +117,7 @@ where
     ///
     /// Returns the actor reference. `None` if the actor is removed.
     ///
-    pub async fn reference(&self) -> Option<ActorRef<A>> {
+    pub async fn reference(&self) -> Result<ActorRef<A>, Error> {
         self.system.get_actor(&self.path).await
     }
 
@@ -147,7 +147,7 @@ where
     ///
     /// Returns the actor parent or None if the actor is root actor.
     ///
-    pub async fn parent<P: Actor + Handler<P>>(&self) -> Option<ActorRef<P>> {
+    pub async fn get_parent<P: Actor + Handler<P>>(&self) -> Result<ActorRef<P>, Error> {
         self.system.get_actor(&self.path.parent()).await
     }
 
@@ -336,7 +336,7 @@ where
     ///
     /// Returns the actor reference of the child actor if it exists.
     ///
-    pub async fn get_child<C>(&self, name: &str) -> Option<ActorRef<C>>
+    pub async fn get_child<C>(&self, name: &str) -> Result<ActorRef<C>, Error>
     where
         C: Actor + Handler<C>,
     {
@@ -857,7 +857,7 @@ mod test {
             msg: TestMessage,
             ctx: &mut ActorContext<TestActor>,
         ) -> Result<TestResponse, Error> {
-            if ctx.parent::<TestActor>().await.is_some() {
+            if ctx.get_parent::<TestActor>().await.is_ok() {
                 panic!("Is not a root actor");
             }
 

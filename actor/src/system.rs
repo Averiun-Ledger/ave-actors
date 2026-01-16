@@ -160,14 +160,14 @@ impl SystemRef {
     ///
     /// Returns the actor reference.
     ///
-    pub async fn get_actor<A>(&self, path: &ActorPath) -> Option<ActorRef<A>>
+    pub async fn get_actor<A>(&self, path: &ActorPath) -> Result<ActorRef<A>, Error>
     where
         A: Actor + Handler<A>,
     {
         let actors = self.actors.read().await;
         actors
             .get(path)
-            .and_then(|any| any.downcast_ref::<ActorRef<A>>().cloned())
+            .and_then(|any| any.downcast_ref::<ActorRef<A>>().cloned()).ok_or(Error::NotFound { path: path.clone() })
     }
 
     /// Creates an actor in this actor system with the given path and actor type.

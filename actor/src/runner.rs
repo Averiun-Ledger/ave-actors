@@ -495,7 +495,7 @@ mod tests {
             system
                 .get_actor::<TestActor>(&ActorPath::from("/user/test"))
                 .await
-                .is_none()
+                .is_err()
         );
     }
 }

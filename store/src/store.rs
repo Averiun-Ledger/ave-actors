@@ -254,14 +254,7 @@ where
         event: &Self::Event,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let store = match ctx.get_child::<Store<Self>>("store").await {
-            Some(store) => store,
-            None => {
-                return Err(ActorError::NotFound {
-                    path: ctx.path().clone() / "store",
-                });
-            }
-        };
+        let store = ctx.get_child::<Store<Self>>("store").await?;
 
         let prev_state = self.clone();
 
@@ -318,14 +311,7 @@ where
         &self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let store = match ctx.get_child::<Store<Self>>("store").await {
-            Some(store) => store,
-            None => {
-                return Err(ActorError::NotFound {
-                    path: ctx.path().clone() / "store",
-                });
-            }
-        };
+        let store = ctx.get_child::<Store<Self>>("store").await?;
         store
             .ask(StoreCommand::Snapshot(self.clone()))
             .await
@@ -412,7 +398,7 @@ where
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        if let Some(store) = ctx.get_child::<Store<Self>>("store").await {
+        if let Ok(store) = ctx.get_child::<Store<Self>>("store").await {
             if let PersistenceType::Full = Self::Persistence::get_persistence()
             {
                 // Only snapshot if there are events

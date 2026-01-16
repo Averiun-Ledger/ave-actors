@@ -107,12 +107,12 @@ where
                         );
 
                         // Send retry to parent.
-                        if let Some(child) = ctx.get_child::<T>("target").await && child.tell(self.message.clone()).await.is_err()
+                        if let Ok(child) = ctx.get_child::<T>("target").await && child.tell(self.message.clone()).await.is_err()
                         {
                             error!("Failed to send retry message to target");
                         }
 
-                        if let Some(actor) = ctx.reference().await {
+                        if let Ok(actor) = ctx.reference().await {
                             if let Some(duration) = self.retry_strategy.next_backoff() {
                                 let actor: ActorRef<RetryActor<T>> = actor;
                                 tokio::spawn(async move {

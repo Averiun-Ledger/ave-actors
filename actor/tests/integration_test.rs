@@ -295,7 +295,7 @@ async fn test_actor_fault() {
     let child_ref = system
         .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
         .await;
-    assert!(child_ref.is_some());
+    assert!(child_ref.is_ok());
 
     let mut receiver = parent_ref.subscribe();
     parent_ref.tell(TestCommand::Increment(110)).await.unwrap();
@@ -311,5 +311,5 @@ async fn test_actor_fault() {
     let child_ref = system
         .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
         .await;
-    assert!(child_ref.is_none());
+    assert!(child_ref.is_err());
 }
