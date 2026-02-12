@@ -182,7 +182,6 @@ where
     ) -> Result<(), Error> {
         let msg = ActorMessage::new(message, sender, None);
         self.sender.send(Box::new(msg)).map_err(|error| {
-            error!(error = %error, "Failed to tell message");
             Error::Send {
                 reason: error.to_string(),
             }
@@ -215,14 +214,12 @@ where
         let msg = ActorMessage::new(message, sender, Some(response_sender));
 
         self.sender.send(Box::new(msg)).map_err(|error| {
-            error!(error = %error, "Failed to ask message");
             Error::Send {
                 reason: error.to_string(),
             }
         })?;
 
         response_receiver.await.map_err(|error| {
-            error!(error = %error, "Response channel closed");
             Error::Send {
                 reason: error.to_string(),
             }

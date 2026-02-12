@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use tracing::{debug, error, info_span, warn};
 
-use std::{fmt::Debug, marker::PhantomData};
+use std::{fmt::Debug};
 
 /// Nonce size for XChaCha20-Poly1305 encryption.
 const NONCE_SIZE: usize = 24;
@@ -454,8 +454,6 @@ where
     /// Initial state to use when recovering without a snapshot.
     /// This is the state created with `create_initial(params)`.
     initial_state: P,
-    /// Phantom data to associate with the PersistentActor type.
-    _phantom: PhantomData<P>,
 }
 
 impl<P> ave_actors_actor::NotPersistentActor for Store<P>
@@ -524,7 +522,6 @@ where
             states: Box::new(states),
             key_box,
             initial_state,
-            _phantom: PhantomData,
         })
     }
 
@@ -907,6 +904,8 @@ where
     pub fn purge(&mut self) -> Result<(), Error> {
         self.events.purge()?;
         self.states.purge()?;
+        self.event_counter = 0;
+        self.state_counter = 0;
         Ok(())
     }
 

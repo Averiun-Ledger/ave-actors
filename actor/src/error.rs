@@ -96,7 +96,7 @@ pub enum Error {
     ///
     /// This error indicates a problem that doesn't compromise the system's
     /// overall operation and may be recoverable.
-    #[error("functional error (recoverable): {description}")]
+    #[error("{description}")]
     Functional {
         /// Description of the functional error.
         description: String,
@@ -106,7 +106,7 @@ pub enum Error {
     ///
     /// This error indicates a problem that compromises the system's operation
     /// and requires intervention.
-    #[error("critical functional error: {description}")]
+    #[error("{description}")]
     FunctionalCritical {
         /// Description of the critical error.
         description: String,

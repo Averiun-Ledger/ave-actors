@@ -171,7 +171,6 @@ where
         while let Some(sender) = self.child_senders.pop() {
             let (stop_sender, stop_receiver) = oneshot::channel();
             if sender.send(Some(stop_sender)).await.is_err() {
-                tracing::warn!("Failed to send stop signal to child");
                 continue;
             } else {
                 let _ = stop_receiver.await;
@@ -310,7 +309,7 @@ where
         let path = self.path.clone() / name;
         let result = self
             .system
-            .create_actor_path(path, actor, Some(self.error_sender.clone()), C::get_span(&self.path.key(), Some(self.span.clone())))
+            .create_actor_path(path, actor, Some(self.error_sender.clone()), C::get_span(name, Some(self.span.clone())))
             .await;
 
         match result {
@@ -697,7 +696,6 @@ where
     ///
     pub async fn tell(&self, message: A::Message) -> Result<(), Error> {
         self.sender.tell(self.path(), message).await.map_err(|e| {
-            tracing::error!(error = ?e, "Failed to tell message");
             e
         })
     }
@@ -718,7 +716,6 @@ where
     ///
     pub async fn ask(&self, message: A::Message) -> Result<A::Response, Error> {
         self.sender.ask(self.path(), message).await.map_err(|e| {
-            tracing::error!(error = ?e, "Failed to ask message");
             e
         })
     }
