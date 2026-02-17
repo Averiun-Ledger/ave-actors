@@ -97,10 +97,10 @@ where
             .handle_message(self.sender.clone(), self.message.clone(), ctx)
             .await;
 
-        if let Some(rsvp) = self.rsvp.take() {
-            if let Err(_) = rsvp.send(result) {
-                error!("Failed to send response back to caller");
-            }
+        if let Some(rsvp) = self.rsvp.take()
+            && rsvp.send(result).is_err()
+        {
+            error!("Failed to send response back to caller");
         }
     }
 }

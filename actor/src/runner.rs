@@ -135,10 +135,10 @@ where
                 }
                 // State: STARTED
                 ActorLifecycle::Started => {
-                    if let Some(sender) = sender.take() {
-                        if let Err(err) = sender.send(true) {
-                            error!(error = ?err, "Failed to send start signal");
-                        }
+                    if let Some(sender) = sender.take()
+                        && let Err(err) = sender.send(true)
+                    {
+                        error!(error = ?err, "Failed to send start signal");
                     }
                     self.run(&mut ctx).await;
                     if ctx.error().is_some() {
@@ -177,10 +177,10 @@ where
                 ActorLifecycle::Terminated => {
                     debug!("Actor terminated");
                     ctx.system().remove_actor(&self.path.clone()).await;
-                    if let Some(sender) = sender.take() {
-                        if let Err(err) = sender.send(false) {
-                            error!(error = ?err, "Failed to send termination signal");
-                        }
+                    if let Some(sender) = sender.take()
+                        && let Err(err) = sender.send(false)
+                    {
+                        error!(error = ?err, "Failed to send termination signal");
                     }
                     break;
                 }
@@ -270,15 +270,15 @@ where
     ) {
         match event {
             InnerAction::Event(event) => {
-                if let Err(_) = self.event_sender.send(event.clone()) {
+                if self.event_sender.send(event.clone()).is_err() {
                     error!("Failed to broadcast event");
                 }
             }
             InnerAction::Error(error) => {
-                if let Some(parent_helper) = self.parent_sender.as_mut() {
-                    if let Err(err) = parent_helper.send(ChildError::Error { error }) {
-                        error!(error = ?err, "Failed to send error to parent");
-                    }
+                if let Some(parent_helper) = self.parent_sender.as_mut()
+                    && let Err(err) = parent_helper.send(ChildError::Error { error })
+                {
+                    error!(error = ?err, "Failed to send error to parent");
                 }
             }
             InnerAction::Fail(error) => {

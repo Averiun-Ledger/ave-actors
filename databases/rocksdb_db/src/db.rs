@@ -192,7 +192,7 @@ fn detect_total_memory_mb() -> Option<u64> {
     let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
     for line in meminfo.lines() {
         if let Some(rest) = line.strip_prefix("MemTotal:") {
-            let kb_str = rest.trim().split_whitespace().next()?;
+            let kb_str = rest.split_whitespace().next()?;
             let kb: u64 = kb_str.parse().ok()?;
             return Some(kb / 1024);
         }

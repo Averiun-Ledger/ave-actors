@@ -16,6 +16,8 @@ use tracing::{debug, error, info, warn};
 use std::{path::PathBuf, sync::{Arc, Mutex}};
 use std::{env, fs, path::Path};
 
+type EntryIterator = Box<dyn Iterator<Item = (String, Vec<u8>)>>;
+
 /// SQLite database manager for persistent actor storage.
 /// Manages SQLite database connections and provides factory methods
 /// for creating collections (event storage) and state storage (snapshots).
@@ -188,7 +190,7 @@ impl SqliteCollection {
     fn make_iter(
         &self,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = (String, Vec<u8>)>>, Error> {
+    ) -> Result<EntryIterator, Error> {
         let order = if reverse { "DESC" } else { "ASC" };
         let conn = self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock for iterator");
@@ -478,7 +480,7 @@ fn detect_total_memory_mb() -> Option<u64> {
     let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
     for line in meminfo.lines() {
         if let Some(rest) = line.strip_prefix("MemTotal:") {
-            let kb_str = rest.trim().split_whitespace().next()?;
+            let kb_str = rest.split_whitespace().next()?;
             let kb: u64 = kb_str.parse().ok()?;
             return Some(kb / 1024);
         }

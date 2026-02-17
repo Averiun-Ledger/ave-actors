@@ -695,9 +695,7 @@ where
     /// Returns a () if success.
     ///
     pub async fn tell(&self, message: A::Message) -> Result<(), Error> {
-        self.sender.tell(self.path(), message).await.map_err(|e| {
-            e
-        })
+        self.sender.tell(self.path(), message).await
     }
 
     /// Asks a message to the actor.
@@ -715,9 +713,7 @@ where
     /// Returns an error if the message could not be sent.
     ///
     pub async fn ask(&self, message: A::Message) -> Result<A::Response, Error> {
-        self.sender.ask(self.path(), message).await.map_err(|e| {
-            e
-        })
+        self.sender.ask(self.path(), message).await
     }
 
     /// Stops the actor.
