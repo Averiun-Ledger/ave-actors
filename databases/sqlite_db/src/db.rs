@@ -5,14 +5,12 @@
 //! This module contains the SQLite database backend implementation.
 //!
 
-//use crate::error::NodeError;
-
 use ave_actors_store::{
     Error,
     database::{Collection, DbManager, State},
 };
 
-use rusqlite::{Connection, OpenFlags, Result as SQLiteResult, params};
+use rusqlite::{Connection, OpenFlags, params};
 use tracing::{debug, error, info, warn};
 
 use std::{path::PathBuf, sync::{Arc, Mutex}};
@@ -89,7 +87,6 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
         identifier: &str,
         prefix: &str,
     ) -> Result<SqliteCollection, Error> {
-        // Create statement to create a table.
         let stmt = format!(
             "CREATE TABLE IF NOT EXISTS {} (prefix TEXT NOT NULL, value \
             BLOB NOT NULL, PRIMARY KEY (prefix))",
@@ -117,7 +114,6 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
         identifier: &str,
         prefix: &str,
     ) -> Result<SqliteCollection, Error> {
-        // Create statement to create a table.
         let stmt = format!(
             "CREATE TABLE IF NOT EXISTS {} (prefix TEXT NOT NULL, sn TEXT NOT NULL, value \
             BLOB NOT NULL, PRIMARY KEY (prefix, sn))",
@@ -188,23 +184,40 @@ impl SqliteCollection {
         }
     }
 
-    /// Create a new iterartor filtering by prefix.
-    fn make_iter<'a>(
-        &'a self,
+    /// Create a new iterator filtering by prefix.
+    fn make_iter(
+        &self,
         reverse: bool,
-    ) -> SQLiteResult<Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>> {
+    ) -> Result<Box<dyn Iterator<Item = (String, Vec<u8>)>>, Error> {
         let order = if reverse { "DESC" } else { "ASC" };
-        let conn = self.conn.lock().expect("open connection");
+        let conn = self.conn.lock().map_err(|e| {
+            error!(error = %e, "Failed to acquire connection lock for iterator");
+            Error::Store { operation: "lock_connection".to_owned(), reason: format!("{}", e) }
+        })?;
         let query = format!(
             "SELECT sn, value FROM {} WHERE prefix = ?1 ORDER BY sn {}",
             self.table, order,
         );
-        let mut stmt = conn.prepare(&query)?;
-        let mut rows = stmt.query(params![self.prefix])?;
+        let mut stmt = conn.prepare(&query).map_err(|e| {
+            error!(table = %self.table, error = %e, "Failed to prepare iterator query");
+            Error::Store { operation: "prepare".to_owned(), reason: format!("{}", e) }
+        })?;
+        let mut rows = stmt.query(params![self.prefix]).map_err(|e| {
+            error!(table = %self.table, error = %e, "Failed to execute iterator query");
+            Error::Store { operation: "query".to_owned(), reason: format!("{}", e) }
+        })?;
         let mut values = Vec::new();
-        while let Some(row) = rows.next()? {
-            let key: String = row.get(0)?;
-            values.push((key, row.get(1)?));
+        while let Some(row) = rows.next().map_err(|e| {
+            error!(table = %self.table, error = %e, "Failed to read iterator row");
+            Error::Store { operation: "next_row".to_owned(), reason: format!("{}", e) }
+        })? {
+            let key: String = row.get(0).map_err(|e| {
+                Error::Store { operation: "get_column".to_owned(), reason: format!("{}", e) }
+            })?;
+            let value: Vec<u8> = row.get(1).map_err(|e| {
+                Error::Store { operation: "get_column".to_owned(), reason: format!("{}", e) }
+            })?;
+            values.push((key, value));
         }
         Ok(Box::new(values.into_iter()))
     }
@@ -342,15 +355,24 @@ impl Collection for SqliteCollection {
         Ok(())
     }
 
+    fn last(&self) -> Option<(String, Vec<u8>)> {
+        let conn = self.conn.lock().ok()?;
+        let query = format!(
+            "SELECT sn, value FROM {} WHERE prefix = ?1 ORDER BY sn DESC LIMIT 1",
+            self.table
+        );
+        conn.query_row(&query, params![self.prefix], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .ok()
+    }
+
     fn iter<'a>(
         &'a self,
         reverse: bool,
     ) -> Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a> {
         match self.make_iter(reverse) {
-            Ok(iter) => {
-                let iterator = SQLiteIterator { iter };
-                Box::new(iterator)
-            }
+            Ok(iter) => iter,
             Err(e) => {
                 warn!(table = %self.table, error = %e, "Failed to create iterator");
                 Box::new(std::iter::empty())
@@ -360,18 +382,6 @@ impl Collection for SqliteCollection {
 
     fn name(&self) -> &str {
         self.table.as_str()
-    }
-}
-
-pub struct SQLiteIterator<'a> {
-    pub iter: Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>,
-}
-
-impl Iterator for SQLiteIterator<'_> {
-    type Item = (String, Vec<u8>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
     }
 }
 
@@ -419,6 +429,7 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection, Error> {
         format!(
             "
             PRAGMA journal_mode=WAL;
+            PRAGMA busy_timeout=5000;
             PRAGMA synchronous={};
             PRAGMA wal_autocheckpoint={};       -- pages
             PRAGMA journal_size_limit={};       -- bytes

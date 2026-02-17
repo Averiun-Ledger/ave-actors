@@ -10,11 +10,12 @@ use ave_actors_store::{
 
 use rocksdb::{
     ColumnFamilyDescriptor, DB, DBCompactionStyle, DBCompressionType,
-    DBIteratorWithThreadMode, IteratorMode, LogLevel, Options, WriteOptions,
+    DBIteratorWithThreadMode, Direction, IteratorMode, LogLevel, Options,
+    WriteOptions,
 };
 use tracing::{debug, error, info, warn};
 
-use std::{env, fs, path::{Path, PathBuf}, sync::Arc};
+use std::{env, fs, path::{Path, PathBuf}, sync::{Arc, Mutex}};
 
 #[derive(Clone, Copy, Debug)]
 enum MachineProfile {
@@ -39,6 +40,8 @@ pub struct RocksDbManager {
     opts: Options,
     /// Thread-safe shared RocksDB instance.
     db: Arc<DB>,
+    /// Mutex to serialize column family creation.
+    cf_lock: Arc<Mutex<()>>,
     /// Per-write durability policy.
     strong_durability: bool,
 }
@@ -97,7 +100,7 @@ impl RocksDbManager {
         let mut options = Options::default();
         apply_common_tuning(&mut options);
         match profile {
-            MachineProfile::Small => apply_small_tuning(&mut options, cores, ram_mb),
+            MachineProfile::Small => apply_small_tuning(&mut options, ram_mb),
             MachineProfile::Large => apply_large_tuning(&mut options, cores),
         }
 
@@ -131,6 +134,7 @@ impl RocksDbManager {
         Ok(Self {
             opts: options,
             db: Arc::new(db),
+            cf_lock: Arc::new(Mutex::new(())),
             strong_durability,
         })
     }
@@ -144,8 +148,7 @@ fn apply_common_tuning(options: &mut Options) {
     options.set_level_zero_slowdown_writes_trigger(20);
     options.set_level_zero_stop_writes_trigger(36);
     options.set_compression_type(DBCompressionType::Lz4);
-    options.set_bottommost_compression_type(DBCompressionType::Lz4);
-    options.set_allow_concurrent_memtable_write(true);
+    options.set_bottommost_compression_type(DBCompressionType::Zstd);
     options.set_enable_pipelined_write(true);
     options.set_bytes_per_sync(2 * 1024 * 1024); // 2MB
     options.set_wal_bytes_per_sync(512 * 1024); // 512KB
@@ -156,7 +159,7 @@ fn apply_common_tuning(options: &mut Options) {
     options.set_log_file_time_to_roll(60 * 60); // rotate hourly at worst
 }
 
-fn apply_small_tuning(options: &mut Options, _cores: usize, ram_mb: u64) {
+fn apply_small_tuning(options: &mut Options, ram_mb: u64) {
     let parallelism = 1; // máquinas pequeñas: un solo job en segundo plano
     options.increase_parallelism(parallelism);
     options.set_max_background_jobs(parallelism);
@@ -256,21 +259,27 @@ fn write_options(sync: bool) -> WriteOptions {
     opts
 }
 
+impl RocksDbManager {
+    fn ensure_cf(&self, name: &str) -> Result<(), Error> {
+        let _guard = self.cf_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if self.db.cf_handle(name).is_none() {
+            debug!(cf = name, "Creating column family");
+            self.db.create_cf(name, &self.opts).map_err(|e| {
+                error!(cf = name, error = ?e, "Failed to create column family");
+                Error::CreateStore { reason: format!("{:?}", e) }
+            })?;
+        }
+        Ok(())
+    }
+}
+
 impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
     fn create_collection(
         &self,
         name: &str,
         prefix: &str,
     ) -> Result<RocksDbStore, Error> {
-        if self.db.cf_handle(name).is_none() {
-            debug!(cf = name, "Creating column family for collection");
-            self.db
-                .create_cf(name, &self.opts)
-                .map_err(|e| {
-                    error!(cf = name, error = ?e, "Failed to create collection column family");
-                    Error::CreateStore { reason: format!("{:?}", e) }
-                })?;
-        }
+        self.ensure_cf(name)?;
         debug!(cf = name, prefix = prefix, "Collection created");
         Ok(RocksDbStore {
             name: name.to_owned(),
@@ -285,21 +294,24 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         name: &str,
         prefix: &str,
     ) -> Result<RocksDbStore, Error> {
-        if self.db.cf_handle(name).is_none() {
-            debug!(cf = name, "Creating column family for state");
-            self.db
-                .create_cf(name, &self.opts)
-                .map_err(|e| {
-                    error!(cf = name, error = ?e, "Failed to create state column family");
-                    Error::CreateStore { reason: format!("{:?}", e) }
-                })?;
-        }
+        self.ensure_cf(name)?;
         debug!(cf = name, prefix = prefix, "State created");
         Ok(RocksDbStore {
             name: name.to_owned(),
             prefix: prefix.to_owned(),
             store: self.db.clone(),
             strong_durability: self.strong_durability,
+        })
+    }
+
+    fn stop(self) -> Result<(), Error> {
+        debug!("Stopping RocksDB manager, flushing WAL");
+        self.db.flush_wal(true).map_err(|e| {
+            error!(error = ?e, "Failed to flush WAL on stop");
+            Error::Store {
+                operation: "flush_wal".to_owned(),
+                reason: format!("{:?}", e),
+            }
         })
     }
 }
@@ -340,7 +352,7 @@ impl State for RocksDbStore {
                 .get_cf(&handle, self.prefix.clone())
                 .map_err(|e| {
                     error!(cf = %self.name, error = ?e, "Failed to get state");
-                    Error::Get { key: "unknown".to_owned(), reason: format!("{:?}", e) }
+                    Error::Get { key: self.prefix.clone(), reason: format!("{:?}", e) }
                 })?;
             match result {
                 Some(value) => Ok(value),
@@ -441,13 +453,13 @@ impl Collection for RocksDbStore {
 
     fn get(&self, key: &str) -> Result<Vec<u8>, Error> {
         if let Some(handle) = self.store.cf_handle(&self.name) {
-            let key = format!("{}.{}", self.prefix, key);
+            let full_key = format!("{}.{}", self.prefix, key);
             let result = self
                 .store
-                .get_cf(&handle, key)
+                .get_cf(&handle, &full_key)
                 .map_err(|e| {
-                    error!(cf = %self.name, error = ?e, "Failed to get collection entry");
-                    Error::Get { key: "unknown".to_owned(), reason: format!("{:?}", e) }
+                    error!(cf = %self.name, key = %full_key, error = ?e, "Failed to get collection entry");
+                    Error::Get { key: full_key.clone(), reason: format!("{:?}", e) }
                 })?;
             match result {
                 Some(value) => Ok(value),
@@ -561,7 +573,7 @@ impl Collection for RocksDbStore {
 }
 
 pub struct RocksDbIterator<'a> {
-    prefix: String,
+    prefix_dot: Vec<u8>,
     iter: DBIteratorWithThreadMode<'a, DB>,
 }
 
@@ -572,12 +584,22 @@ impl<'a> RocksDbIterator<'a> {
         prefix: String,
         reverse: bool,
     ) -> Self {
-        let mode = if reverse { IteratorMode::End } else { IteratorMode::Start };
+        let prefix_dot = format!("{}.", prefix).into_bytes();
+        let mut upper_bound = prefix_dot.clone();
+        upper_bound.push(0xFF);
+
         let handle = store
             .cf_handle(&name)
             .expect("RocksDB column for the store does not exist.");
+
+        let mode = if reverse {
+            IteratorMode::From(&upper_bound, Direction::Reverse)
+        } else {
+            IteratorMode::From(&prefix_dot, Direction::Forward)
+        };
+
         let iter = store.iterator_cf(&handle, mode);
-        Self { prefix, iter }
+        Self { prefix_dot, iter }
     }
 }
 
@@ -586,12 +608,14 @@ impl Iterator for RocksDbIterator<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(Ok((key, value))) = self.iter.next() {
-            let key = String::from_utf8(key.to_vec())
-                .expect("Can not convert key to string.");
-            if key.starts_with(&self.prefix) {
-                let key = &key[self.prefix.len() + 1..];
-                return Some((key.to_owned(), value.to_vec()));
+            if !key.starts_with(&self.prefix_dot) {
+                // Left the prefix range — stop.
+                return None;
             }
+            let suffix = &key[self.prefix_dot.len()..];
+            let key_str = String::from_utf8(suffix.to_vec())
+                .expect("Can not convert key to string.");
+            return Some((key_str, value.to_vec()));
         }
         None
     }
