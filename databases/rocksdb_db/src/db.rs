@@ -15,7 +15,7 @@ use rocksdb::{
 };
 use tracing::{debug, error, info, warn};
 
-use std::{env, fs, path::{Path, PathBuf}, sync::{Arc, Mutex}};
+use std::{env, fs, path::{Path, PathBuf}, sync::Arc};
 
 #[derive(Clone, Copy, Debug)]
 enum MachineProfile {
@@ -40,8 +40,6 @@ pub struct RocksDbManager {
     opts: Options,
     /// Thread-safe shared RocksDB instance.
     db: Arc<DB>,
-    /// Mutex to serialize column family creation.
-    cf_lock: Arc<Mutex<()>>,
     /// Per-write durability policy.
     strong_durability: bool,
 }
@@ -134,7 +132,6 @@ impl RocksDbManager {
         Ok(Self {
             opts: options,
             db: Arc::new(db),
-            cf_lock: Arc::new(Mutex::new(())),
             strong_durability,
         })
     }
@@ -261,7 +258,6 @@ fn write_options(sync: bool) -> WriteOptions {
 
 impl RocksDbManager {
     fn ensure_cf(&self, name: &str) -> Result<(), Error> {
-        let _guard = self.cf_lock.lock().unwrap_or_else(|e| e.into_inner());
         if self.db.cf_handle(name).is_none() {
             debug!(cf = name, "Creating column family");
             self.db.create_cf(name, &self.opts).map_err(|e| {
