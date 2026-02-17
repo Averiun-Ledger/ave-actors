@@ -212,9 +212,11 @@ impl SqliteCollection {
             Error::Store { operation: "next_row".to_owned(), reason: format!("{}", e) }
         })? {
             let key: String = row.get(0).map_err(|e| {
+                error!(table = %self.table, column = 0, error = %e, "Failed to read column");
                 Error::Store { operation: "get_column".to_owned(), reason: format!("{}", e) }
             })?;
             let value: Vec<u8> = row.get(1).map_err(|e| {
+                error!(table = %self.table, column = 1, error = %e, "Failed to read column");
                 Error::Store { operation: "get_column".to_owned(), reason: format!("{}", e) }
             })?;
             values.push((key, value));
@@ -356,7 +358,9 @@ impl Collection for SqliteCollection {
     }
 
     fn last(&self) -> Option<(String, Vec<u8>)> {
-        let conn = self.conn.lock().ok()?;
+        let conn = self.conn.lock()
+            .map_err(|e| warn!(table = %self.table, error = %e, "Failed to acquire lock in last()"))
+            .ok()?;
         let query = format!(
             "SELECT sn, value FROM {} WHERE prefix = ?1 ORDER BY sn DESC LIMIT 1",
             self.table
@@ -364,6 +368,7 @@ impl Collection for SqliteCollection {
         conn.query_row(&query, params![self.prefix], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
         })
+        .map_err(|e| warn!(table = %self.table, error = %e, "Failed to query last()"))
         .ok()
     }
 

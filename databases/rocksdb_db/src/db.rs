@@ -607,15 +607,22 @@ impl Iterator for RocksDbIterator<'_> {
     type Item = (String, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(Ok((key, value))) = self.iter.next() {
-            if !key.starts_with(&self.prefix_dot) {
-                // Left the prefix range — stop.
-                return None;
+        for item in self.iter.by_ref() {
+            match item {
+                Ok((key, value)) => {
+                    if !key.starts_with(&self.prefix_dot) {
+                        return None;
+                    }
+                    let suffix = &key[self.prefix_dot.len()..];
+                    let key_str = String::from_utf8(suffix.to_vec())
+                        .expect("Can not convert key to string.");
+                    return Some((key_str, value.to_vec()));
+                }
+                Err(e) => {
+                    error!(error = %e, "RocksDB iteration error");
+                    return None;
+                }
             }
-            let suffix = &key[self.prefix_dot.len()..];
-            let key_str = String::from_utf8(suffix.to_vec())
-                .expect("Can not convert key to string.");
-            return Some((key_str, value.to_vec()));
         }
         None
     }
