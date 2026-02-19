@@ -9,9 +9,9 @@ use ave_actors_store::{
 };
 
 use rocksdb::{
-    ColumnFamilyDescriptor, DB, DBCompactionStyle, DBCompressionType,
-    DBIteratorWithThreadMode, Direction, IteratorMode, LogLevel, Options,
-    WriteOptions,
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompactionStyle,
+    DBCompressionType, DBIteratorWithThreadMode, Direction, IteratorMode,
+    LogLevel, Options, WriteOptions,
 };
 use tracing::{debug, error, info, warn};
 
@@ -19,8 +19,11 @@ use std::{env, fs, path::{Path, PathBuf}, sync::Arc};
 
 #[derive(Clone, Copy, Debug)]
 enum MachineProfile {
+    Tiny,
     Small,
+    Medium,
     Large,
+    XLarge,
 }
 
 /// RocksDB database manager for persistent actor storage.
@@ -84,11 +87,11 @@ impl RocksDbManager {
             })?;
         }
 
-        let cores = num_cpus::get();
-        let ram_mb = detect_total_memory_mb().unwrap_or(4096);
+        let cores = resolve_hardware_cores();
+        let ram_mb = resolve_hardware_ram_mb();
         let profile = resolve_profile(cores, ram_mb);
         info!(
-            "RocksDB profile {:?} detected (cores: {}, RAM MB: {})",
+            "RocksDB profile {:?} selected (cores: {}, RAM MB: {})",
             profile, cores, ram_mb
         );
 
@@ -98,8 +101,11 @@ impl RocksDbManager {
         let mut options = Options::default();
         apply_common_tuning(&mut options);
         match profile {
-            MachineProfile::Small => apply_small_tuning(&mut options, ram_mb),
-            MachineProfile::Large => apply_large_tuning(&mut options, cores),
+            MachineProfile::Tiny   => apply_tiny_tuning(&mut options),
+            MachineProfile::Small  => apply_small_tuning(&mut options),
+            MachineProfile::Medium => apply_medium_tuning(&mut options, cores),
+            MachineProfile::Large  => apply_large_tuning(&mut options, cores),
+            MachineProfile::XLarge => apply_xlarge_tuning(&mut options, cores),
         }
 
         let cfs = match DB::list_cf(&options, path) {
@@ -156,35 +162,77 @@ fn apply_common_tuning(options: &mut Options) {
     options.set_log_file_time_to_roll(60 * 60); // rotate hourly at worst
 }
 
-fn apply_small_tuning(options: &mut Options, ram_mb: u64) {
-    let parallelism = 1; // máquinas pequeñas: un solo job en segundo plano
+fn apply_tiny_tuning(options: &mut Options) {
+    options.increase_parallelism(1);
+    options.set_max_background_jobs(1);
+    options.set_write_buffer_size(8 * 1024 * 1024);       // 8MB
+    options.set_max_write_buffer_number(2);
+    options.set_min_write_buffer_number_to_merge(1);
+    options.set_target_file_size_base(8 * 1024 * 1024);   // 8MB SST
+    options.set_max_total_wal_size(16 * 1024 * 1024);     // 16MB WAL
+    let mut bb = BlockBasedOptions::default();
+    bb.set_bloom_filter(10.0, false);                      // ~10 bits/key, full-key
+    bb.set_block_cache(&Cache::new_lru_cache(8 * 1024 * 1024)); // 8MB
+    options.set_block_based_table_factory(&bb);
+}
+
+fn apply_small_tuning(options: &mut Options) {
+    options.increase_parallelism(1);
+    options.set_max_background_jobs(1);
+    options.set_write_buffer_size(32 * 1024 * 1024);      // 32MB
+    options.set_max_write_buffer_number(2);
+    options.set_min_write_buffer_number_to_merge(1);
+    options.set_target_file_size_base(32 * 1024 * 1024);  // 32MB SST
+    options.set_max_total_wal_size(64 * 1024 * 1024);     // 64MB WAL
+    let mut bb = BlockBasedOptions::default();
+    bb.set_bloom_filter(10.0, false);
+    bb.set_block_cache(&Cache::new_lru_cache(16 * 1024 * 1024)); // 16MB
+    options.set_block_based_table_factory(&bb);
+}
+
+fn apply_medium_tuning(options: &mut Options, cores: usize) {
+    let parallelism = (cores as i32).min(4).max(2);
     options.increase_parallelism(parallelism);
     options.set_max_background_jobs(parallelism);
-
-    if ram_mb <= 512 {
-        options.set_write_buffer_size(16 * 1024 * 1024); // 16MB
-        options.set_max_write_buffer_number(2); // ~32MB memtables
-        options.set_min_write_buffer_number_to_merge(1);
-        options.set_target_file_size_base(16 * 1024 * 1024); // 16MB SST
-        options.set_max_total_wal_size(32 * 1024 * 1024); // 32MB WAL
-    } else {
-        options.set_write_buffer_size(32 * 1024 * 1024); // 32MB
-        options.set_max_write_buffer_number(2); // ~64MB memtables
-        options.set_min_write_buffer_number_to_merge(1);
-        options.set_target_file_size_base(32 * 1024 * 1024); // 32MB SST
-        options.set_max_total_wal_size(64 * 1024 * 1024); // 64MB WAL
-    }
+    options.set_write_buffer_size(64 * 1024 * 1024);      // 64MB
+    options.set_max_write_buffer_number(3);
+    options.set_min_write_buffer_number_to_merge(1);
+    options.set_target_file_size_base(64 * 1024 * 1024);  // 64MB SST
+    options.set_max_total_wal_size(128 * 1024 * 1024);    // 128MB WAL
+    let mut bb = BlockBasedOptions::default();
+    bb.set_bloom_filter(10.0, false);
+    bb.set_block_cache(&Cache::new_lru_cache(64 * 1024 * 1024)); // 64MB
+    options.set_block_based_table_factory(&bb);
 }
 
 fn apply_large_tuning(options: &mut Options, cores: usize) {
-    let parallelism = std::cmp::min(cores as i32, 16).max(2);
+    let parallelism = (cores as i32).min(8).max(2);
     options.increase_parallelism(parallelism);
     options.set_max_background_jobs(parallelism);
-    options.set_write_buffer_size(128 * 1024 * 1024); // 128MB
+    options.set_write_buffer_size(128 * 1024 * 1024);     // 128MB
     options.set_max_write_buffer_number(4);
     options.set_min_write_buffer_number_to_merge(2);
-    options.set_target_file_size_base(128 * 1024 * 1024); // 128MB
-    options.set_max_total_wal_size(256 * 1024 * 1024); // cap WAL growth
+    options.set_target_file_size_base(128 * 1024 * 1024); // 128MB SST
+    options.set_max_total_wal_size(256 * 1024 * 1024);    // 256MB WAL
+    let mut bb = BlockBasedOptions::default();
+    bb.set_bloom_filter(10.0, false);
+    bb.set_block_cache(&Cache::new_lru_cache(256 * 1024 * 1024)); // 256MB
+    options.set_block_based_table_factory(&bb);
+}
+
+fn apply_xlarge_tuning(options: &mut Options, cores: usize) {
+    let parallelism = (cores as i32).min(16).max(4);
+    options.increase_parallelism(parallelism);
+    options.set_max_background_jobs(parallelism);
+    options.set_write_buffer_size(256 * 1024 * 1024);     // 256MB
+    options.set_max_write_buffer_number(6);
+    options.set_min_write_buffer_number_to_merge(2);
+    options.set_target_file_size_base(256 * 1024 * 1024); // 256MB SST
+    options.set_max_total_wal_size(512 * 1024 * 1024);    // 512MB WAL
+    let mut bb = BlockBasedOptions::default();
+    bb.set_bloom_filter(10.0, false);
+    bb.set_block_cache(&Cache::new_lru_cache(1024 * 1024 * 1024)); // 1GB
+    options.set_block_based_table_factory(&bb);
 }
 
 #[cfg(target_os = "linux")]
@@ -205,26 +253,51 @@ fn detect_total_memory_mb() -> Option<u64> {
     None
 }
 
-fn resolve_profile(cores: usize, ram_mb: u64) -> MachineProfile {
+fn resolve_hardware_cores() -> usize {
+    match env::var("AVE_CPU_CORES") {
+        Ok(v) => v.parse::<usize>().unwrap_or_else(|_| {
+            warn!("AVE_CPU_CORES='{}' is not a valid integer, using auto-detect", v);
+            num_cpus::get()
+        }),
+        Err(_) => num_cpus::get(),
+    }
+}
+
+fn resolve_hardware_ram_mb() -> u64 {
+    match env::var("AVE_RAM_MB") {
+        Ok(v) => v.parse::<u64>().unwrap_or_else(|_| {
+            warn!("AVE_RAM_MB='{}' is not a valid integer, using auto-detect", v);
+            detect_total_memory_mb().unwrap_or(4096)
+        }),
+        Err(_) => detect_total_memory_mb().unwrap_or(4096),
+    }
+}
+
+fn resolve_profile(_cores: usize, ram_mb: u64) -> MachineProfile {
     if let Some(override_profile) = profile_override_from_env() {
         return override_profile;
     }
-    if cores <= 2 || ram_mb <= 1024 {
-        MachineProfile::Small
-    } else {
-        MachineProfile::Large
+    match ram_mb {
+        0..=255      => MachineProfile::Tiny,
+        256..=1023   => MachineProfile::Small,
+        1024..=4095  => MachineProfile::Medium,
+        4096..=16383 => MachineProfile::Large,
+        _            => MachineProfile::XLarge,
     }
 }
 
 fn profile_override_from_env() -> Option<MachineProfile> {
     match env::var("ROCKSDB_PROFILE") {
         Ok(val) => match val.to_lowercase().as_str() {
-            "small" => Some(MachineProfile::Small),
-            "large" => Some(MachineProfile::Large),
-            "auto" => None,
+            "tiny"   => Some(MachineProfile::Tiny),
+            "small"  => Some(MachineProfile::Small),
+            "medium" => Some(MachineProfile::Medium),
+            "large"  => Some(MachineProfile::Large),
+            "xlarge" => Some(MachineProfile::XLarge),
+            "auto"   => None,
             other => {
                 info!(
-                    "Ignoring ROCKSDB_PROFILE override '{}', use small|large|auto",
+                    "Ignoring ROCKSDB_PROFILE='{}', valid values: tiny|small|medium|large|xlarge|auto",
                     other
                 );
                 None

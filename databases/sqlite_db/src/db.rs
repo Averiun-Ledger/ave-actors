@@ -403,11 +403,11 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection, Error> {
         Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
     })?;
 
-    let cores = num_cpus::get();
-    let ram_mb = detect_total_memory_mb().unwrap_or(4096);
+    let cores = resolve_hardware_cores();
+    let ram_mb = resolve_hardware_ram_mb();
     let profile = resolve_profile(cores, ram_mb);
     info!(
-        "SQLite profile {:?} detected (cores: {}, RAM MB: {})",
+        "SQLite profile {:?} selected (cores: {}, RAM MB: {})",
         profile, cores, ram_mb
     );
 
@@ -418,17 +418,35 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection, Error> {
     };
 
     let tuning = match profile {
+        SqliteProfile::Tiny => SqliteTuning {
+            wal_autocheckpoint_pages: 128,                      // ~512KB WAL
+            journal_size_limit_bytes: 32 * 1024 * 1024,        // 32MB
+            cache_size_kb: -8_192,                              // 8MB
+            mmap_size_bytes: 32 * 1024 * 1024,                 // 32MB
+        },
         SqliteProfile::Small => SqliteTuning {
-            wal_autocheckpoint_pages: 256,          // ~1MB WAL
-            journal_size_limit_bytes: 64 * 1024 * 1024,
-            cache_size_kb: -16_384,                 // ~16MB
-            mmap_size_bytes: 64 * 1024 * 1024,      // 64MB
+            wal_autocheckpoint_pages: 256,                      // ~1MB WAL
+            journal_size_limit_bytes: 64 * 1024 * 1024,        // 64MB
+            cache_size_kb: -16_384,                             // 16MB
+            mmap_size_bytes: 64 * 1024 * 1024,                 // 64MB
+        },
+        SqliteProfile::Medium => SqliteTuning {
+            wal_autocheckpoint_pages: 1000,                     // ~4MB WAL
+            journal_size_limit_bytes: 128 * 1024 * 1024,       // 128MB
+            cache_size_kb: -65_536,                             // 64MB
+            mmap_size_bytes: 128 * 1024 * 1024,                // 128MB
         },
         SqliteProfile::Large => SqliteTuning {
-            wal_autocheckpoint_pages: 2000,         // ~8MB WAL
-            journal_size_limit_bytes: 256 * 1024 * 1024,
-            cache_size_kb: -131_072,                // ~128MB
-            mmap_size_bytes: 256 * 1024 * 1024,     // 256MB
+            wal_autocheckpoint_pages: 2000,                     // ~8MB WAL
+            journal_size_limit_bytes: 256 * 1024 * 1024,       // 256MB
+            cache_size_kb: -131_072,                            // 128MB
+            mmap_size_bytes: 256 * 1024 * 1024,                // 256MB
+        },
+        SqliteProfile::XLarge => SqliteTuning {
+            wal_autocheckpoint_pages: 4000,                     // ~16MB WAL
+            journal_size_limit_bytes: 512 * 1024 * 1024,       // 512MB
+            cache_size_kb: -524_288,                            // 512MB
+            mmap_size_bytes: 1024 * 1024 * 1024,               // 1GB
         },
     };
 
@@ -443,6 +461,7 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection, Error> {
             PRAGMA temp_store=MEMORY;
             PRAGMA cache_size={};               -- negative = KB
             PRAGMA mmap_size={};                -- bytes
+            PRAGMA optimize=0x10002;            -- analyze + run on open (cheap)
             ",
             sync_mode,
             tuning.wal_autocheckpoint_pages,
@@ -463,8 +482,11 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection, Error> {
 
 #[derive(Clone, Copy, Debug)]
 enum SqliteProfile {
+    Tiny,
     Small,
+    Medium,
     Large,
+    XLarge,
 }
 
 #[derive(Clone, Copy)]
@@ -493,24 +515,55 @@ fn detect_total_memory_mb() -> Option<u64> {
     None
 }
 
-fn resolve_profile(cores: usize, ram_mb: u64) -> SqliteProfile {
+fn resolve_hardware_cores() -> usize {
+    match env::var("AVE_CPU_CORES") {
+        Ok(v) => v.parse::<usize>().unwrap_or_else(|_| {
+            warn!("AVE_CPU_CORES='{}' is not a valid integer, using auto-detect", v);
+            num_cpus::get()
+        }),
+        Err(_) => num_cpus::get(),
+    }
+}
+
+fn resolve_hardware_ram_mb() -> u64 {
+    match env::var("AVE_RAM_MB") {
+        Ok(v) => v.parse::<u64>().unwrap_or_else(|_| {
+            warn!("AVE_RAM_MB='{}' is not a valid integer, using auto-detect", v);
+            detect_total_memory_mb().unwrap_or(4096)
+        }),
+        Err(_) => detect_total_memory_mb().unwrap_or(4096),
+    }
+}
+
+fn resolve_profile(_cores: usize, ram_mb: u64) -> SqliteProfile {
     if let Some(override_profile) = profile_override_from_env() {
         return override_profile;
     }
-    if cores <= 2 || ram_mb <= 1024 {
-        SqliteProfile::Small
-    } else {
-        SqliteProfile::Large
+    match ram_mb {
+        0..=255      => SqliteProfile::Tiny,
+        256..=1023   => SqliteProfile::Small,
+        1024..=4095  => SqliteProfile::Medium,
+        4096..=16383 => SqliteProfile::Large,
+        _            => SqliteProfile::XLarge,
     }
 }
 
 fn profile_override_from_env() -> Option<SqliteProfile> {
     match env::var("SQLITE_PROFILE") {
         Ok(val) => match val.to_lowercase().as_str() {
-            "small" => Some(SqliteProfile::Small),
-            "large" => Some(SqliteProfile::Large),
-            "auto" => None,
-            _ => None,
+            "tiny"   => Some(SqliteProfile::Tiny),
+            "small"  => Some(SqliteProfile::Small),
+            "medium" => Some(SqliteProfile::Medium),
+            "large"  => Some(SqliteProfile::Large),
+            "xlarge" => Some(SqliteProfile::XLarge),
+            "auto"   => None,
+            other => {
+                warn!(
+                    "Ignoring SQLITE_PROFILE='{}', valid values: tiny|small|medium|large|xlarge|auto",
+                    other
+                );
+                None
+            }
         },
         Err(_) => None,
     }
