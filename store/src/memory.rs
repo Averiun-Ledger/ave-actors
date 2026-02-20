@@ -50,6 +50,10 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
         })
     }
 
+    fn stop(self) -> Result<(), Error> {
+        Ok(())
+    }
+
     fn create_collection(
         &self,
         name: &str,
@@ -148,6 +152,11 @@ impl State for MemoryStore {
 }
 
 impl Collection for MemoryStore {
+    fn last(&self) -> Option<(String, Vec<u8>)> {
+        let mut iter = self.iter(true);
+        iter.next()
+    }
+
     fn name(&self) -> &str {
         &self.name
     }

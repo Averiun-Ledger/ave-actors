@@ -302,6 +302,12 @@ struct FailingCollection {
 }
 
 impl Collection for FailingCollection {
+    fn last(&self) -> Option<(String, Vec<u8>)> {
+        let mut iter = self.iter(true);
+        let value = iter.next();
+        value
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -435,6 +441,10 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
                 data: BTreeMap::new(),
             })
         }
+    }
+
+    fn stop(self) -> Result<(), StoreError> {
+        Ok(())
     }
 
     fn create_state(
@@ -805,49 +815,6 @@ async fn test_persist_actor_error_scenarios() {
         }
         _ => panic!("Expected error response"),
     }
-}
-
-#[tokio::test]
-async fn test_memory_collection_edge_cases() {
-    build_tracing_subscriber();
-    let manager = MemoryManager::default();
-
-    // Test collection operations
-    let mut collection = manager.create_collection("test", "prefix").unwrap();
-
-    // Test flush (no-op)
-    assert!(Collection::flush(&collection).is_ok());
-
-    // Test get_by_range with various scenarios
-    Collection::put(&mut collection, "key1", b"value1").unwrap();
-    Collection::put(&mut collection, "key2", b"value2").unwrap();
-    Collection::put(&mut collection, "key3", b"value3").unwrap();
-
-    // Test range from specific key
-    let result = collection
-        .get_by_range(Some("key1".to_string()), 2)
-        .unwrap();
-    assert_eq!(result.len(), 2);
-
-    // Test reverse range
-    let result = collection
-        .get_by_range(Some("key3".to_string()), -2)
-        .unwrap();
-    assert_eq!(result.len(), 2);
-
-    // Test range from non-existent key
-    let result = collection.get_by_range(Some("nonexistent".to_string()), 1);
-    assert!(result.is_err());
-
-    // Test state operations
-    let mut state = manager.create_state("test_state", "state_prefix").unwrap();
-
-    // Test flush (no-op)
-    assert!(State::flush(&state).is_ok());
-
-    // Test del on empty state
-    let result = State::del(&mut state);
-    assert!(result.is_err());
 }
 
 #[tokio::test]

@@ -19,6 +19,7 @@ pub use ave_actors_store::{
     Error as StoreError,
     database::{Collection, DbManager, State},
     store::{PersistentActor, FullPersistence, LightPersistence, Store, StoreCommand, StoreResponse}, 
+    config::*
 };
 
 #[cfg(feature = "rocksdb")]

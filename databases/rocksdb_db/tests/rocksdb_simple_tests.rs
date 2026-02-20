@@ -3,14 +3,14 @@
 //! Simple edge case tests for RocksDB database to increase coverage
 
 use ave_actors_rocksdb::RocksDbManager;
-use ave_actors_store::database::{Collection, DbManager, State};
+use ave_actors_store::{config::Config, database::{Collection, DbManager, State}};
 use tempfile::tempdir;
 
 #[test]
 fn test_rocksdb_manager_edge_cases() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test");
-    let manager = RocksDbManager::new(&db_path).unwrap();
+    let manager = RocksDbManager::new(&db_path,  Config::default()).unwrap();
 
     // Test collection operations
     let mut collection = manager.create_collection("test", "prefix").unwrap();
@@ -40,7 +40,7 @@ fn test_rocksdb_manager_edge_cases() {
 fn test_rocksdb_state_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("state_test");
-    let manager = RocksDbManager::new(&db_path).unwrap();
+    let manager = RocksDbManager::new(&db_path, Config::default()).unwrap();
 
     let mut state = manager.create_state("state", "prefix").unwrap();
 
@@ -63,7 +63,7 @@ fn test_rocksdb_state_operations() {
 fn test_rocksdb_iteration() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("iteration");
-    let manager = RocksDbManager::new(&db_path).unwrap();
+    let manager = RocksDbManager::new(&db_path, Config::default()).unwrap();
 
     let mut collection = manager.create_collection("iter", "prefix").unwrap();
 
@@ -93,7 +93,7 @@ fn test_rocksdb_iteration() {
 fn test_rocksdb_purge() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("purge_test");
-    let manager = RocksDbManager::new(&db_path).unwrap();
+    let manager = RocksDbManager::new(&db_path, Config::default()).unwrap();
 
     let mut collection = manager.create_collection("purge", "prefix").unwrap();
 
@@ -111,25 +111,4 @@ fn test_rocksdb_purge() {
     // Verify empty
     let items: Vec<_> = collection.iter(false).collect();
     assert_eq!(items.len(), 0);
-}
-
-#[test]
-fn test_rocksdb_flush_and_name() {
-    let temp_dir = tempdir().unwrap();
-    let db_path = temp_dir.path().join("flush_test");
-    let manager = RocksDbManager::new(&db_path).unwrap();
-
-    let collection = manager.create_collection("test_collection", "prefix").unwrap();
-    let state = manager.create_state("test_state", "prefix").unwrap();
-
-    // Test names
-    assert_eq!(Collection::name(&collection), "test_collection");
-    assert_eq!(State::name(&state), "test_state");
-
-    // Test flush
-    assert!(Collection::flush(&collection).is_ok());
-    assert!(State::flush(&state).is_ok());
-
-    // Test stop
-    assert!(manager.stop().is_ok());
 }

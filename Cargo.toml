@@ -62,10 +62,10 @@ zeroize = "1.8"
 memsecurity = { version = "3.5", features = ["encryption"] }
 async-trait = { version = "0.1.89" }
 borsh = { version = "1.6.0", features = ["derive"] }
-futures =  { version = "0.3.31", features = ["async-await"] }
+futures =  { version = "0.3.32", features = ["async-await"] }
 serde = { version = "1.0.219", features = ["derive"] }
-tempfile = "3.24.0"
-thiserror = { version = "2.0.16" }
+tempfile = "3.25.0"
+thiserror = { version = "2.0.18" }
 tokio = { version = "1.49.0" }
 tokio-util = { version = "0.7.18" }
 tracing ={ version = "0.1.44" }

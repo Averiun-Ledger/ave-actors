@@ -48,7 +48,7 @@ impl ActorSystem {
     /// to trigger graceful shutdown.
     ///
     pub fn create(token: CancellationToken) -> (SystemRef, SystemRunner) {
-        let (event_sender, event_receiver) = mpsc::channel(100);
+        let (event_sender, event_receiver) = mpsc::channel(10);
         let system = SystemRef::new(event_sender, token);
         let runner = SystemRunner::new(event_receiver);
         (system, runner)

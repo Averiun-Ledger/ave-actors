@@ -4,8 +4,6 @@
 
 use crate::error::Error;
 
-use tracing::debug;
-
 /// A trait representing a database manager that creates collections and state storage.
 /// Implementations of this trait provide the factory methods for creating
 /// persistent storage backends used by actors for event sourcing and state snapshots.
@@ -70,9 +68,7 @@ where
     ///
     /// Returns an error if cleanup failed.
     ///
-    fn stop(self) -> Result<(), Error> {
-        Ok(())
-    }
+    fn stop(self) -> Result<(), Error>;
 }
 
 /// Trait for storing a single state value (typically actor snapshots).
@@ -142,22 +138,6 @@ pub trait State: Sync + Send + 'static {
     /// Returns an error if the purge operation failed.
     ///
     fn purge(&mut self) -> Result<(), Error>;
-
-    /// Flushes any pending writes to persistent storage.
-    /// Default implementation does nothing. Override this for databases
-    /// that buffer writes.
-    ///
-    /// # Returns
-    ///
-    /// Ok(()) if the flush was successful.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the flush operation failed.
-    ///
-    fn flush(&self) -> Result<(), Error> {
-        Ok(())
-    }
 }
 
 /// A trait representing a collection of key-value pairs in a database.
@@ -226,12 +206,7 @@ pub trait Collection: Sync + Send + 'static {
     ///
     /// - If the operation failed.
     ///
-    fn last(&self) -> Option<(String, Vec<u8>)> {
-        let mut iter = self.iter(true);
-        let value = iter.next();
-        debug!("Last value: {:?}", value);
-        value
-    }
+    fn last(&self) -> Option<(String, Vec<u8>)>;
 
     /// Removes all values from the collection.
     ///
@@ -256,11 +231,6 @@ pub trait Collection: Sync + Send + 'static {
         reverse: bool,
     ) -> Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>;
 
-    /// Flush collection.
-    ///
-    fn flush(&self) -> Result<(), Error> {
-        Ok(())
-    }
 
     /// Returns a vector of values in the collection that are in the given range.
     ///

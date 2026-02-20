@@ -6,17 +6,17 @@
 //!
 
 use ave_actors_store::{
-    Error,
-    database::{Collection, DbManager, State},
+    Error, config::{Config, MachineProfile, detect_total_memory_mb, resolve_profile}, database::{Collection, DbManager, State}
 };
 
 use rusqlite::{Connection, OpenFlags, params};
 use tracing::{debug, error, info, warn};
 
-use std::{path::PathBuf, sync::{Arc, Mutex}};
-use std::{env, fs, path::Path};
+use std::{collections::VecDeque, path::PathBuf, sync::{Arc, Mutex}};
+use std::{fs, path::Path};
 
 type EntryIterator = Box<dyn Iterator<Item = (String, Vec<u8>)>>;
+const ITER_CHUNK_SIZE: usize = 1_000;
 
 /// SQLite database manager for persistent actor storage.
 /// Manages SQLite database connections and provides factory methods
@@ -53,7 +53,7 @@ impl SqliteManager {
     /// - The directory cannot be created
     /// - The SQLite connection cannot be opened
     ///
-    pub fn new(path: &PathBuf) -> Result<Self, Error> {
+    pub fn new(path: &PathBuf, db_config: Config) -> Result<Self, Error> {
         info!("Creating SQLite database manager");
         if !Path::new(&path).exists() {
             debug!("Path does not exist, creating it");
@@ -71,7 +71,7 @@ impl SqliteManager {
         let path = path.join("database.db");
 
         debug!("Opening SQLite connection");
-        let conn = open(&path).map_err(|e| {
+        let conn = open(&path, db_config).map_err(|e| {
             error!(path = ?path, error = %e, "Failed to open SQLite connection");
             Error::CreateStore { reason: format!("fail SQLite open connection: {}", e) }
         })?;
@@ -137,6 +137,22 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
         debug!(table = identifier, prefix = prefix, "Collection table created");
         Ok(SqliteCollection::new(self.conn.clone(), identifier, prefix))
     }
+
+    
+    fn stop(self) -> Result<(), Error> {
+        debug!("Stopping SQLite manager, flushing WAL");
+        let conn = self.conn.lock().map_err(|e| {
+            error!(error = %e, "Failed to acquire connection lock on stop");
+            Error::Store { operation: "lock_connection".to_owned(), reason: format!("{}", e) }
+        })?;
+        conn.execute_batch("PRAGMA optimize; PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| {
+                error!(error = %e, "Failed to checkpoint WAL on stop");
+                Error::Store { operation: "wal_checkpoint".to_owned(), reason: format!("{}", e) }
+            })?;
+        debug!("SQLite WAL checkpoint complete");
+        Ok(())
+    }
 }
 
 /// SQLite collection that implements both Collection and State traits.
@@ -187,43 +203,121 @@ impl SqliteCollection {
     }
 
     /// Create a new iterator filtering by prefix.
-    fn make_iter(
-        &self,
+fn make_iter(&self, reverse: bool) -> EntryIterator {
+        Box::new(SqliteChunkedIterator::new(
+            self.conn.clone(),
+            self.table.clone(),
+            self.prefix.clone(),
+            reverse,
+        ))
+    }
+}
+
+/// Iterador paginado sobre una colección SQLite usando keyset pagination.
+///
+/// Funciona correctamente cuando los sn están zero-padded (orden lexicográfico
+/// == numérico). Fetcha `ITER_CHUNK_SIZE` filas por chunk, soltando el lock
+/// entre chunks para que las escrituras concurrentes no queden bloqueadas.
+struct SqliteChunkedIterator {
+    conn: Arc<Mutex<Connection>>,
+    table: String,
+    prefix: String,
+    reverse: bool,
+    /// Filas ya cargadas del chunk actual, pendientes de entregar.
+    buffer: VecDeque<(String, Vec<u8>)>,
+    /// Último sn visto; se usa como cursor para el siguiente chunk.
+    last_key: Option<String>,
+    /// True cuando la última query devolvió 0 filas — no hay más datos.
+    exhausted: bool,
+}
+
+impl SqliteChunkedIterator {
+    fn new(
+        conn: Arc<Mutex<Connection>>,
+        table: String,
+        prefix: String,
         reverse: bool,
-    ) -> Result<EntryIterator, Error> {
-        let order = if reverse { "DESC" } else { "ASC" };
-        let conn = self.conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for iterator");
-            Error::Store { operation: "lock_connection".to_owned(), reason: format!("{}", e) }
-        })?;
-        let query = format!(
-            "SELECT sn, value FROM {} WHERE prefix = ?1 ORDER BY sn {}",
-            self.table, order,
-        );
-        let mut stmt = conn.prepare(&query).map_err(|e| {
-            error!(table = %self.table, error = %e, "Failed to prepare iterator query");
-            Error::Store { operation: "prepare".to_owned(), reason: format!("{}", e) }
-        })?;
-        let mut rows = stmt.query(params![self.prefix]).map_err(|e| {
-            error!(table = %self.table, error = %e, "Failed to execute iterator query");
-            Error::Store { operation: "query".to_owned(), reason: format!("{}", e) }
-        })?;
-        let mut values = Vec::new();
-        while let Some(row) = rows.next().map_err(|e| {
-            error!(table = %self.table, error = %e, "Failed to read iterator row");
-            Error::Store { operation: "next_row".to_owned(), reason: format!("{}", e) }
-        })? {
-            let key: String = row.get(0).map_err(|e| {
-                error!(table = %self.table, column = 0, error = %e, "Failed to read column");
-                Error::Store { operation: "get_column".to_owned(), reason: format!("{}", e) }
-            })?;
-            let value: Vec<u8> = row.get(1).map_err(|e| {
-                error!(table = %self.table, column = 1, error = %e, "Failed to read column");
-                Error::Store { operation: "get_column".to_owned(), reason: format!("{}", e) }
-            })?;
-            values.push((key, value));
+    ) -> Self {
+        Self {
+            conn,
+            table,
+            prefix,
+            reverse,
+            buffer: VecDeque::new(),
+            last_key: None,
+            exhausted: false,
         }
-        Ok(Box::new(values.into_iter()))
+    }
+
+    fn fetch_chunk(&mut self) {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(table = %self.table, error = %e, "Failed to acquire lock for chunk fetch");
+                self.exhausted = true;
+                return;
+            }
+        };
+
+        let order = if self.reverse { "DESC" } else { "ASC" };
+        let cmp   = if self.reverse { "<" } else { ">" };
+
+        let rows: Vec<(String, Vec<u8>)> = match &self.last_key {
+            None => {
+                let q = format!(
+                    "SELECT sn, value FROM {} WHERE prefix = ?1 ORDER BY sn {} LIMIT {}",
+                    self.table, order, ITER_CHUNK_SIZE
+                );
+                match conn.prepare(&q).and_then(|mut s| {
+                    s.query_map(params![self.prefix], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                }) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        warn!(table = %self.table, error = %e, "Failed to fetch first chunk from DB");
+                        self.exhausted = true;
+                        return;
+                    }
+                }
+            }
+            Some(last) => {
+                
+                let q = format!(
+                    "SELECT sn, value FROM {} WHERE prefix = ?1 AND sn {} ?2 ORDER BY sn {} LIMIT {}",
+                    self.table, cmp, order, ITER_CHUNK_SIZE
+                );
+                let last = last.clone();
+                match conn.prepare(&q).and_then(|mut s| {
+                    s.query_map(params![self.prefix, last], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                }) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        warn!(table = %self.table, error = %e, "Failed to fetch next chunk from DB");
+                        self.exhausted = true;
+                        return;
+                    }
+                }
+            }
+        };
+
+        if rows.is_empty() {
+            self.exhausted = true;
+        } else {
+            self.last_key = rows.last().map(|(k, _)| k.clone());
+            self.buffer.extend(rows);
+        }
+    }
+}
+
+impl Iterator for SqliteChunkedIterator {
+    type Item = (String, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.buffer.is_empty() && !self.exhausted {
+            self.fetch_chunk();
+        }
+        self.buffer.pop_front()
     }
 }
 
@@ -378,13 +472,7 @@ impl Collection for SqliteCollection {
         &'a self,
         reverse: bool,
     ) -> Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a> {
-        match self.make_iter(reverse) {
-            Ok(iter) => iter,
-            Err(e) => {
-                warn!(table = %self.table, error = %e, "Failed to create iterator");
-                Box::new(std::iter::empty())
-            }
-        }
+        self.make_iter(reverse)
     }
 
     fn name(&self) -> &str {
@@ -393,7 +481,7 @@ impl Collection for SqliteCollection {
 }
 
 /// Open a SQLite database connection.
-pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection, Error> {
+pub fn open<P: AsRef<Path>>(path: P, db_config: Config) -> Result<Connection, Error> {
     let path = path.as_ref();
     debug!(path = ?path, "Opening SQLite database");
     let flags =
@@ -403,50 +491,56 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection, Error> {
         Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
     })?;
 
-    let cores = resolve_hardware_cores();
-    let ram_mb = resolve_hardware_ram_mb();
-    let profile = resolve_profile(cores, ram_mb);
+    let cores = db_config.cpu_cores.unwrap_or(num_cpus::get());
+    let ram_mb = db_config.ram_mb.unwrap_or(detect_total_memory_mb().unwrap_or(4096));
+    let profile = db_config.profile.unwrap_or(resolve_profile(ram_mb));
     info!(
         "SQLite profile {:?} selected (cores: {}, RAM MB: {})",
         profile, cores, ram_mb
     );
 
-    let sync_mode = if env_bool("SQLITE_STRONG_DURABILITY").unwrap_or(false) {
+    let sync_mode = if db_config.durability {
         "FULL"
     } else {
         "NORMAL"
     };
 
     let tuning = match profile {
-        SqliteProfile::Tiny => SqliteTuning {
+        MachineProfile::Nano => SqliteTuning {
             wal_autocheckpoint_pages: 128,                      // ~512KB WAL
             journal_size_limit_bytes: 32 * 1024 * 1024,        // 32MB
             cache_size_kb: -8_192,                              // 8MB
             mmap_size_bytes: 32 * 1024 * 1024,                 // 32MB
         },
-        SqliteProfile::Small => SqliteTuning {
+        MachineProfile::Micro => SqliteTuning {
             wal_autocheckpoint_pages: 256,                      // ~1MB WAL
             journal_size_limit_bytes: 64 * 1024 * 1024,        // 64MB
             cache_size_kb: -16_384,                             // 16MB
             mmap_size_bytes: 64 * 1024 * 1024,                 // 64MB
         },
-        SqliteProfile::Medium => SqliteTuning {
+        MachineProfile::Small => SqliteTuning {
+            wal_autocheckpoint_pages: 256,                      // ~1MB WAL
+            journal_size_limit_bytes: 64 * 1024 * 1024,        // 64MB
+            cache_size_kb: -16_384,                             // 16MB
+            mmap_size_bytes: 64 * 1024 * 1024,                 // 64MB
+        },
+        MachineProfile::Medium => SqliteTuning {
             wal_autocheckpoint_pages: 1000,                     // ~4MB WAL
             journal_size_limit_bytes: 128 * 1024 * 1024,       // 128MB
             cache_size_kb: -65_536,                             // 64MB
             mmap_size_bytes: 128 * 1024 * 1024,                // 128MB
         },
-        SqliteProfile::Large => SqliteTuning {
+        MachineProfile::Large => SqliteTuning {
             wal_autocheckpoint_pages: 2000,                     // ~8MB WAL
             journal_size_limit_bytes: 256 * 1024 * 1024,       // 256MB
             cache_size_kb: -131_072,                            // 128MB
             mmap_size_bytes: 256 * 1024 * 1024,                // 256MB
         },
-        SqliteProfile::XLarge => SqliteTuning {
+        MachineProfile::XLarge => SqliteTuning {
             wal_autocheckpoint_pages: 4000,                     // ~16MB WAL
             journal_size_limit_bytes: 512 * 1024 * 1024,       // 512MB
             cache_size_kb: -524_288,                            // 512MB
-            mmap_size_bytes: 1024 * 1024 * 1024,               // 1GB
+            mmap_size_bytes: 512 * 1024 * 1024,                // 512MB
         },
     };
 
@@ -480,14 +574,6 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection, Error> {
     Ok(conn)
 }
 
-#[derive(Clone, Copy, Debug)]
-enum SqliteProfile {
-    Tiny,
-    Small,
-    Medium,
-    Large,
-    XLarge,
-}
 
 #[derive(Clone, Copy)]
 struct SqliteTuning {
@@ -497,93 +583,6 @@ struct SqliteTuning {
     mmap_size_bytes: i64,
 }
 
-#[cfg(target_os = "linux")]
-fn detect_total_memory_mb() -> Option<u64> {
-    let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
-    for line in meminfo.lines() {
-        if let Some(rest) = line.strip_prefix("MemTotal:") {
-            let kb_str = rest.split_whitespace().next()?;
-            let kb: u64 = kb_str.parse().ok()?;
-            return Some(kb / 1024);
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "linux"))]
-fn detect_total_memory_mb() -> Option<u64> {
-    None
-}
-
-fn resolve_hardware_cores() -> usize {
-    match env::var("AVE_CPU_CORES") {
-        Ok(v) => v.parse::<usize>().unwrap_or_else(|_| {
-            warn!("AVE_CPU_CORES='{}' is not a valid integer, using auto-detect", v);
-            num_cpus::get()
-        }),
-        Err(_) => num_cpus::get(),
-    }
-}
-
-fn resolve_hardware_ram_mb() -> u64 {
-    match env::var("AVE_RAM_MB") {
-        Ok(v) => v.parse::<u64>().unwrap_or_else(|_| {
-            warn!("AVE_RAM_MB='{}' is not a valid integer, using auto-detect", v);
-            detect_total_memory_mb().unwrap_or(4096)
-        }),
-        Err(_) => detect_total_memory_mb().unwrap_or(4096),
-    }
-}
-
-fn resolve_profile(_cores: usize, ram_mb: u64) -> SqliteProfile {
-    if let Some(override_profile) = profile_override_from_env() {
-        return override_profile;
-    }
-    match ram_mb {
-        0..=255      => SqliteProfile::Tiny,
-        256..=1023   => SqliteProfile::Small,
-        1024..=4095  => SqliteProfile::Medium,
-        4096..=16383 => SqliteProfile::Large,
-        _            => SqliteProfile::XLarge,
-    }
-}
-
-fn profile_override_from_env() -> Option<SqliteProfile> {
-    match env::var("SQLITE_PROFILE") {
-        Ok(val) => match val.to_lowercase().as_str() {
-            "tiny"   => Some(SqliteProfile::Tiny),
-            "small"  => Some(SqliteProfile::Small),
-            "medium" => Some(SqliteProfile::Medium),
-            "large"  => Some(SqliteProfile::Large),
-            "xlarge" => Some(SqliteProfile::XLarge),
-            "auto"   => None,
-            other => {
-                warn!(
-                    "Ignoring SQLITE_PROFILE='{}', valid values: tiny|small|medium|large|xlarge|auto",
-                    other
-                );
-                None
-            }
-        },
-        Err(_) => None,
-    }
-}
-
-fn env_bool(var: &str) -> Option<bool> {
-    match env::var(var) {
-        Ok(val) => {
-            let v = val.to_lowercase();
-            if ["1", "true", "yes", "on"].contains(&v.as_str()) {
-                Some(true)
-            } else if ["0", "false", "no", "off"].contains(&v.as_str()) {
-                Some(false)
-            } else {
-                None
-            }
-        }
-        Err(_) => None,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -605,7 +604,7 @@ mod tests {
     impl Default for SqliteManager {
         fn default() -> Self {
             let path = format!("{}/database.db", create_temp_dir());
-            let conn = open(&path)
+            let conn = open(&path, Config::default())
                 .map_err(|e| {
                     Error::CreateStore {
                         reason: format!(

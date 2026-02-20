@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use tracing::{debug, error, info_span, warn};
 
-use std::{fmt::Debug};
+use std::fmt::Debug;
 
 /// Nonce size for XChaCha20-Poly1305 encryption.
 const NONCE_SIZE: usize = 24;
@@ -371,9 +371,19 @@ where
         let store = ctx.create_child("store", store).await?;
         let response = store.ask(StoreCommand::Recover).await?;
 
-        if let StoreResponse::State(Some(state)) = response {
-            self.update(state);
+        match response {
+            StoreResponse::State(Some(state)) => {
+                self.update(state);
+            }
+            StoreResponse::Error(error) => {
+                return Err(ActorError::StoreOperation {
+                    operation: "store_operation".to_owned(),
+                    reason: error.to_string(),
+                });
+            }
+            _ => {}
         }
+
         Ok(())
     }
 
@@ -943,7 +953,11 @@ where
         if let Ok(key) = key_box.key() {
             // Validate key size (XChaCha20-Poly1305 requires exactly 32 bytes)
             if key.len() != 32 {
-                error!(expected = 32, got = key.len(), "Invalid encryption key length");
+                error!(
+                    expected = 32,
+                    got = key.len(),
+                    "Invalid encryption key length"
+                );
                 return Err(Error::Store {
                     operation: "validate_key_length".to_owned(),
                     reason: format!(
@@ -962,9 +976,8 @@ where
 
             // Encrypt and authenticate the data
             // XChaCha20-Poly1305 provides both confidentiality and authenticity
-            let ciphertext: Vec<u8> = cipher
-                .encrypt(&nonce, bytes.as_ref())
-                .map_err(|e| {
+            let ciphertext: Vec<u8> =
+                cipher.encrypt(&nonce, bytes.as_ref()).map_err(|e| {
                     error!(error = %e, "Encryption failed");
                     Error::Store {
                         operation: "encrypt_data".to_owned(),
@@ -1034,7 +1047,11 @@ where
         if let Ok(key) = key_box.key() {
             // Validate key size (XChaCha20-Poly1305 requires exactly 32 bytes)
             if key.len() != 32 {
-                error!(expected = 32, got = key.len(), "Invalid decryption key length");
+                error!(
+                    expected = 32,
+                    got = key.len(),
+                    "Invalid decryption key length"
+                );
                 return Err(Error::Store {
                     operation: "validate_key_length".to_owned(),
                     reason: format!(
@@ -1148,7 +1165,10 @@ where
     type Response = StoreResponse<P>;
     type Event = StoreEvent;
 
-    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
         info_span!("Store", id = %id)
     }
 }
@@ -1257,7 +1277,9 @@ mod tests {
     use super::*;
     use crate::memory::MemoryManager;
 
-    use ave_actors_actor::{ActorRef, ActorSystem, Error as ActorError, build_tracing_subscriber};
+    use ave_actors_actor::{
+        ActorRef, ActorSystem, Error as ActorError, build_tracing_subscriber,
+    };
 
     use async_trait::async_trait;
 
@@ -1340,7 +1362,10 @@ mod tests {
         type Event = TestEventLight;
         type Response = TestResponseLight;
 
-        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
             info_span!("TestActorLight", id = %id)
         }
 
@@ -1405,7 +1430,10 @@ mod tests {
         type Event = TestEvent;
         type Response = TestResponse;
 
-        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
             info_span!("TestActor", id = %id)
         }
 

@@ -4,8 +4,7 @@
 //!
 
 use ave_actors_store::{
-    Error,
-    database::{Collection, DbManager, State},
+    Error, config::{Config, MachineProfile, detect_total_memory_mb, resolve_profile}, database::{Collection, DbManager, State}
 };
 
 use rocksdb::{
@@ -15,17 +14,7 @@ use rocksdb::{
 };
 use tracing::{debug, error, info, warn};
 
-use std::{env, fs, path::{Path, PathBuf}, sync::Arc};
-
-#[derive(Clone, Copy, Debug)]
-enum MachineProfile {
-    Tiny,
-    Small,
-    Medium,
-    Large,
-    XLarge,
-}
-
+use std::{fs, path::{Path, PathBuf}, sync::Arc};
 /// RocksDB database manager for persistent actor storage.
 /// Manages RocksDB instances and provides factory methods for creating
 /// column families for event storage and state snapshots.
@@ -41,6 +30,8 @@ enum MachineProfile {
 pub struct RocksDbManager {
     /// RocksDB configuration options.
     opts: Options,
+    /// Path to the database directory (needed for CF listing on stop).
+    path: PathBuf,
     /// Thread-safe shared RocksDB instance.
     db: Arc<DB>,
     /// Per-write durability policy.
@@ -72,7 +63,7 @@ impl RocksDbManager {
     /// - Lists and opens all existing column families
     /// - Enables "create_if_missing" option
     ///
-    pub fn new(path: &PathBuf) -> Result<Self, Error> {
+    pub fn new(path: &PathBuf, db_config: Config) -> Result<Self, Error> {
         info!("Creating RocksDB database manager");
         if !Path::new(&path).exists() {
             debug!("Path does not exist, creating it");
@@ -87,21 +78,21 @@ impl RocksDbManager {
             })?;
         }
 
-        let cores = resolve_hardware_cores();
-        let ram_mb = resolve_hardware_ram_mb();
-        let profile = resolve_profile(cores, ram_mb);
+        let cores = db_config.cpu_cores.unwrap_or(num_cpus::get());
+        let ram_mb = db_config.ram_mb.unwrap_or(detect_total_memory_mb().unwrap_or(4096));
+        let profile = db_config.profile.unwrap_or(resolve_profile(ram_mb));
         info!(
             "RocksDB profile {:?} selected (cores: {}, RAM MB: {})",
             profile, cores, ram_mb
         );
 
-        let strong_durability =
-            env_bool("ROCKSDB_STRONG_DURABILITY").unwrap_or(false);
+        let strong_durability = db_config.durability;
 
         let mut options = Options::default();
         apply_common_tuning(&mut options);
         match profile {
-            MachineProfile::Tiny   => apply_tiny_tuning(&mut options),
+            MachineProfile::Nano   => apply_nano_tuning(&mut options),
+            MachineProfile::Micro  => apply_micro_tuning(&mut options),
             MachineProfile::Small  => apply_small_tuning(&mut options),
             MachineProfile::Medium => apply_medium_tuning(&mut options, cores),
             MachineProfile::Large  => apply_large_tuning(&mut options, cores),
@@ -137,6 +128,7 @@ impl RocksDbManager {
         debug!("RocksDB database manager created successfully");
         Ok(Self {
             opts: options,
+            path: path.clone(),
             db: Arc::new(db),
             strong_durability,
         })
@@ -162,7 +154,7 @@ fn apply_common_tuning(options: &mut Options) {
     options.set_log_file_time_to_roll(60 * 60); // rotate hourly at worst
 }
 
-fn apply_tiny_tuning(options: &mut Options) {
+fn apply_nano_tuning(options: &mut Options) {
     options.increase_parallelism(1);
     options.set_max_background_jobs(1);
     options.set_write_buffer_size(8 * 1024 * 1024);       // 8MB
@@ -172,7 +164,23 @@ fn apply_tiny_tuning(options: &mut Options) {
     options.set_max_total_wal_size(16 * 1024 * 1024);     // 16MB WAL
     let mut bb = BlockBasedOptions::default();
     bb.set_bloom_filter(10.0, false);                      // ~10 bits/key, full-key
+    bb.set_cache_index_and_filter_blocks(true);
     bb.set_block_cache(&Cache::new_lru_cache(8 * 1024 * 1024)); // 8MB
+    options.set_block_based_table_factory(&bb);
+}
+
+fn apply_micro_tuning(options: &mut Options) {
+    options.increase_parallelism(1);
+    options.set_max_background_jobs(1);
+    options.set_write_buffer_size(16 * 1024 * 1024);      // 16MB
+    options.set_max_write_buffer_number(2);
+    options.set_min_write_buffer_number_to_merge(1);
+    options.set_target_file_size_base(16 * 1024 * 1024);  // 16MB SST
+    options.set_max_total_wal_size(32 * 1024 * 1024);     // 32MB WAL
+    let mut bb = BlockBasedOptions::default();
+    bb.set_bloom_filter(10.0, false);                      // ~10 bits/key, full-key
+    bb.set_cache_index_and_filter_blocks(true);
+    bb.set_block_cache(&Cache::new_lru_cache(16 * 1024 * 1024)); // 16MB
     options.set_block_based_table_factory(&bb);
 }
 
@@ -186,6 +194,7 @@ fn apply_small_tuning(options: &mut Options) {
     options.set_max_total_wal_size(64 * 1024 * 1024);     // 64MB WAL
     let mut bb = BlockBasedOptions::default();
     bb.set_bloom_filter(10.0, false);
+    bb.set_cache_index_and_filter_blocks(true);
     bb.set_block_cache(&Cache::new_lru_cache(16 * 1024 * 1024)); // 16MB
     options.set_block_based_table_factory(&bb);
 }
@@ -201,6 +210,7 @@ fn apply_medium_tuning(options: &mut Options, cores: usize) {
     options.set_max_total_wal_size(128 * 1024 * 1024);    // 128MB WAL
     let mut bb = BlockBasedOptions::default();
     bb.set_bloom_filter(10.0, false);
+    bb.set_cache_index_and_filter_blocks(true);
     bb.set_block_cache(&Cache::new_lru_cache(64 * 1024 * 1024)); // 64MB
     options.set_block_based_table_factory(&bb);
 }
@@ -210,12 +220,13 @@ fn apply_large_tuning(options: &mut Options, cores: usize) {
     options.increase_parallelism(parallelism);
     options.set_max_background_jobs(parallelism);
     options.set_write_buffer_size(128 * 1024 * 1024);     // 128MB
-    options.set_max_write_buffer_number(4);
+    options.set_max_write_buffer_number(3);
     options.set_min_write_buffer_number_to_merge(2);
     options.set_target_file_size_base(128 * 1024 * 1024); // 128MB SST
     options.set_max_total_wal_size(256 * 1024 * 1024);    // 256MB WAL
     let mut bb = BlockBasedOptions::default();
     bb.set_bloom_filter(10.0, false);
+    bb.set_cache_index_and_filter_blocks(true);
     bb.set_block_cache(&Cache::new_lru_cache(256 * 1024 * 1024)); // 256MB
     options.set_block_based_table_factory(&bb);
 }
@@ -225,102 +236,15 @@ fn apply_xlarge_tuning(options: &mut Options, cores: usize) {
     options.increase_parallelism(parallelism);
     options.set_max_background_jobs(parallelism);
     options.set_write_buffer_size(256 * 1024 * 1024);     // 256MB
-    options.set_max_write_buffer_number(6);
+    options.set_max_write_buffer_number(4);
     options.set_min_write_buffer_number_to_merge(2);
     options.set_target_file_size_base(256 * 1024 * 1024); // 256MB SST
     options.set_max_total_wal_size(512 * 1024 * 1024);    // 512MB WAL
     let mut bb = BlockBasedOptions::default();
     bb.set_bloom_filter(10.0, false);
-    bb.set_block_cache(&Cache::new_lru_cache(1024 * 1024 * 1024)); // 1GB
+    bb.set_cache_index_and_filter_blocks(true);
+    bb.set_block_cache(&Cache::new_lru_cache(512 * 1024 * 1024)); // 512MB
     options.set_block_based_table_factory(&bb);
-}
-
-#[cfg(target_os = "linux")]
-fn detect_total_memory_mb() -> Option<u64> {
-    let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
-    for line in meminfo.lines() {
-        if let Some(rest) = line.strip_prefix("MemTotal:") {
-            let kb_str = rest.split_whitespace().next()?;
-            let kb: u64 = kb_str.parse().ok()?;
-            return Some(kb / 1024);
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "linux"))]
-fn detect_total_memory_mb() -> Option<u64> {
-    None
-}
-
-fn resolve_hardware_cores() -> usize {
-    match env::var("AVE_CPU_CORES") {
-        Ok(v) => v.parse::<usize>().unwrap_or_else(|_| {
-            warn!("AVE_CPU_CORES='{}' is not a valid integer, using auto-detect", v);
-            num_cpus::get()
-        }),
-        Err(_) => num_cpus::get(),
-    }
-}
-
-fn resolve_hardware_ram_mb() -> u64 {
-    match env::var("AVE_RAM_MB") {
-        Ok(v) => v.parse::<u64>().unwrap_or_else(|_| {
-            warn!("AVE_RAM_MB='{}' is not a valid integer, using auto-detect", v);
-            detect_total_memory_mb().unwrap_or(4096)
-        }),
-        Err(_) => detect_total_memory_mb().unwrap_or(4096),
-    }
-}
-
-fn resolve_profile(_cores: usize, ram_mb: u64) -> MachineProfile {
-    if let Some(override_profile) = profile_override_from_env() {
-        return override_profile;
-    }
-    match ram_mb {
-        0..=255      => MachineProfile::Tiny,
-        256..=1023   => MachineProfile::Small,
-        1024..=4095  => MachineProfile::Medium,
-        4096..=16383 => MachineProfile::Large,
-        _            => MachineProfile::XLarge,
-    }
-}
-
-fn profile_override_from_env() -> Option<MachineProfile> {
-    match env::var("ROCKSDB_PROFILE") {
-        Ok(val) => match val.to_lowercase().as_str() {
-            "tiny"   => Some(MachineProfile::Tiny),
-            "small"  => Some(MachineProfile::Small),
-            "medium" => Some(MachineProfile::Medium),
-            "large"  => Some(MachineProfile::Large),
-            "xlarge" => Some(MachineProfile::XLarge),
-            "auto"   => None,
-            other => {
-                info!(
-                    "Ignoring ROCKSDB_PROFILE='{}', valid values: tiny|small|medium|large|xlarge|auto",
-                    other
-                );
-                None
-            }
-        },
-        Err(_) => None,
-    }
-}
-
-fn env_bool(var: &str) -> Option<bool> {
-    match env::var(var) {
-        Ok(val) => {
-            let v = val.to_lowercase();
-            if ["1", "true", "yes", "on"].contains(&v.as_str()) {
-                Some(true)
-            } else if ["0", "false", "no", "off"].contains(&v.as_str()) {
-                Some(false)
-            } else {
-                None
-            }
-        }
-        Err(_) => None,
-    }
 }
 
 fn write_options(sync: bool) -> WriteOptions {
@@ -374,14 +298,32 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
     }
 
     fn stop(self) -> Result<(), Error> {
-        debug!("Stopping RocksDB manager, flushing WAL");
+        debug!("Stopping RocksDB manager, flushing memtables and WAL");
+
+        // Sync WAL first: ensures all committed writes survive even if the
+        // memtable flush below is interrupted.
         self.db.flush_wal(true).map_err(|e| {
             error!(error = ?e, "Failed to flush WAL on stop");
             Error::Store {
                 operation: "flush_wal".to_owned(),
                 reason: format!("{:?}", e),
             }
-        })
+        })?;
+
+        // Flush every column family's memtable → SST so the next startup
+        // does not need WAL replay. Errors here are non-fatal because the
+        // WAL sync above already guarantees durability.
+        let cf_names = DB::list_cf(&self.opts, &self.path).unwrap_or_default();
+        for name in &cf_names {
+            if let Some(handle) = self.db.cf_handle(name) {
+                if let Err(e) = self.db.flush_cf(&handle) {
+                    warn!(cf = name, error = ?e, "Failed to flush column family on stop");
+                }
+            }
+        }
+
+        debug!("RocksDB stop complete");
+        Ok(())
     }
 }
 
@@ -495,27 +437,16 @@ impl State for RocksDbStore {
             })
         }
     }
-
-    fn flush(&self) -> Result<(), Error> {
-        if let Some(handle) = self.store.cf_handle(&self.name) {
-            Ok(self
-                .store
-                .flush_cf(&handle)
-                .map_err(|e| {
-                    error!(cf = %self.name, error = ?e, "Failed to flush state");
-                    Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
-                })?)
-        } else {
-            error!(cf = %self.name, "Column family not found for state flush");
-            Err(Error::Store {
-                operation: "column_access".to_owned(),
-                reason: "RocksDB column for the store does not exist.".to_owned(),
-            })
-        }
-    }
 }
 
 impl Collection for RocksDbStore {
+    fn last(&self) -> Option<(String, Vec<u8>)> {
+        let mut iter = self.iter(true);
+        let value = iter.next();
+        debug!("Last value: {:?}", value);
+        value
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -621,24 +552,6 @@ impl Collection for RocksDbStore {
             reverse,
         ))
     }
-
-    fn flush(&self) -> Result<(), Error> {
-        if let Some(handle) = self.store.cf_handle(&self.name) {
-            Ok(self
-                .store
-                .flush_cf(&handle)
-                .map_err(|e| {
-                    error!(cf = %self.name, error = ?e, "Failed to flush collection");
-                    Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
-                })?)
-        } else {
-            error!(cf = %self.name, "Column family not found for collection flush");
-            Err(Error::Store {
-                operation: "column_access".to_owned(),
-                reason: "RocksDB column for the store does not exist.".to_owned(),
-            })
-        }
-    }
 }
 
 pub struct RocksDbIterator<'a> {
@@ -704,7 +617,7 @@ mod tests {
             let dir = tempfile::tempdir()
                 .expect("Can not create temporal directory.");
             let path = dir.keep();
-            RocksDbManager::new(&path)
+            RocksDbManager::new(&path, Config::default())
                 .expect("Can not create the database.")
         }
     }
