@@ -313,7 +313,12 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         // Flush every column family's memtable → SST so the next startup
         // does not need WAL replay. Errors here are non-fatal because the
         // WAL sync above already guarantees durability.
-        let cf_names = DB::list_cf(&self.opts, &self.path).unwrap_or_default();
+        let cf_names = DB::list_cf(&self.opts, &self.path).map_err(|e| {
+            Error::Store {
+                operation: "list_cf".to_owned(),
+                reason: format!("{:?}", e),
+            }
+        })?;
         for name in &cf_names {
             if let Some(handle) = self.db.cf_handle(name) {
                 if let Err(e) = self.db.flush_cf(&handle) {

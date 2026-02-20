@@ -16,7 +16,6 @@ memsecurity = { workspace = true }
 zeroize = { workspace = true }
 async-trait = { workspace = true }
 borsh = { workspace = true }
-futures = { workspace = true, features = ["async-await"] }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }

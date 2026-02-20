@@ -15,9 +15,7 @@ rust-version.workspace = true
 ave-actors-actor = { workspace = true}
 async-trait = { workspace = true }
 borsh = { workspace = true }
-chacha20poly1305 = "0.10"
-zeroize = { workspace = true }
-memsecurity = { workspace = true }
+chacha20poly1305 = "0.10.1"
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }

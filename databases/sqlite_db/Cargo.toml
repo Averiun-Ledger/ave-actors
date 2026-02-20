@@ -13,12 +13,11 @@ rust-version.workspace = true
 
 [dependencies]
 rusqlite = { version = "0.38.0", features = ["bundled"]}
-num_cpus = "1.16"
+num_cpus = { workspace = true }
 ave-actors-store = { workspace = true }
 tracing = {workspace = true }
 
 [dev-dependencies]
-serde = { workspace = true, features = ["derive"] }
 tempfile = {workspace = true }
 ave-actors-sqlite = { path = ".", features = ["sqlite"]}
 
