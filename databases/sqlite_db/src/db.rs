@@ -6,7 +6,7 @@
 //!
 
 use ave_actors_store::{
-    Error, config::{Config, MachineProfile, detect_total_memory_mb, resolve_profile}, database::{Collection, DbManager, State}
+    Error, config::{MachineSpec, resolve_spec}, database::{Collection, DbManager, State}
 };
 
 use rusqlite::{Connection, OpenFlags, params};
@@ -53,7 +53,7 @@ impl SqliteManager {
     /// - The directory cannot be created
     /// - The SQLite connection cannot be opened
     ///
-    pub fn new(path: &PathBuf, db_config: Config) -> Result<Self, Error> {
+    pub fn new(path: &PathBuf, durability: bool, spec: Option<MachineSpec>) -> Result<Self, Error> {
         info!("Creating SQLite database manager");
         if !Path::new(&path).exists() {
             debug!("Path does not exist, creating it");
@@ -71,7 +71,7 @@ impl SqliteManager {
         let path = path.join("database.db");
 
         debug!("Opening SQLite connection");
-        let conn = open(&path, db_config).map_err(|e| {
+        let conn = open(&path, durability, spec).map_err(|e| {
             error!(path = ?path, error = %e, "Failed to open SQLite connection");
             Error::CreateStore { reason: format!("fail SQLite open connection: {}", e) }
         })?;
@@ -464,7 +464,6 @@ impl Collection for SqliteCollection {
         conn.query_row(&query, params![self.prefix], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
         })
-        .map_err(|e| warn!(table = %self.table, error = %e, "Failed to query last()"))
         .ok()
     }
 
@@ -481,7 +480,7 @@ impl Collection for SqliteCollection {
 }
 
 /// Open a SQLite database connection.
-pub fn open<P: AsRef<Path>>(path: P, db_config: Config) -> Result<Connection, Error> {
+pub fn open<P: AsRef<Path>>(path: P, durability: bool, spec: Option<MachineSpec>) -> Result<Connection, Error> {
     let path = path.as_ref();
     debug!(path = ?path, "Opening SQLite database");
     let flags =
@@ -491,58 +490,13 @@ pub fn open<P: AsRef<Path>>(path: P, db_config: Config) -> Result<Connection, Er
         Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
     })?;
 
-    let cores = db_config.cpu_cores.unwrap_or(num_cpus::get());
-    let ram_mb = db_config.ram_mb.unwrap_or(detect_total_memory_mb().unwrap_or(4096));
-    let profile = db_config.profile.unwrap_or(resolve_profile(ram_mb));
-    info!(
-        "SQLite profile {:?} selected (cores: {}, RAM MB: {})",
-        profile, cores, ram_mb
-    );
+    let spec = resolve_spec(spec);
+    let (ram_mb, cores) = (spec.ram_mb, spec.cpu_cores);
+    info!("SQLite tuning: ram_mb={}, cpu_cores={}", ram_mb, cores);
 
-    let sync_mode = if db_config.durability {
-        "FULL"
-    } else {
-        "NORMAL"
-    };
+    let sync_mode = if durability { "FULL" } else { "NORMAL" };
 
-    let tuning = match profile {
-        MachineProfile::Nano => SqliteTuning {
-            wal_autocheckpoint_pages: 128,                      // ~512KB WAL
-            journal_size_limit_bytes: 32 * 1024 * 1024,        // 32MB
-            cache_size_kb: -8_192,                              // 8MB
-            mmap_size_bytes: 32 * 1024 * 1024,                 // 32MB
-        },
-        MachineProfile::Micro => SqliteTuning {
-            wal_autocheckpoint_pages: 256,                      // ~1MB WAL
-            journal_size_limit_bytes: 64 * 1024 * 1024,        // 64MB
-            cache_size_kb: -16_384,                             // 16MB
-            mmap_size_bytes: 64 * 1024 * 1024,                 // 64MB
-        },
-        MachineProfile::Small => SqliteTuning {
-            wal_autocheckpoint_pages: 256,                      // ~1MB WAL
-            journal_size_limit_bytes: 64 * 1024 * 1024,        // 64MB
-            cache_size_kb: -16_384,                             // 16MB
-            mmap_size_bytes: 64 * 1024 * 1024,                 // 64MB
-        },
-        MachineProfile::Medium => SqliteTuning {
-            wal_autocheckpoint_pages: 1000,                     // ~4MB WAL
-            journal_size_limit_bytes: 128 * 1024 * 1024,       // 128MB
-            cache_size_kb: -65_536,                             // 64MB
-            mmap_size_bytes: 128 * 1024 * 1024,                // 128MB
-        },
-        MachineProfile::Large => SqliteTuning {
-            wal_autocheckpoint_pages: 2000,                     // ~8MB WAL
-            journal_size_limit_bytes: 256 * 1024 * 1024,       // 256MB
-            cache_size_kb: -131_072,                            // 128MB
-            mmap_size_bytes: 256 * 1024 * 1024,                // 256MB
-        },
-        MachineProfile::XLarge => SqliteTuning {
-            wal_autocheckpoint_pages: 4000,                     // ~16MB WAL
-            journal_size_limit_bytes: 512 * 1024 * 1024,       // 512MB
-            cache_size_kb: -524_288,                            // 512MB
-            mmap_size_bytes: 512 * 1024 * 1024,                // 512MB
-        },
-    };
+    let tuning = tuning_for_ram(ram_mb);
 
     conn.execute_batch(
         format!(
@@ -575,6 +529,34 @@ pub fn open<P: AsRef<Path>>(path: P, db_config: Config) -> Result<Connection, Er
 }
 
 
+/// Compute SQLite tuning parameters directly from available RAM.
+///
+/// SQLite is single-writer so CPU cores don't affect tuning here.
+/// Cache target: 2 % of RAM, floor 8 MB, cap 1 GB.
+fn tuning_for_ram(ram_mb: u64) -> SqliteTuning {
+    // Page cache: 2 % of RAM, floor 8 MB, cap 1 GB
+    let cache_mb = (ram_mb * 2 / 100).max(8).min(1024);
+    let cache_size_kb = -(cache_mb as i64 * 1024); // negative = KB in SQLite
+
+    // mmap: same size as cache (virtual memory; OS decides what stays in RAM)
+    let mmap_size_bytes = cache_mb as i64 * 1024 * 1024;
+
+    // WAL checkpoint: every ram_mb/2 pages (4 KB each), floor 128, cap 8 000
+    let wal_autocheckpoint_pages = (ram_mb as i64 / 2).max(128).min(8_000);
+
+    // journal_size_limit: 2× cache on disk, floor 32 MB, cap 1 GB
+    let journal_size_limit_bytes = (cache_mb as i64 * 2 * 1024 * 1024)
+        .max(32 * 1024 * 1024)
+        .min(1024 * 1024 * 1024);
+
+    SqliteTuning {
+        wal_autocheckpoint_pages,
+        journal_size_limit_bytes,
+        cache_size_kb,
+        mmap_size_bytes,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct SqliteTuning {
     wal_autocheckpoint_pages: i64,
@@ -604,7 +586,7 @@ mod tests {
     impl Default for SqliteManager {
         fn default() -> Self {
             let path = format!("{}/database.db", create_temp_dir());
-            let conn = open(&path, Config::default())
+            let conn = open(&path, false, None)
                 .map_err(|e| {
                     Error::CreateStore {
                         reason: format!(

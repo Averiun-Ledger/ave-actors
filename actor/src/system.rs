@@ -186,7 +186,7 @@ impl SystemRef {
         {
             let actors = self.actors.read().await;
             if actors.contains_key(&path) {
-                error!(path = %path, "Actor already exists");
+                debug!(path = %path, "Actor already exists");
                 return Err(Error::Exists { path });
             }
         }

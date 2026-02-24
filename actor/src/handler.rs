@@ -111,11 +111,11 @@ pub type BoxedMessageHandler<A> = Box<dyn MessageHandler<A>>;
 
 /// Mailbox receiver side for consuming messages from the actor's queue.
 /// The actor's main loop will receive messages through this channel.
-pub type MailboxReceiver<A> = mpsc::UnboundedReceiver<BoxedMessageHandler<A>>;
+pub type MailboxReceiver<A> = mpsc::Receiver<BoxedMessageHandler<A>>;
 
 /// Mailbox sender side for sending messages to an actor's queue.
 /// Multiple references can share the same sender to communicate with an actor.
-pub type MailboxSender<A> = mpsc::UnboundedSender<BoxedMessageHandler<A>>;
+pub type MailboxSender<A> = mpsc::Sender<BoxedMessageHandler<A>>;
 
 /// Complete mailbox tuple containing both sender and receiver sides.
 /// Created during actor initialization and split for use by different components.
@@ -130,7 +130,7 @@ pub type Mailbox<A> = (MailboxSender<A>, MailboxReceiver<A>);
 /// Returns a tuple of (sender, receiver) for the actor's mailbox.
 ///
 pub fn mailbox<A>() -> Mailbox<A> {
-    mpsc::unbounded_channel()
+    mpsc::channel(10000)
 }
 
 /// Handle helper for sending messages to an actor.
@@ -181,7 +181,7 @@ where
         message: A::Message,
     ) -> Result<(), Error> {
         let msg = ActorMessage::new(message, sender, None);
-        self.sender.send(Box::new(msg)).map_err(|error| {
+        self.sender.send(Box::new(msg)).await.map_err(|error| {
             Error::Send {
                 reason: error.to_string(),
             }
@@ -213,7 +213,7 @@ where
         let (response_sender, response_receiver) = oneshot::channel();
         let msg = ActorMessage::new(message, sender, Some(response_sender));
 
-        self.sender.send(Box::new(msg)).map_err(|error| {
+        self.sender.send(Box::new(msg)).await.map_err(|error| {
             Error::Send {
                 reason: error.to_string(),
             }

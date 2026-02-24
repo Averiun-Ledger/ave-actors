@@ -4,7 +4,7 @@
 //!
 
 use ave_actors_store::{
-    Error, config::{Config, MachineProfile, detect_total_memory_mb, resolve_profile}, database::{Collection, DbManager, State}
+    Error, config::{MachineSpec, resolve_spec}, database::{Collection, DbManager, State}
 };
 
 use rocksdb::{
@@ -63,7 +63,7 @@ impl RocksDbManager {
     /// - Lists and opens all existing column families
     /// - Enables "create_if_missing" option
     ///
-    pub fn new(path: &PathBuf, db_config: Config) -> Result<Self, Error> {
+    pub fn new(path: &PathBuf, durability: bool, spec: Option<MachineSpec>) -> Result<Self, Error> {
         info!("Creating RocksDB database manager");
         if !Path::new(&path).exists() {
             debug!("Path does not exist, creating it");
@@ -78,26 +78,15 @@ impl RocksDbManager {
             })?;
         }
 
-        let cores = db_config.cpu_cores.unwrap_or(num_cpus::get());
-        let ram_mb = db_config.ram_mb.unwrap_or(detect_total_memory_mb().unwrap_or(4096));
-        let profile = db_config.profile.unwrap_or(resolve_profile(ram_mb));
-        info!(
-            "RocksDB profile {:?} selected (cores: {}, RAM MB: {})",
-            profile, cores, ram_mb
-        );
+        let spec = resolve_spec(spec);
+        let (ram_mb, cores) = (spec.ram_mb, spec.cpu_cores);
+        info!("RocksDB tuning: ram_mb={}, cpu_cores={}", ram_mb, cores);
 
-        let strong_durability = db_config.durability;
+        let strong_durability = durability;
 
         let mut options = Options::default();
         apply_common_tuning(&mut options);
-        match profile {
-            MachineProfile::Nano   => apply_nano_tuning(&mut options),
-            MachineProfile::Micro  => apply_micro_tuning(&mut options),
-            MachineProfile::Small  => apply_small_tuning(&mut options),
-            MachineProfile::Medium => apply_medium_tuning(&mut options, cores),
-            MachineProfile::Large  => apply_large_tuning(&mut options, cores),
-            MachineProfile::XLarge => apply_xlarge_tuning(&mut options, cores),
-        }
+        apply_tuning(&mut options, ram_mb, cores);
 
         let cfs = match DB::list_cf(&options, path) {
             Ok(cf_names) => {
@@ -154,96 +143,60 @@ fn apply_common_tuning(options: &mut Options) {
     options.set_log_file_time_to_roll(60 * 60); // rotate hourly at worst
 }
 
-fn apply_nano_tuning(options: &mut Options) {
-    options.increase_parallelism(1);
-    options.set_max_background_jobs(1);
-    options.set_write_buffer_size(8 * 1024 * 1024);       // 8MB
-    options.set_max_write_buffer_number(2);
-    options.set_min_write_buffer_number_to_merge(1);
-    options.set_target_file_size_base(8 * 1024 * 1024);   // 8MB SST
-    options.set_max_total_wal_size(16 * 1024 * 1024);     // 16MB WAL
-    let mut bb = BlockBasedOptions::default();
-    bb.set_bloom_filter(10.0, false);                      // ~10 bits/key, full-key
-    bb.set_cache_index_and_filter_blocks(true);
-    bb.set_block_cache(&Cache::new_lru_cache(8 * 1024 * 1024)); // 8MB
-    options.set_block_based_table_factory(&bb);
-}
-
-fn apply_micro_tuning(options: &mut Options) {
-    options.increase_parallelism(1);
-    options.set_max_background_jobs(1);
-    options.set_write_buffer_size(16 * 1024 * 1024);      // 16MB
-    options.set_max_write_buffer_number(2);
-    options.set_min_write_buffer_number_to_merge(1);
-    options.set_target_file_size_base(16 * 1024 * 1024);  // 16MB SST
-    options.set_max_total_wal_size(32 * 1024 * 1024);     // 32MB WAL
-    let mut bb = BlockBasedOptions::default();
-    bb.set_bloom_filter(10.0, false);                      // ~10 bits/key, full-key
-    bb.set_cache_index_and_filter_blocks(true);
-    bb.set_block_cache(&Cache::new_lru_cache(16 * 1024 * 1024)); // 16MB
-    options.set_block_based_table_factory(&bb);
-}
-
-fn apply_small_tuning(options: &mut Options) {
-    options.increase_parallelism(1);
-    options.set_max_background_jobs(1);
-    options.set_write_buffer_size(32 * 1024 * 1024);      // 32MB
-    options.set_max_write_buffer_number(2);
-    options.set_min_write_buffer_number_to_merge(1);
-    options.set_target_file_size_base(32 * 1024 * 1024);  // 32MB SST
-    options.set_max_total_wal_size(64 * 1024 * 1024);     // 64MB WAL
-    let mut bb = BlockBasedOptions::default();
-    bb.set_bloom_filter(10.0, false);
-    bb.set_cache_index_and_filter_blocks(true);
-    bb.set_block_cache(&Cache::new_lru_cache(16 * 1024 * 1024)); // 16MB
-    options.set_block_based_table_factory(&bb);
-}
-
-fn apply_medium_tuning(options: &mut Options, cores: usize) {
-    let parallelism = (cores as i32).min(4).max(2);
+/// Compute RocksDB tuning parameters directly from available RAM and CPU cores.
+///
+/// These values are the TOTAL machine specs, not exclusive resources for the DB.
+/// The OS, actor runtime, and other processes share the same RAM, so the budget
+/// is intentionally conservative: 5 % of total RAM.
+///
+/// Distribution: 40 % → block cache · 40 % → write buffers · 20 % → WAL.
+fn apply_tuning(options: &mut Options, ram_mb: u64, cores: usize) {
+    // ── Parallelism ────────────────────────────────────────────────────────────
+    // Cap at half the cores (floor 1, ceiling 4) so compaction threads don't
+    // starve libp2p and the actor runtime on the same machine.
+    let parallelism = ((cores / 2) as i32).max(1).min(4);
     options.increase_parallelism(parallelism);
     options.set_max_background_jobs(parallelism);
-    options.set_write_buffer_size(64 * 1024 * 1024);      // 64MB
-    options.set_max_write_buffer_number(3);
-    options.set_min_write_buffer_number_to_merge(1);
-    options.set_target_file_size_base(64 * 1024 * 1024);  // 64MB SST
-    options.set_max_total_wal_size(128 * 1024 * 1024);    // 128MB WAL
-    let mut bb = BlockBasedOptions::default();
-    bb.set_bloom_filter(10.0, false);
-    bb.set_cache_index_and_filter_blocks(true);
-    bb.set_block_cache(&Cache::new_lru_cache(64 * 1024 * 1024)); // 64MB
-    options.set_block_based_table_factory(&bb);
-}
 
-fn apply_large_tuning(options: &mut Options, cores: usize) {
-    let parallelism = (cores as i32).min(8).max(2);
-    options.increase_parallelism(parallelism);
-    options.set_max_background_jobs(parallelism);
-    options.set_write_buffer_size(128 * 1024 * 1024);     // 128MB
-    options.set_max_write_buffer_number(3);
-    options.set_min_write_buffer_number_to_merge(2);
-    options.set_target_file_size_base(128 * 1024 * 1024); // 128MB SST
-    options.set_max_total_wal_size(256 * 1024 * 1024);    // 256MB WAL
-    let mut bb = BlockBasedOptions::default();
-    bb.set_bloom_filter(10.0, false);
-    bb.set_cache_index_and_filter_blocks(true);
-    bb.set_block_cache(&Cache::new_lru_cache(256 * 1024 * 1024)); // 256MB
-    options.set_block_based_table_factory(&bb);
-}
+    // ── Memory budget: 5 % of total RAM ───────────────────────────────────────
+    let budget = ram_mb * 1024 * 1024 * 5 / 100; // bytes
 
-fn apply_xlarge_tuning(options: &mut Options, cores: usize) {
-    let parallelism = (cores as i32).min(16).max(4);
-    options.increase_parallelism(parallelism);
-    options.set_max_background_jobs(parallelism);
-    options.set_write_buffer_size(256 * 1024 * 1024);     // 256MB
-    options.set_max_write_buffer_number(4);
-    options.set_min_write_buffer_number_to_merge(2);
-    options.set_target_file_size_base(256 * 1024 * 1024); // 256MB SST
-    options.set_max_total_wal_size(512 * 1024 * 1024);    // 512MB WAL
+    // Block cache: 40 % of budget, floor 4 MB, cap 512 MB
+    let cache_bytes = (budget * 40 / 100)
+        .max(4 * 1024 * 1024)
+        .min(512 * 1024 * 1024);
+
+    // Write buffer count: scales with RAM
+    let wb_count: u64 = match ram_mb {
+        0..=1024     => 2,
+        1025..=4096  => 3,
+        4097..=16384 => 4,
+        _            => 6,
+    };
+
+    // Write buffer size: 40 % of budget across all buffers, floor 4 MB, cap 256 MB
+    let wb_size = (budget * 40 / 100 / wb_count)
+        .max(4 * 1024 * 1024)
+        .min(256 * 1024 * 1024);
+
+    // WAL: 20 % of budget, floor 8 MB, cap 512 MB
+    let wal_bytes = (budget * 20 / 100)
+        .max(8 * 1024 * 1024)
+        .min(512 * 1024 * 1024);
+
+    let merge: i32 = if wb_count <= 2 { 1 } else { 2 };
+
+    options.set_write_buffer_size(wb_size as usize);
+    options.set_max_write_buffer_number(wb_count as i32);
+    options.set_min_write_buffer_number_to_merge(merge);
+    options.set_target_file_size_base(wb_size);
+    options.set_max_total_wal_size(wal_bytes);
+
+    // ── Block cache ────────────────────────────────────────────────────────────
     let mut bb = BlockBasedOptions::default();
     bb.set_bloom_filter(10.0, false);
     bb.set_cache_index_and_filter_blocks(true);
-    bb.set_block_cache(&Cache::new_lru_cache(512 * 1024 * 1024)); // 512MB
+    bb.set_block_cache(&Cache::new_lru_cache(cache_bytes as usize));
     options.set_block_based_table_factory(&bb);
 }
 
@@ -622,7 +575,7 @@ mod tests {
             let dir = tempfile::tempdir()
                 .expect("Can not create temporal directory.");
             let path = dir.keep();
-            RocksDbManager::new(&path, Config::default())
+            RocksDbManager::new(&path, false, None)
                 .expect("Can not create the database.")
         }
     }

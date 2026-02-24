@@ -221,7 +221,7 @@ where
     ///
     pub async fn publish_event(&self, event: A::Event) -> Result<(), Error> {
         self.inner_sender
-            .send(InnerAction::Event(event))
+            .send(InnerAction::Event(event)).await
             .map_err(|e| {
                 tracing::error!(error = %e, "Failed to publish event");
                 Error::SendEvent { reason: e.to_string() }
@@ -245,7 +245,7 @@ where
     pub async fn emit_error(&mut self, error: Error) -> Result<(), Error> {
         tracing::warn!(error = ?error, "Emitting error");
         self.inner_sender
-            .send(InnerAction::Error(error))
+            .send(InnerAction::Error(error)).await
             .map_err(|e| {
                 tracing::error!(error = %e, "Failed to emit error");
                 Error::Send { reason: e.to_string() }
@@ -273,7 +273,7 @@ where
         self.set_error(error.clone());
         // Send fail to parent actor.
         self.inner_sender
-            .send(InnerAction::Fail(error.clone()))
+            .send(InnerAction::Fail(error.clone())).await
             .map_err(|e| {
                 tracing::error!(error = %e, "Failed to emit fail");
                 Error::Send { reason: e.to_string() }
@@ -319,7 +319,7 @@ where
                 Ok(actor_ref)
             }
             Err(e) => {
-                tracing::error!(child_name = %name, error = ?e, "Failed to create child actor");
+                tracing::debug!(child_name = %name, error = ?e, "Failed to create child actor");
                 Err(e)
             }
         }
@@ -404,10 +404,10 @@ pub enum ChildAction {
 }
 
 /// Child error receiver.
-pub(crate) type ChildErrorReceiver = mpsc::UnboundedReceiver<ChildError>;
+pub(crate) type ChildErrorReceiver = mpsc::Receiver<ChildError>;
 
 /// Child error sender.
-pub(crate) type ChildErrorSender = mpsc::UnboundedSender<ChildError>;
+pub(crate) type ChildErrorSender = mpsc::Sender<ChildError>;
 
 /// Child error.
 ///

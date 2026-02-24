@@ -26,8 +26,8 @@ use tokio::{
 use tracing::{debug, error, warn};
 
 /// Inner sender and receiver types.
-pub type InnerSender<A> = mpsc::UnboundedSender<InnerAction<A>>;
-pub type InnerReceiver<A> = mpsc::UnboundedReceiver<InnerAction<A>>;
+pub type InnerSender<A> = mpsc::Sender<InnerAction<A>>;
+pub type InnerReceiver<A> = mpsc::Receiver<InnerAction<A>>;
 
 pub type StopReceiver = mpsc::Receiver<Option<oneshot::Sender<()>>>;
 pub type StopSender = mpsc::Sender<Option<oneshot::Sender<()>>>;
@@ -67,9 +67,9 @@ where
     ) -> (Self, ActorRef<A>, StopSender) {
         let (sender, receiver) = mailbox();
         let (stop_sender, stop_receiver) = mpsc::channel(100);
-        let (error_sender, error_receiver) = mpsc::unbounded_channel();
+        let (error_sender, error_receiver) = mpsc::channel(1000);
         let (event_sender, event_receiver) = broadcast::channel(10000);
-        let (inner_sender, inner_receiver) = mpsc::unbounded_channel();
+        let (inner_sender, inner_receiver) = mpsc::channel(10000);
         let helper = HandleHelper::new(sender);
 
         //let error_helper = ErrorHelper::new(error_sender);
@@ -276,7 +276,7 @@ where
             }
             InnerAction::Error(error) => {
                 if let Some(parent_helper) = self.parent_sender.as_mut()
-                    && let Err(err) = parent_helper.send(ChildError::Error { error })
+                    && let Err(err) = parent_helper.send(ChildError::Error { error }).await
                 {
                     error!(error = ?err, "Failed to send error to parent");
                 }
@@ -288,7 +288,7 @@ where
                     if let Err(err) = parent_helper.send(ChildError::Fault {
                         error,
                         sender: action_sender,
-                    }) {
+                    }).await {
                         error!(error = ?err, "Failed to send fail to parent");
                     } else {
                         // Sets the state from action.
