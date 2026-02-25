@@ -5,6 +5,7 @@
 use crate::error::Error;
 
 /// A trait representing a database manager that creates collections and state storage.
+///
 /// Implementations of this trait provide the factory methods for creating
 /// persistent storage backends used by actors for event sourcing and state snapshots.
 ///
@@ -72,6 +73,7 @@ where
 }
 
 /// Trait for storing a single state value (typically actor snapshots).
+///
 /// State storage maintains only the most recent value, unlike Collections
 /// which store multiple key-value pairs. This is used for persisting
 /// actor state snapshots in event sourcing patterns.

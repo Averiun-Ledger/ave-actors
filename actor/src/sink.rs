@@ -44,7 +44,7 @@ impl<E: Event> Sink<E> {
         event_receiver: EventReceiver<E>,
         subscriber: impl Subscriber<E>,
     ) -> Self {
-        Sink {
+        Self {
             subscriber: Box::new(subscriber),
             event_receiver,
         }

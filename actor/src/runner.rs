@@ -33,7 +33,7 @@ pub type StopReceiver = mpsc::Receiver<Option<oneshot::Sender<()>>>;
 pub type StopSender = mpsc::Sender<Option<oneshot::Sender<()>>>;
 
 /// Actor runner.
-pub(crate) struct ActorRunner<A: Actor> {
+pub struct ActorRunner<A: Actor> {
     path: ActorPath,
     actor: A,
     lifecycle: ActorLifecycle,
@@ -79,7 +79,7 @@ where
             stop_sender.clone(),
             event_receiver,
         );
-        let runner: ActorRunner<A> = ActorRunner {
+        let runner: Self = Self {
             path,
             actor,
             lifecycle: ActorLifecycle::Created,
@@ -214,7 +214,7 @@ where
                         let _ = stop.send(());
                     }
 
-                    if let ActorLifecycle::Started =  self.lifecycle {
+                    if self.lifecycle == ActorLifecycle::Started {
                         self.lifecycle = ActorLifecycle::Stopped;
                     }
                     break;
@@ -270,7 +270,7 @@ where
     ) {
         match event {
             InnerAction::Event(event) => {
-                if self.event_sender.send(event.clone()).is_err() {
+                if self.event_sender.send(event).is_err() {
                     error!("Failed to broadcast event");
                 }
             }

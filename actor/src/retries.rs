@@ -31,7 +31,7 @@ where
     T: Actor + Handler<T> + Clone + NotPersistentActor,
 {
     /// Create a new RetryActor.
-    pub fn new(
+    pub const fn new(
         target: T,
         message: T::Message,
         retry_strategy: Strategy,
@@ -88,7 +88,7 @@ where
 }
 
 #[async_trait]
-impl<T> Handler<RetryActor<T>> for RetryActor<T>
+impl<T> Handler<Self> for RetryActor<T>
 where
     T: Actor + Handler<T> + Clone + NotPersistentActor,
 {
@@ -96,7 +96,7 @@ where
         &mut self,
         _path: ActorPath,
         message: RetryMessage,
-        ctx: &mut ActorContext<RetryActor<T>>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         match message {
             RetryMessage::Retry => {
@@ -120,7 +120,7 @@ where
                             if let Some(duration) =
                                 self.retry_strategy.next_backoff()
                             {
-                                let actor: ActorRef<RetryActor<T>> = actor;
+                                let actor: ActorRef<Self> = actor;
                                 tokio::spawn(async move {
                                     tokio::time::sleep(duration).await;
                                     let _ =

@@ -63,7 +63,7 @@ where
     ///
     /// Returns a new actor context.
     ///
-    pub(crate) fn new(
+    pub(crate) const fn new(
         stop: StopSender,
         path: ActorPath,
         system: SystemRef,
@@ -127,7 +127,7 @@ where
     ///
     /// Returns the path of the actor.
     ///
-    pub fn path(&self) -> &ActorPath {
+    pub const fn path(&self) -> &ActorPath {
         &self.path
     }
 
@@ -137,7 +137,7 @@ where
     ///
     /// Returns the actor system.
     ///
-    pub fn system(&self) -> &SystemRef {
+    pub const fn system(&self) -> &SystemRef {
         &self.system
     }
 
@@ -376,7 +376,7 @@ where
 }
 
 /// The `Actor` lifecycle enum
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActorLifecycle {
     /// The actor is created.
     Created,
@@ -404,10 +404,10 @@ pub enum ChildAction {
 }
 
 /// Child error receiver.
-pub(crate) type ChildErrorReceiver = mpsc::Receiver<ChildError>;
+pub type ChildErrorReceiver = mpsc::Receiver<ChildError>;
 
 /// Child error sender.
-pub(crate) type ChildErrorSender = mpsc::Sender<ChildError>;
+pub type ChildErrorSender = mpsc::Sender<ChildError>;
 
 /// Child error.
 ///
@@ -670,7 +670,7 @@ where
     ///
     /// Returns a new actor reference.
     ///
-    pub fn new(
+    pub const fn new(
         path: ActorPath,
         sender: HandleHelper<A>,
         stop_sender: StopSender,

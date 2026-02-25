@@ -28,9 +28,9 @@ impl ActorPath {
         if self.0.len() == 1 {
             self.clone()
         } else if !self.0.is_empty() {
-            ActorPath(self.0.iter().take(1).cloned().collect())
+            Self(self.0.iter().take(1).cloned().collect())
         } else {
-            ActorPath(Vec::new())
+            Self(Vec::new())
         }
     }
 
@@ -44,9 +44,9 @@ impl ActorPath {
         if self.0.len() > 1 {
             let mut tokens = self.0.clone();
             tokens.truncate(tokens.len() - 1);
-            ActorPath(tokens)
+            Self(tokens)
         } else {
-            ActorPath(Vec::new())
+            Self(Vec::new())
         }
     }
 
@@ -66,7 +66,7 @@ impl ActorPath {
     ///
     /// Returns the levels size of the path.
     ///
-    pub fn level(&self) -> usize {
+    pub const fn level(&self) -> usize {
         self.0.len()
     }
 
@@ -90,7 +90,7 @@ impl ActorPath {
         } else {
             let mut tokens = self.0.clone();
             tokens.truncate(level);
-            ActorPath(tokens)
+            Self(tokens)
         }
     }
 
@@ -100,7 +100,7 @@ impl ActorPath {
     ///
     /// Returns `true` if the path is empty.
     ///
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
@@ -114,7 +114,7 @@ impl ActorPath {
     ///
     /// Returns `true` if the path is an ancestor of the other path.
     ///
-    pub fn is_ancestor_of(&self, other: &ActorPath) -> bool {
+    pub fn is_ancestor_of(&self, other: &Self) -> bool {
         let me = format!("{}/", self);
         other.to_string().as_str().starts_with(me.as_str())
     }
@@ -129,7 +129,7 @@ impl ActorPath {
     ///
     /// Returns `true` if the path is a descendant of the other path.
     ///
-    pub fn is_descendant_of(&self, other: &ActorPath) -> bool {
+    pub fn is_descendant_of(&self, other: &Self) -> bool {
         let me = self.to_string();
         me.as_str().starts_with(format!("{}/", other).as_str())
     }
@@ -144,7 +144,7 @@ impl ActorPath {
     ///
     /// Returns `true` if the path is a parent of the other path.
     ///
-    pub fn is_parent_of(&self, other: &ActorPath) -> bool {
+    pub fn is_parent_of(&self, other: &Self) -> bool {
         *self == other.parent()
     }
 
@@ -158,7 +158,7 @@ impl ActorPath {
     ///
     /// Returns `true` if the path is a child of the other path.
     ///
-    pub fn is_child_of(&self, other: &ActorPath) -> bool {
+    pub fn is_child_of(&self, other: &Self) -> bool {
         self.parent() == *other
     }
 
@@ -168,7 +168,7 @@ impl ActorPath {
     ///
     /// Returns `true` if the path is top level.
     ///
-    pub fn is_top_level(&self) -> bool {
+    pub const fn is_top_level(&self) -> bool {
         self.0.len() == 1
     }
 }
@@ -180,25 +180,25 @@ impl From<&str> for ActorPath {
             .filter(|x| !x.trim().is_empty())
             .map(|s| s.to_string())
             .collect();
-        ActorPath(tokens)
+        Self(tokens)
     }
 }
 
 impl From<String> for ActorPath {
     fn from(string: String) -> Self {
-        ActorPath::from(string.as_str())
+        Self::from(string.as_str())
     }
 }
 
 impl From<&String> for ActorPath {
     fn from(string: &String) -> Self {
-        ActorPath::from(string.as_str())
+        Self::from(string.as_str())
     }
 }
 
 /// Implements the division operator for the ActorPath.
 impl std::ops::Div<&str> for ActorPath {
-    type Output = ActorPath;
+    type Output = Self;
 
     fn div(self, rhs: &str) -> Self::Output {
         let mut keys = self.0;
@@ -209,7 +209,7 @@ impl std::ops::Div<&str> for ActorPath {
             .collect();
 
         keys.append(&mut tokens);
-        ActorPath(keys)
+        Self(keys)
     }
 }
 

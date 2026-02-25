@@ -19,6 +19,7 @@ use tracing::{Instrument, Span, debug, error, warn};
 use std::{any::Any, collections::HashMap, sync::Arc};
 
 /// Actor system factory.
+///
 /// This is the main entry point for creating an actor system instance.
 /// The ActorSystem provides factory methods for initializing the system
 /// infrastructure including the SystemRef and SystemRunner.
@@ -66,6 +67,7 @@ pub enum SystemEvent {
 }
 
 /// Cloneable reference to the actor system.
+///
 /// The SystemRef provides methods for creating, retrieving, and managing actors.
 /// Multiple SystemRef instances can be cloned and used concurrently across
 /// different parts of the application.
@@ -141,7 +143,7 @@ impl SystemRef {
             }
         });
 
-        SystemRef {
+        Self {
             actors: Arc::new(RwLock::new(HashMap::new())),
             helpers: Arc::new(RwLock::new(HashMap::new())),
             token,
@@ -402,7 +404,7 @@ impl SystemRunner {
     ///
     /// Returns a new SystemRunner instance.
     ///
-    pub(crate) fn new(event_receiver: mpsc::Receiver<SystemEvent>) -> Self {
+    pub(crate) const fn new(event_receiver: mpsc::Receiver<SystemEvent>) -> Self {
         Self { event_receiver }
     }
 

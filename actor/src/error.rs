@@ -8,7 +8,7 @@ use crate::ActorPath;
 use thiserror::Error;
 
 /// Error type for the actor system.
-#[derive(Clone, Debug, Error, PartialEq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum Error {
     // ===== Actor Lifecycle Errors =====
     /// Actor already exists at the specified path.

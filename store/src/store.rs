@@ -90,7 +90,7 @@ pub struct InitializedActor<A>(A);
 impl<A> InitializedActor<A> {
     /// Creates a new InitializedActor wrapper.
     /// This is `pub(crate)` so only PersistentActor::initial() can call it.
-    pub(crate) fn new(actor: A) -> Self {
+    pub(crate) const fn new(actor: A) -> Self {
         Self(actor)
     }
 }
@@ -409,7 +409,7 @@ where
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Ok(store) = ctx.get_child::<Store<Self>>("store").await {
-            if let PersistenceType::Full = Self::Persistence::get_persistence()
+            if matches!(Self::Persistence::get_persistence(), PersistenceType::Full)
             {
                 // Only snapshot if there are events
                 let response = store.ask(StoreCommand::LastEventNumber).await?;
@@ -1174,7 +1174,7 @@ where
 }
 
 #[async_trait]
-impl<P> Handler<Store<P>> for Store<P>
+impl<P> Handler<Self> for Store<P>
 where
     P: PersistentActor,
     P::Event: BorshSerialize + BorshDeserialize,
@@ -1183,7 +1183,7 @@ where
         &mut self,
         _sender: ActorPath,
         msg: StoreCommand<P, P::Event>,
-        _ctx: &mut ActorContext<Store<P>>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<StoreResponse<P>, ActorError> {
         // Match the command.
         match msg {

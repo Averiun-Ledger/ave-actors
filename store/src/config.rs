@@ -71,13 +71,13 @@ impl MachineProfile {
 impl Display for MachineProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MachineProfile::Nano    => write!(f, "nano"),
-            MachineProfile::Micro   => write!(f, "micro"),
-            MachineProfile::Small   => write!(f, "small"),
-            MachineProfile::Medium  => write!(f, "medium"),
-            MachineProfile::Large   => write!(f, "large"),
-            MachineProfile::XLarge  => write!(f, "xlarge"),
-            MachineProfile::XXLarge => write!(f, "2xlarge"),
+            Self::Nano    => write!(f, "nano"),
+            Self::Micro   => write!(f, "micro"),
+            Self::Small   => write!(f, "small"),
+            Self::Medium  => write!(f, "medium"),
+            Self::Large   => write!(f, "large"),
+            Self::XLarge  => write!(f, "xlarge"),
+            Self::XXLarge => write!(f, "2xlarge"),
         }
     }
 }

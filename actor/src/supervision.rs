@@ -61,9 +61,9 @@ pub enum Strategy {
 impl RetryStrategy for Strategy {
     fn max_retries(&self) -> usize {
         match self {
-            Strategy::NoInterval(strategy) => strategy.max_retries(),
-            Strategy::FixedInterval(strategy) => strategy.max_retries(),
-            Strategy::CustomIntervalStrategy(strategy) => {
+            Self::NoInterval(strategy) => strategy.max_retries(),
+            Self::FixedInterval(strategy) => strategy.max_retries(),
+            Self::CustomIntervalStrategy(strategy) => {
                 strategy.max_retries()
             }
         }
@@ -71,9 +71,9 @@ impl RetryStrategy for Strategy {
 
     fn next_backoff(&mut self) -> Option<Duration> {
         match self {
-            Strategy::NoInterval(strategy) => strategy.next_backoff(),
-            Strategy::FixedInterval(strategy) => strategy.next_backoff(),
-            Strategy::CustomIntervalStrategy(strategy) => {
+            Self::NoInterval(strategy) => strategy.next_backoff(),
+            Self::FixedInterval(strategy) => strategy.next_backoff(),
+            Self::CustomIntervalStrategy(strategy) => {
                 strategy.next_backoff()
             }
         }
@@ -82,7 +82,7 @@ impl RetryStrategy for Strategy {
 
 impl Default for Strategy {
     fn default() -> Self {
-        Strategy::NoInterval(NoIntervalStrategy::default())
+        Self::NoInterval(NoIntervalStrategy::default())
     }
 }
 
@@ -112,8 +112,8 @@ impl NoIntervalStrategy {
     ///
     /// Returns a new NoIntervalStrategy instance.
     ///
-    pub fn new(max_retries: usize) -> Self {
-        NoIntervalStrategy { max_retries }
+    pub const fn new(max_retries: usize) -> Self {
+        Self { max_retries }
     }
 }
 
@@ -128,6 +128,7 @@ impl RetryStrategy for NoIntervalStrategy {
 }
 
 /// A retry strategy that waits a fixed duration between retry attempts.
+///
 /// This strategy adds a consistent delay between each restart attempt,
 /// which can help avoid overwhelming resources or rapid failure loops.
 ///
@@ -157,8 +158,8 @@ impl FixedIntervalStrategy {
     ///
     /// Returns a new FixedIntervalStrategy instance.
     ///
-    pub fn new(max_retries: usize, duration: Duration) -> Self {
-        FixedIntervalStrategy {
+    pub const fn new(max_retries: usize, duration: Duration) -> Self {
+        Self {
             max_retries,
             duration,
         }
@@ -177,6 +178,7 @@ impl RetryStrategy for FixedIntervalStrategy {
 }
 
 /// A retry strategy with custom-defined delays for each retry attempt.
+///
 /// This strategy allows you to specify a different delay for each retry,
 /// enabling complex backoff patterns like exponential backoff, fibonacci
 /// sequences, or any custom progression.

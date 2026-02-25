@@ -232,7 +232,7 @@ struct SqliteChunkedIterator {
 }
 
 impl SqliteChunkedIterator {
-    fn new(
+    const fn new(
         conn: Arc<Mutex<Connection>>,
         table: String,
         prefix: String,

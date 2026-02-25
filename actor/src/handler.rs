@@ -62,7 +62,7 @@ where
     ///
     /// Returns a new ActorMessage ready to be sent to the actor's mailbox.
     ///
-    pub fn new(
+    pub const fn new(
         message: A::Message,
         sender: ActorPath,
         rsvp: Option<oneshot::Sender<Result<A::Response, Error>>>,

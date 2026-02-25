@@ -7,7 +7,7 @@
 use thiserror::Error;
 
 /// Error type for the store system.
-#[derive(Clone, Debug, Error, PartialEq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum Error {
     /// Failed to create or initialize the store.
     ///
