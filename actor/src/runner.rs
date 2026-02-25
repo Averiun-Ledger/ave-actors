@@ -127,7 +127,7 @@ where
                             self.lifecycle = ActorLifecycle::Started;
                         }
                         Err(err) => {
-                            error!(error = ?err, "Actor failed to start");
+                            error!(error = %err, "Actor failed to start");
                             ctx.set_error(err);
                             self.lifecycle = ActorLifecycle::Failed;
                         }
@@ -138,7 +138,7 @@ where
                     if let Some(sender) = sender.take()
                         && let Err(err) = sender.send(true)
                     {
-                        error!(error = ?err, "Failed to send start signal");
+                        error!(error = %err, "Failed to send start signal");
                     }
                     self.run(&mut ctx).await;
                     if ctx.error().is_some() {
@@ -159,7 +159,7 @@ where
                 ActorLifecycle::Stopped => {
                     // Post stop hook.
                     if let Err(e) = self.actor.post_stop(&mut ctx).await {
-                        error!(error = ?e, "Actor failed post_stop");
+                        error!(error = %e, "Actor failed post_stop");
                     }
                     self.lifecycle = ActorLifecycle::Terminated;
                 }
@@ -180,7 +180,7 @@ where
                     if let Some(sender) = sender.take()
                         && let Err(err) = sender.send(false)
                     {
-                        error!(error = ?err, "Failed to send termination signal");
+                        error!(error = %err, "Failed to send termination signal");
                     }
                     break;
                 }
@@ -203,7 +203,7 @@ where
             select! {
                 stop = self.stop_receiver.recv() => {
                     if let Err(e) = self.actor.pre_stop(ctx).await {
-                        error!(error = ?e, "pre_stop failed");
+                        error!(error = %e, "pre_stop failed");
                         let _ = ctx.emit_fail(e).await;
                     }
 
@@ -224,11 +224,11 @@ where
                     if let Some(error) = error {
                         match error {
                             ChildError::Error { error } => {
-                                debug!(error = ?error, "Child error received");
+                                debug!(error = %error, "Child error received");
                                 self.actor.on_child_error(error, ctx).await
                             },
                             ChildError::Fault { error, sender } => {
-                                warn!(error = ?error, "Child fault received");
+                                warn!(error = %error, "Child fault received");
                                 let action = self.actor.on_child_fault(error, ctx).await;
                                 if sender.send(action).is_err() {
                                     error!("Failed to send action to child");
@@ -278,7 +278,7 @@ where
                 if let Some(parent_helper) = self.parent_sender.as_mut()
                     && let Err(err) = parent_helper.send(ChildError::Error { error }).await
                 {
-                    error!(error = ?err, "Failed to send error to parent");
+                    error!(error = %err, "Failed to send error to parent");
                 }
             }
             InnerAction::Fail(error) => {
@@ -289,7 +289,7 @@ where
                         error,
                         sender: action_sender,
                     }).await {
-                        error!(error = ?err, "Failed to send fail to parent");
+                        error!(error = %err, "Failed to send fail to parent");
                     } else {
                         // Sets the state from action.
                         if let Ok(action) = action_receiver.await {
@@ -328,7 +328,7 @@ where
                 if *retries < retry_strategy.max_retries() {
                     debug!(retries = *retries, max_retries = retry_strategy.max_retries(), "Applying retry strategy");
                     if let Some(duration) = retry_strategy.next_backoff() {
-                        debug!(backoff = ?duration, "Waiting before retry");
+                        debug!(backoff_ms = duration.as_millis(), "Waiting before retry");
                         tokio::time::sleep(duration).await;
                     }
                     *retries += 1;

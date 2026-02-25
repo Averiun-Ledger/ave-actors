@@ -107,7 +107,7 @@ where
         tracing::warn!(error = ?error, "Actor restarting");
         let result = actor.pre_restart(self, error).await;
         if let Err(ref e) = result {
-            tracing::error!(error = ?e, "Actor restart failed");
+            tracing::error!(error = %e, "Actor restart failed");
         }
         result
     }
@@ -243,7 +243,7 @@ where
     /// Returns an error if the error could not be emitted.
     ///
     pub async fn emit_error(&mut self, error: Error) -> Result<(), Error> {
-        tracing::warn!(error = ?error, "Emitting error");
+        tracing::warn!(error = %error, "Emitting error");
         self.inner_sender
             .send(InnerAction::Error(error)).await
             .map_err(|e| {
@@ -268,7 +268,7 @@ where
     /// Returns an error if the fail could not be emitted.
     ///
     pub async fn emit_fail(&mut self, error: Error) -> Result<(), Error> {
-        tracing::error!(error = ?error, "Actor failing");
+        tracing::error!(error = %error, "Actor failing");
         // Store error to stop message handling.
         self.set_error(error.clone());
         // Send fail to parent actor.
@@ -319,7 +319,7 @@ where
                 Ok(actor_ref)
             }
             Err(e) => {
-                tracing::debug!(child_name = %name, error = ?e, "Failed to create child actor");
+                tracing::debug!(child_name = %name, error = %e, "Failed to create child actor");
                 Err(e)
             }
         }
@@ -605,7 +605,7 @@ pub trait Handler<A: Actor + Handler<A>>: Send + Sync {
         error: Error,
         _ctx: &mut ActorContext<A>,
     ) {
-        tracing::error!(error = ?error, "Child actor error");
+        tracing::error!(error = %error, "Child actor error");
         // Default implementation from child actor errors.
         //self.on_child_fault(error, ctx).await;
     }
@@ -631,7 +631,7 @@ pub trait Handler<A: Actor + Handler<A>>: Send + Sync {
         error: Error,
         _ctx: &mut ActorContext<A>,
     ) -> ChildAction {
-        tracing::error!(error = ?error, "Child actor fault, stopping child");
+        tracing::error!(error = %error, "Child actor fault, stopping child");
         // Default implementation from child actor errors.
         ChildAction::Stop
     }

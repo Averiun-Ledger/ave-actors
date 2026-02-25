@@ -58,7 +58,7 @@ impl SqliteManager {
         if !Path::new(&path).exists() {
             debug!("Path does not exist, creating it");
             fs::create_dir_all(path).map_err(|e| {
-                error!(path = ?path, error = %e, "Failed to create SQLite directory");
+                error!(path = %path.display(), error = %e, "Failed to create SQLite directory");
                 Error::CreateStore {
                     reason: format!(
                     "fail SQLite create directory: {}",
@@ -72,7 +72,7 @@ impl SqliteManager {
 
         debug!("Opening SQLite connection");
         let conn = open(&path, durability, spec).map_err(|e| {
-            error!(path = ?path, error = %e, "Failed to open SQLite connection");
+            error!(path = %path.display(), error = %e, "Failed to open SQLite connection");
             Error::CreateStore { reason: format!("fail SQLite open connection: {}", e) }
         })?;
 
@@ -482,11 +482,11 @@ impl Collection for SqliteCollection {
 /// Open a SQLite database connection.
 pub fn open<P: AsRef<Path>>(path: P, durability: bool, spec: Option<MachineSpec>) -> Result<Connection, Error> {
     let path = path.as_ref();
-    debug!(path = ?path, "Opening SQLite database");
+    debug!(path = %path.display(), "Opening SQLite database");
     let flags =
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE;
     let conn = Connection::open_with_flags(path, flags).map_err(|e| {
-        error!(path = ?path, error = %e, "Failed to open SQLite database");
+        error!(path = %path.display(), error = %e, "Failed to open SQLite database");
         Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
     })?;
 
@@ -529,25 +529,32 @@ pub fn open<P: AsRef<Path>>(path: P, durability: bool, spec: Option<MachineSpec>
 }
 
 
-/// Compute SQLite tuning parameters directly from available RAM.
+/// Compute SQLite tuning parameters from available RAM.
 ///
 /// SQLite is single-writer so CPU cores don't affect tuning here.
-/// Cache target: 2 % of RAM, floor 8 MB, cap 1 GB.
+/// Designed for a shared Docker container with 3 co-located SQLite instances
+/// plus a libp2p process — total DB cache footprint stays at ~6 % of host RAM.
 fn tuning_for_ram(ram_mb: u64) -> SqliteTuning {
-    // Page cache: 2 % of RAM, floor 8 MB, cap 1 GB
-    let cache_mb = (ram_mb * 2 / 100).max(8).min(1024);
+    // Cache: 2 % of RAM, floor 8 MB, cap 1 GB.
+    let cache_mb = (ram_mb * 2 / 100).clamp(8, 1024);
     let cache_size_kb = -(cache_mb as i64 * 1024); // negative = KB in SQLite
 
-    // mmap: same size as cache (virtual memory; OS decides what stays in RAM)
-    let mmap_size_bytes = cache_mb as i64 * 1024 * 1024;
+    // mmap: half of cache, hard cap 128 MB.
+    // Supplements the page cache for sequential reads; kept below cache to
+    // avoid doubling memory pressure in a shared container.
+    let mmap_size_bytes = (cache_mb as i64 / 2).min(128) * 1024 * 1024;
 
-    // WAL checkpoint: every ram_mb/2 pages (4 KB each), floor 128, cap 8 000
-    let wal_autocheckpoint_pages = (ram_mb as i64 / 2).max(128).min(8_000);
+    // WAL checkpoint: fire when WAL ≈ cache/2.
+    // pages = (cache_mb/2 MB) / (4 KB/page) = cache_mb * 128.
+    // Floor 1000 (SQLite default, prevents thrashing on tiny RAM).
+    // Cap 8000 (32 MB WAL max, bounds checkpoint stall under write bursts).
+    let wal_autocheckpoint_pages = (cache_mb as i64 * 128).clamp(1_000, 8_000);
 
-    // journal_size_limit: 2× cache on disk, floor 32 MB, cap 1 GB
-    let journal_size_limit_bytes = (cache_mb as i64 * 2 * 1024 * 1024)
-        .max(32 * 1024 * 1024)
-        .min(1024 * 1024 * 1024);
+    // journal_size_limit: 3× the WAL ceiling — a safety net never reached in
+    // normal operation (checkpoints fire first); prevents runaway WAL growth
+    // if a checkpoint is delayed. Cap 256 MB to bound disk use in Docker.
+    let journal_size_limit_bytes = (wal_autocheckpoint_pages * 4096 * 3)
+        .clamp(32 * 1024 * 1024, 256 * 1024 * 1024);
 
     SqliteTuning {
         wal_autocheckpoint_pages,

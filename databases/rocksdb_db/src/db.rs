@@ -68,7 +68,7 @@ impl RocksDbManager {
         if !Path::new(&path).exists() {
             debug!("Path does not exist, creating it");
             fs::create_dir_all(path).map_err(|e| {
-                error!(path = ?path, error = %e, "Failed to create RocksDB directory");
+                error!(path = %path.display(), error = %e, "Failed to create RocksDB directory");
                 Error::CreateStore {
                     reason: format!(
                     "fail RockDB create directory: {}",
@@ -107,10 +107,10 @@ impl RocksDbManager {
             .collect();
 
         // Abrir la base de datos con las column families existentes
-        debug!(path = ?path, "Opening RocksDB database");
+        debug!(path = %path.display(), "Opening RocksDB database");
         let db = DB::open_cf_descriptors(&options, path, cf_descriptors)
             .map_err(|e| {
-                error!(path = ?path, error = ?e, "Failed to open RocksDB");
+                error!(path = %path.display(), error = %e, "Failed to open RocksDB");
                 Error::CreateStore { reason: format!("Can not open RockDB: {}", e) }
             })?;
 
@@ -211,7 +211,7 @@ impl RocksDbManager {
         if self.db.cf_handle(name).is_none() {
             debug!(cf = name, "Creating column family");
             self.db.create_cf(name, &self.opts).map_err(|e| {
-                error!(cf = name, error = ?e, "Failed to create column family");
+                error!(cf = name, error = %e, "Failed to create column family");
                 Error::CreateStore { reason: format!("{:?}", e) }
             })?;
         }
@@ -256,7 +256,7 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         // Sync WAL first: ensures all committed writes survive even if the
         // memtable flush below is interrupted.
         self.db.flush_wal(true).map_err(|e| {
-            error!(error = ?e, "Failed to flush WAL on stop");
+            error!(error = %e, "Failed to flush WAL on stop");
             Error::Store {
                 operation: "flush_wal".to_owned(),
                 reason: format!("{:?}", e),
@@ -275,7 +275,7 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         for name in &cf_names {
             if let Some(handle) = self.db.cf_handle(name) {
                 if let Err(e) = self.db.flush_cf(&handle) {
-                    warn!(cf = name, error = ?e, "Failed to flush column family on stop");
+                    warn!(cf = name, error = %e, "Failed to flush column family on stop");
                 }
             }
         }
@@ -320,7 +320,7 @@ impl State for RocksDbStore {
                 .store
                 .get_cf(&handle, self.prefix.clone())
                 .map_err(|e| {
-                    error!(cf = %self.name, error = ?e, "Failed to get state");
+                    error!(cf = %self.name, error = %e, "Failed to get state");
                     Error::Get { key: self.prefix.clone(), reason: format!("{:?}", e) }
                 })?;
             match result {
@@ -345,7 +345,7 @@ impl State for RocksDbStore {
                 .store
                 .put_cf_opt(&handle, self.prefix.clone(), data, &wopts)
                 .map_err(|e| {
-                    error!(cf = %self.name, error = ?e, "Failed to put state");
+                    error!(cf = %self.name, error = %e, "Failed to put state");
                     Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
                 })?)
         } else {
@@ -364,7 +364,7 @@ impl State for RocksDbStore {
                 .store
                 .delete_cf_opt(&handle, self.prefix.clone(), &wopts)
                 .map_err(|e| {
-                    warn!(cf = %self.name, error = ?e, "Failed to delete state");
+                    warn!(cf = %self.name, error = %e, "Failed to delete state");
                     Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
                 })?)
         } else {
@@ -384,7 +384,7 @@ impl State for RocksDbStore {
             self.store
                 .delete_cf_opt(&handle, self.prefix.clone(), &wopts)
                 .map_err(|e| {
-                    error!(cf = %self.name, error = ?e, "Failed to purge state");
+                    error!(cf = %self.name, error = %e, "Failed to purge state");
                     Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
                 })
         } else {
@@ -416,7 +416,7 @@ impl Collection for RocksDbStore {
                 .store
                 .get_cf(&handle, &full_key)
                 .map_err(|e| {
-                    error!(cf = %self.name, key = %full_key, error = ?e, "Failed to get collection entry");
+                    error!(cf = %self.name, key = %full_key, error = %e, "Failed to get collection entry");
                     Error::Get { key: full_key.clone(), reason: format!("{:?}", e) }
                 })?;
             match result {
@@ -442,7 +442,7 @@ impl Collection for RocksDbStore {
                 .store
                 .put_cf_opt(&handle, key, data, &wopts)
                 .map_err(|e| {
-                    error!(cf = %self.name, error = ?e, "Failed to put collection entry");
+                    error!(cf = %self.name, error = %e, "Failed to put collection entry");
                     Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
                 })?)
         } else {
@@ -462,7 +462,7 @@ impl Collection for RocksDbStore {
                 .store
                 .delete_cf_opt(&handle, key, &wopts)
                 .map_err(|e| {
-                    warn!(cf = %self.name, error = ?e, "Failed to delete collection entry");
+                    warn!(cf = %self.name, error = %e, "Failed to delete collection entry");
                     Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
                 })?)
         } else {
@@ -487,7 +487,7 @@ impl Collection for RocksDbStore {
             self.store
                 .delete_range_cf_opt(&handle, start, end, &wopts)
                 .map_err(|e| {
-                    error!(cf = %self.name, error = ?e, "Failed to purge collection");
+                    error!(cf = %self.name, error = %e, "Failed to purge collection");
                     Error::Store { operation: "rocksdb_operation".to_owned(), reason: format!("{:?}", e) }
                 })
         } else {

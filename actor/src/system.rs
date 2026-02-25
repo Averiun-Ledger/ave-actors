@@ -137,7 +137,7 @@ impl SystemRef {
             }
 
             if let Err(e) = event_sender.send(SystemEvent::StopSystem).await {
-                error!(error = ?e, "Failed to send StopSystem event");
+                error!(error = %e, "Failed to send StopSystem event");
             }
         });
 
@@ -226,7 +226,7 @@ impl SystemRef {
                 })
             }
             Err(e) => {
-                error!(path = %path, error = ?e, "Failed to receive initialization signal");
+                error!(path = %path, error = %e, "Failed to receive initialization signal");
                 Err(Error::FunctionalCritical {
                     description: e.to_string(),
                 })
