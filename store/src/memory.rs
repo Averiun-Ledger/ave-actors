@@ -31,17 +31,11 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
         let mut data_lock = self.data.write().map_err(|e| {
             Error::Store { operation: "lock_manager_data".to_owned(), reason: format!("{}", e) }
         })?;
-        let data = if let Some(data) = data_lock
-            .get(&(name.to_owned(), prefix.to_owned()))
-            .cloned()
-        {
-            data
-        } else {
-            let default = Arc::new(RwLock::new(BTreeMap::new()));
-            data_lock
-                .insert((name.to_owned(), prefix.to_owned()), default.clone());
-            default
-        };
+        let data = data_lock
+            .entry((name.to_owned(), prefix.to_owned()))
+            .or_insert_with(|| Arc::new(RwLock::new(BTreeMap::new())))
+            .clone();
+        drop(data_lock);
 
         Ok(MemoryStore {
             name: name.to_owned(),
@@ -62,17 +56,11 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
         let mut data_lock = self.data.write().map_err(|e| {
             Error::Store { operation: "lock_manager_data".to_owned(), reason: format!("{}", e) }
         })?;
-        let data = if let Some(data) = data_lock
-            .get(&(name.to_owned(), prefix.to_owned()))
-            .cloned()
-        {
-            data
-        } else {
-            let default = Arc::new(RwLock::new(BTreeMap::new()));
-            data_lock
-                .insert((name.to_owned(), prefix.to_owned()), default.clone());
-            default
-        };
+        let data = data_lock
+            .entry((name.to_owned(), prefix.to_owned()))
+            .or_insert_with(|| Arc::new(RwLock::new(BTreeMap::new())))
+            .clone();
+        drop(data_lock);
 
         Ok(MemoryStore {
             name: name.to_owned(),
@@ -102,20 +90,17 @@ impl State for MemoryStore {
             .read()
             .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?;
 
-        match lock.get(&self.prefix) {
-            Some(value) => Ok(value.clone()),
-            None => {
-                Err(Error::EntryNotFound { key: "Query returned no rows".to_owned() })
-            }
-        }
+        lock.get(&self.prefix).map_or_else(
+            || Err(Error::EntryNotFound { key: "Query returned no rows".to_owned() }),
+            |value| Ok(value.clone()),
+        )
     }
 
     fn put(&mut self, data: &[u8]) -> Result<(), Error> {
-        let mut lock = self
-            .data
+        self.data
             .write()
-            .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?;
-        lock.insert(self.prefix.clone(), data.to_vec());
+            .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?
+            .insert(self.prefix.clone(), data.to_vec());
 
         Ok(())
     }
@@ -147,6 +132,7 @@ impl State for MemoryStore {
         for key in keys_to_remove {
             lock.remove(&key);
         }
+        drop(lock);
         Ok(())
     }
 }
@@ -168,21 +154,18 @@ impl Collection for MemoryStore {
             .read()
             .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?;
 
-        match lock.get(&key) {
-            Some(value) => Ok(value.clone()),
-            None => {
-                Err(Error::EntryNotFound { key: "Query returned no rows".to_owned() })
-            }
-        }
+        lock.get(&key).map_or_else(
+            || Err(Error::EntryNotFound { key: "Query returned no rows".to_owned() }),
+            |value| Ok(value.clone()),
+        )
     }
 
     fn put(&mut self, key: &str, data: &[u8]) -> Result<(), Error> {
         let key = format!("{}.{}", self.prefix, key);
-        let mut lock = self
-            .data
+        self.data
             .write()
-            .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?;
-        lock.insert(key, data.to_vec());
+            .map_err(|e| Error::Store { operation: "lock_data".to_owned(), reason: format!("{}", e) })?
+            .insert(key, data.to_vec());
 
         Ok(())
     }
@@ -215,6 +198,7 @@ impl Collection for MemoryStore {
         for key in keys_to_remove {
             lock.remove(&key);
         }
+        drop(lock);
         Ok(())
     }
 

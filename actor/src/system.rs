@@ -169,7 +169,7 @@ impl SystemRef {
         let actors = self.actors.read().await;
         actors
             .get(path)
-            .and_then(|any| any.downcast_ref::<ActorRef<A>>().cloned()).ok_or(Error::NotFound { path: path.clone() })
+            .and_then(|any| any.downcast_ref::<ActorRef<A>>().cloned()).ok_or_else(|| Error::NotFound { path: path.clone() })
     }
 
     /// Creates an actor in this actor system with the given path and actor type.
@@ -270,8 +270,7 @@ impl SystemRef {
         let (actor_ref, stop_sender, ..) = self
             .create_actor_path::<A>(path, actor, None, A::get_span(id, None))
             .await?;
-        let mut senders = self.root_senders.write().await;
-        senders.push(stop_sender);
+        self.root_senders.write().await.push(stop_sender);
         Ok(actor_ref)
     }
 
@@ -315,14 +314,13 @@ impl SystemRef {
     /// Returns a vector of ActorPath for all direct children.
     ///
     pub async fn children(&self, path: &ActorPath) -> Vec<ActorPath> {
-        let actors = self.actors.read().await;
-        let mut children = vec![];
-        for actor in actors.keys() {
-            if actor.is_child_of(path) {
-                children.push(actor.clone());
-            }
-        }
-        children
+        self.actors
+            .read()
+            .await
+            .keys()
+            .filter(|actor| actor.is_child_of(path))
+            .cloned()
+            .collect()
     }
 
     /// Adds a helper object to the actor system.

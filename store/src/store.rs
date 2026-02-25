@@ -357,10 +357,7 @@ where
         manager: impl DbManager<C, S>,
         key_box: Option<EncryptedKey>,
     ) -> Result<(), ActorError> {
-        let prefix = match prefix {
-            Some(prefix) => prefix,
-            None => ctx.path().key(),
-        };
+        let prefix = prefix.unwrap_or_else(|| ctx.path().key());
 
         let store =
             Store::<Self>::new(name, &prefix, manager, key_box, self.clone())
@@ -718,7 +715,7 @@ where
     }
 
     /// Retrieve events.
-    fn events(&mut self, from: u64, to: u64) -> Result<Vec<P::Event>, Error> {
+    fn events(&self, from: u64, to: u64) -> Result<Vec<P::Event>, Error> {
         let mut events = Vec::new();
 
         for i in from..=to {
@@ -844,13 +841,13 @@ where
                     debug!("State is up to date, no events to apply");
                 }
 
-                Ok(Some(state))
             } else {
                 debug!(
                     "No events found in database, using recovered state as-is"
                 );
-                Ok(Some(state))
             }
+
+            Ok(Some(state))
         } else {
             debug!("No previous state found");
 

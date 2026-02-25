@@ -150,6 +150,7 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
                 error!(error = %e, "Failed to checkpoint WAL on stop");
                 Error::Store { operation: "wal_checkpoint".to_owned(), reason: format!("{}", e) }
             })?;
+        drop(conn);
         debug!("SQLite WAL checkpoint complete");
         Ok(())
     }
@@ -323,29 +324,26 @@ impl Iterator for SqliteChunkedIterator {
 
 impl State for SqliteCollection {
     fn get(&self) -> Result<Vec<u8>, Error> {
-        let conn = self.conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for state get");
-            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
-        })?;
         let query =
             format!("SELECT value FROM {} WHERE prefix = ?1", &self.table);
-        let row: Vec<u8> = conn
-            .query_row(&query, params![self.prefix], |row| row.get(0))
+        let row: Vec<u8> = self.conn.lock().map_err(|e| {
+            error!(error = %e, "Failed to acquire connection lock for state get");
+            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+        })?.query_row(&query, params![self.prefix], |row| row.get(0))
             .map_err(|e| Error::EntryNotFound { key: e.to_string() })?;
 
         Ok(row)
     }
 
     fn put(&mut self, data: &[u8]) -> Result<(), Error> {
-        let conn = self.conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for state put");
-            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
-        })?;
         let stmt = format!(
             "INSERT OR REPLACE INTO {} (prefix, value) VALUES (?1, ?2)",
             &self.table
         );
-        conn.execute(&stmt, params![self.prefix, data])
+        self.conn.lock().map_err(|e| {
+            error!(error = %e, "Failed to acquire connection lock for state put");
+            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+        })?.execute(&stmt, params![self.prefix, data])
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to put state");
                 Error::Store { operation: "insert".to_owned(), reason: format!("{}", e) }
@@ -354,12 +352,11 @@ impl State for SqliteCollection {
     }
 
     fn del(&mut self) -> Result<(), Error> {
-        let conn = self.conn.lock().map_err(|e| {
+        let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
+        self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock for state delete");
             Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
-        })?;
-        let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
-        conn.execute(&stmt, params![self.prefix,])
+        })?.execute(&stmt, params![self.prefix,])
             .map_err(|e| {
                 warn!(table = %self.table, error = %e, "Failed to delete state");
                 Error::EntryNotFound { key: e.to_string() }
@@ -368,12 +365,11 @@ impl State for SqliteCollection {
     }
 
     fn purge(&mut self) -> Result<(), Error> {
-        let conn = self.conn.lock().map_err(|e| {
+        let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
+        self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock for state purge");
             Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
-        })?;
-        let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
-        conn.execute(&stmt, params![self.prefix])
+        })?.execute(&stmt, params![self.prefix])
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to purge state");
                 Error::Store { operation: "purge".to_owned(), reason: format!("{}", e) }
@@ -389,31 +385,28 @@ impl State for SqliteCollection {
 
 impl Collection for SqliteCollection {
     fn get(&self, key: &str) -> Result<Vec<u8>, Error> {
-        let conn = self.conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for collection get");
-            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
-        })?;
         let query = format!(
             "SELECT value FROM {} WHERE prefix = ?1 AND sn = ?2",
             &self.table
         );
-        let row: Vec<u8> = conn
-            .query_row(&query, params![self.prefix, key], |row| row.get(0))
+        let row: Vec<u8> = self.conn.lock().map_err(|e| {
+            error!(error = %e, "Failed to acquire connection lock for collection get");
+            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+        })?.query_row(&query, params![self.prefix, key], |row| row.get(0))
             .map_err(|e| Error::EntryNotFound { key: e.to_string() })?;
 
         Ok(row)
     }
 
     fn put(&mut self, key: &str, data: &[u8]) -> Result<(), Error> {
-        let conn = self.conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for collection put");
-            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
-        })?;
         let stmt = format!(
             "INSERT OR REPLACE INTO {} (prefix, sn, value) VALUES (?1, ?2, ?3)",
             &self.table
         );
-        conn.execute(&stmt, params![self.prefix, key, data])
+        self.conn.lock().map_err(|e| {
+            error!(error = %e, "Failed to acquire connection lock for collection put");
+            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+        })?.execute(&stmt, params![self.prefix, key, data])
             .map_err(|e| {
                 error!(table = %self.table, key = key, error = %e, "Failed to put collection entry");
                 Error::Store { operation: "insert".to_owned(), reason: format!("{}", e) }
@@ -422,15 +415,14 @@ impl Collection for SqliteCollection {
     }
 
     fn del(&mut self, key: &str) -> Result<(), Error> {
-        let conn = self.conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for collection delete");
-            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
-        })?;
         let stmt = format!(
             "DELETE FROM {} WHERE prefix = ?1 AND sn = ?2",
             &self.table
         );
-        conn.execute(&stmt, params![self.prefix, key])
+        self.conn.lock().map_err(|e| {
+            error!(error = %e, "Failed to acquire connection lock for collection delete");
+            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+        })?.execute(&stmt, params![self.prefix, key])
             .map_err(|e| {
                 warn!(table = %self.table, key = key, error = %e, "Failed to delete collection entry");
                 Error::EntryNotFound { key: e.to_string() }
@@ -439,12 +431,11 @@ impl Collection for SqliteCollection {
     }
 
     fn purge(&mut self) -> Result<(), Error> {
-        let conn = self.conn.lock().map_err(|e| {
+        let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
+        self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock for collection purge");
             Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
-        })?;
-        let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
-        conn.execute(&stmt, params![self.prefix])
+        })?.execute(&stmt, params![self.prefix])
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to purge collection");
                 Error::Store { operation: "purge".to_owned(), reason: format!("{}", e) }
