@@ -1,19 +1,24 @@
 //! Test if the problem is related to actor path/prefix mismatch
 
-use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber};
-use ave_actors_store::store::{PersistentActor, FullPersistence};
-use ave_actors_store::memory::MemoryManager;
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
-use tracing::info_span;
+use ave_actors_actor::{
+    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
+    Handler, Message, Response, build_tracing_subscriber,
+};
+use ave_actors_store::memory::MemoryManager;
+use ave_actors_store::store::{FullPersistence, PersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 
 static SHARED: OnceLock<Arc<TokioMutex<MemoryManager>>> = OnceLock::new();
 
-#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 struct PathActor {
     value: i32,
 }
@@ -26,7 +31,9 @@ impl Message for PathMsg {}
 struct PathResp(i32);
 impl Response for PathResp {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 struct PathEvent(i32);
 impl Event for PathEvent {}
 
@@ -35,11 +42,17 @@ impl Actor for PathActor {
     type Message = PathMsg;
     type Response = PathResp;
     type Event = PathEvent;
-    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
-            info_span!("PathActor", id = %id)
-        }
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("PathActor", id = %id)
+    }
 
-    async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         let path_key = ctx.path().key();
         println!("  [PRE_START] Actor path key: '{}'", path_key);
 
@@ -49,12 +62,18 @@ impl Actor for PathActor {
         let manager = manager_ref.lock().await.clone();
 
         // Using default prefix (ctx.path().key())
-        println!("  [PRE_START] Calling start_store with name='path_test', prefix=None");
+        println!(
+            "  [PRE_START] Calling start_store with name='path_test', prefix=None"
+        );
         println!("  [PRE_START] This will use prefix='{}'", path_key);
-        self.start_store("path_test", None, ctx, manager, None).await
+        self.start_store("path_test", None, ctx, manager, None)
+            .await
     }
 
-    async fn pre_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+    async fn pre_stop(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         println!("  [PRE_STOP] Stopping, value={}", self.value);
         self.stop_store(ctx).await
     }
@@ -84,7 +103,12 @@ impl PersistentActor for PathActor {
     }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        println!("  [APPLY] {} + {} = {}", self.value, event.0, self.value + event.0);
+        println!(
+            "  [APPLY] {} + {} = {}",
+            self.value,
+            event.0,
+            self.value + event.0
+        );
         self.value += event.0;
         Ok(())
     }
@@ -127,7 +151,10 @@ async fn test_path_mismatch_scenario() {
         println!("   ❌ Started fresh (no recovery)");
     }
 
-    assert_eq!(resp.0, 42, "Should recover value when using same actor name");
+    assert_eq!(
+        resp.0, 42,
+        "Should recover value when using same actor name"
+    );
 }
 
 #[tokio::test]
@@ -140,7 +167,9 @@ async fn test_explicit_prefix_usage() {
     println!("║  Scenario: Using explicit prefix instead of path         ║");
     println!("╚═══════════════════════════════════════════════════════════╝\n");
 
-    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+    #[derive(
+        Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+    )]
     struct PrefixActor {
         value: i32,
     }
@@ -151,11 +180,17 @@ async fn test_explicit_prefix_usage() {
         type Response = PathResp;
         type Event = PathEvent;
 
-           fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
             info_span!("PrefixActor", id = %id)
         }
 
-        async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+        async fn pre_start(
+            &mut self,
+            ctx: &mut ActorContext<Self>,
+        ) -> Result<(), ActorError> {
             let manager_ref = SHARED.get_or_init(|| {
                 Arc::new(TokioMutex::new(MemoryManager::default()))
             });
@@ -163,10 +198,20 @@ async fn test_explicit_prefix_usage() {
 
             // EXPLICIT PREFIX
             println!("  [PRE_START] Using EXPLICIT prefix='my_fixed_prefix'");
-            self.start_store("prefix_test", Some("my_fixed_prefix".to_string()), ctx, manager, None).await
+            self.start_store(
+                "prefix_test",
+                Some("my_fixed_prefix".to_string()),
+                ctx,
+                manager,
+                None,
+            )
+            .await
         }
 
-        async fn pre_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+        async fn pre_stop(
+            &mut self,
+            ctx: &mut ActorContext<Self>,
+        ) -> Result<(), ActorError> {
             self.stop_store(ctx).await
         }
     }

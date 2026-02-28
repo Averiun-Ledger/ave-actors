@@ -1,14 +1,15 @@
-
-
 //! Tests for ActorPath edge cases and concurrent scenarios
 
-use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler, Message, Response, build_tracing_subscriber};
 use async_trait::async_trait;
+use ave_actors_actor::{
+    Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler,
+    Message, Response, build_tracing_subscriber,
+};
 use serde::{Deserialize, Serialize};
-use tracing::info_span;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 
 // Test ActorPath edge cases
 #[test]
@@ -37,7 +38,10 @@ fn test_actor_path_edge_cases() {
     // Test path normalization
     let path_with_trailing = ActorPath::from("/user/test/");
     let path_without_trailing = ActorPath::from("/user/test");
-    assert_eq!(path_with_trailing.to_string(), path_without_trailing.to_string());
+    assert_eq!(
+        path_with_trailing.to_string(),
+        path_without_trailing.to_string()
+    );
 }
 
 #[test]
@@ -147,7 +151,10 @@ impl Actor for ConcurrentActor {
     type Response = ConcurrentResponse;
     type Event = ConcurrentEvent;
 
-    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
         info_span!("ConcurrentActor", id = %id)
     }
 }
@@ -170,7 +177,8 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
                 ctx.publish_event(ConcurrentEvent {
                     action: "increment".to_string(),
                     value,
-                }).await?;
+                })
+                .await?;
 
                 Ok(ConcurrentResponse::Counter(value))
             }
@@ -183,7 +191,8 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
                 ctx.publish_event(ConcurrentEvent {
                     action: "decrement".to_string(),
                     value,
-                }).await?;
+                })
+                .await?;
 
                 Ok(ConcurrentResponse::Counter(value))
             }
@@ -206,11 +215,23 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
                 Ok(ConcurrentResponse::Success)
             }
             ConcurrentMessage::SendToChild(child_name, message) => {
-                if let Ok(child) = ctx.get_child::<ConcurrentActor>(&child_name).await {
-                    let _response = child.ask(ConcurrentMessage::AddMessage(message.clone())).await?;
-                    Ok(ConcurrentResponse::ChildResponse(format!("Sent '{}' to child", message)))
+                if let Ok(child) =
+                    ctx.get_child::<ConcurrentActor>(&child_name).await
+                {
+                    let _response = child
+                        .ask(ConcurrentMessage::AddMessage(message.clone()))
+                        .await?;
+                    Ok(ConcurrentResponse::ChildResponse(format!(
+                        "Sent '{}' to child",
+                        message
+                    )))
                 } else {
-                    Err(Error::Functional { description: format!("Child '{}' not found", child_name) })
+                    Err(Error::Functional {
+                        description: format!(
+                            "Child '{}' not found",
+                            child_name
+                        ),
+                    })
                 }
             }
         }
@@ -225,7 +246,8 @@ async fn test_concurrent_message_handling() {
     tokio::spawn(async move { runner.run().await });
 
     let actor = ConcurrentActor::new();
-    let actor_ref = system.create_root_actor("concurrent", actor).await.unwrap();
+    let actor_ref =
+        system.create_root_actor("concurrent", actor).await.unwrap();
 
     // Send multiple concurrent messages
     let mut handles = Vec::new();
@@ -234,9 +256,15 @@ async fn test_concurrent_message_handling() {
         let actor_ref_clone = actor_ref.clone();
         let handle = tokio::spawn(async move {
             if i % 2 == 0 {
-                actor_ref_clone.tell(ConcurrentMessage::Increment).await.unwrap();
+                actor_ref_clone
+                    .tell(ConcurrentMessage::Increment)
+                    .await
+                    .unwrap();
             } else {
-                actor_ref_clone.tell(ConcurrentMessage::Decrement).await.unwrap();
+                actor_ref_clone
+                    .tell(ConcurrentMessage::Decrement)
+                    .await
+                    .unwrap();
             }
         });
         handles.push(handle);
@@ -271,15 +299,33 @@ async fn test_multiple_actor_communication() {
     let parent_ref = system.create_root_actor("parent", parent).await.unwrap();
 
     // Create children through parent
-    parent_ref.ask(ConcurrentMessage::CreateChild("child1".to_string())).await.unwrap();
-    parent_ref.ask(ConcurrentMessage::CreateChild("child2".to_string())).await.unwrap();
+    parent_ref
+        .ask(ConcurrentMessage::CreateChild("child1".to_string()))
+        .await
+        .unwrap();
+    parent_ref
+        .ask(ConcurrentMessage::CreateChild("child2".to_string()))
+        .await
+        .unwrap();
 
     // Wait for children to be created
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Send messages to children through parent
-    parent_ref.ask(ConcurrentMessage::SendToChild("child1".to_string(), "Hello child1".to_string())).await.unwrap();
-    parent_ref.ask(ConcurrentMessage::SendToChild("child2".to_string(), "Hello child2".to_string())).await.unwrap();
+    parent_ref
+        .ask(ConcurrentMessage::SendToChild(
+            "child1".to_string(),
+            "Hello child1".to_string(),
+        ))
+        .await
+        .unwrap();
+    parent_ref
+        .ask(ConcurrentMessage::SendToChild(
+            "child2".to_string(),
+            "Hello child2".to_string(),
+        ))
+        .await
+        .unwrap();
 
     // Verify children exist in system
     let child1_path = ActorPath::from("/user/parent/child1");
@@ -293,14 +339,16 @@ async fn test_multiple_actor_communication() {
 
     // Verify children received messages
     if let Ok(child1) = child1_ref {
-        let response = child1.ask(ConcurrentMessage::GetMessages).await.unwrap();
+        let response =
+            child1.ask(ConcurrentMessage::GetMessages).await.unwrap();
         if let ConcurrentResponse::Messages(messages) = response {
             assert!(messages.contains(&"Hello child1".to_string()));
         }
     }
 
     if let Ok(child2) = child2_ref {
-        let response = child2.ask(ConcurrentMessage::GetMessages).await.unwrap();
+        let response =
+            child2.ask(ConcurrentMessage::GetMessages).await.unwrap();
         if let ConcurrentResponse::Messages(messages) = response {
             assert!(messages.contains(&"Hello child2".to_string()));
         }
@@ -315,7 +363,10 @@ async fn test_multiple_event_subscribers() {
     tokio::spawn(async move { runner.run().await });
 
     let actor = ConcurrentActor::new();
-    let actor_ref = system.create_root_actor("event_source", actor).await.unwrap();
+    let actor_ref = system
+        .create_root_actor("event_source", actor)
+        .await
+        .unwrap();
 
     // Create multiple subscribers
     let mut subscribers = Vec::new();
@@ -351,7 +402,8 @@ async fn test_rapid_actor_lifecycle() {
     for i in 0..10 {
         let actor = ConcurrentActor::new();
         let actor_name = format!("temp_actor_{}", i);
-        let actor_ref = system.create_root_actor(&actor_name, actor).await.unwrap();
+        let actor_ref =
+            system.create_root_actor(&actor_name, actor).await.unwrap();
 
         // Send a message to ensure it's fully initialized
         actor_ref.ask(ConcurrentMessage::GetCounter).await.unwrap();
@@ -365,7 +417,10 @@ async fn test_rapid_actor_lifecycle() {
 
     // System should still be functional
     let final_actor = ConcurrentActor::new();
-    let final_ref = system.create_root_actor("final", final_actor).await.unwrap();
+    let final_ref = system
+        .create_root_actor("final", final_actor)
+        .await
+        .unwrap();
     let response = final_ref.ask(ConcurrentMessage::GetCounter).await.unwrap();
 
     if let ConcurrentResponse::Counter(count) = response {
@@ -381,10 +436,18 @@ async fn test_concurrent_error_handling() {
     tokio::spawn(async move { runner.run().await });
 
     let parent = ConcurrentActor::new();
-    let parent_ref = system.create_root_actor("error_parent", parent).await.unwrap();
+    let parent_ref = system
+        .create_root_actor("error_parent", parent)
+        .await
+        .unwrap();
 
     // Try to send message to non-existent child
-    let result = parent_ref.ask(ConcurrentMessage::SendToChild("nonexistent".to_string(), "test".to_string())).await;
+    let result = parent_ref
+        .ask(ConcurrentMessage::SendToChild(
+            "nonexistent".to_string(),
+            "test".to_string(),
+        ))
+        .await;
 
     assert!(result.is_err());
 
@@ -406,7 +469,10 @@ async fn test_system_shutdown_with_active_actors() {
     let mut actor_refs = Vec::new();
     for i in 0..5 {
         let actor = ConcurrentActor::new();
-        let actor_ref = system.create_root_actor(&format!("actor_{}", i), actor).await.unwrap();
+        let actor_ref = system
+            .create_root_actor(&format!("actor_{}", i), actor)
+            .await
+            .unwrap();
         actor_refs.push(actor_ref);
     }
 

@@ -1,14 +1,15 @@
-
-
 //! Comprehensive edge case tests for Actor module to increase coverage
-use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, ChildAction, CustomIntervalStrategy, Error, Event, FixedIntervalStrategy, Handler, Message, NoIntervalStrategy, Response, RetryActor, RetryMessage, RetryStrategy, Strategy, SupervisionStrategy, build_tracing_subscriber
-};
 use async_trait::async_trait;
+use ave_actors_actor::{
+    Actor, ActorContext, ActorPath, ActorSystem, ChildAction,
+    CustomIntervalStrategy, Error, Event, FixedIntervalStrategy, Handler,
+    Message, NoIntervalStrategy, Response, RetryActor, RetryMessage,
+    RetryStrategy, Strategy, SupervisionStrategy, build_tracing_subscriber,
+};
 use serde::{Deserialize, Serialize};
-use tracing::info_span;
 use std::{collections::VecDeque, time::Duration};
 use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 
 // Test actors for edge cases
 #[derive(Debug, Clone)]
@@ -53,46 +54,70 @@ impl Actor for EdgeCaseActor {
     type Response = EdgeCaseResponse;
     type Event = EdgeCaseEvent;
 
-    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
         info_span!("EdgeCaseActor", id = %id)
     }
 
     fn supervision_strategy() -> SupervisionStrategy {
         SupervisionStrategy::Retry(Strategy::FixedInterval(
-            FixedIntervalStrategy::new(2, Duration::from_millis(50))
+            FixedIntervalStrategy::new(2, Duration::from_millis(50)),
         ))
     }
 
-    async fn pre_start(&mut self, _ctx: &mut ActorContext<Self>) -> Result<(), Error> {
+    async fn pre_start(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
         if self.fail_on_start {
             self.fail_on_start = false; // Only fail once
-            return Err(Error::FunctionalCritical { description: "Intentional start failure".to_owned() });
+            return Err(Error::FunctionalCritical {
+                description: "Intentional start failure".to_owned(),
+            });
         }
         Ok(())
     }
 
-    async fn pre_restart(&mut self, ctx: &mut ActorContext<Self>, _error: Option<&Error>) -> Result<(), Error> {
+    async fn pre_restart(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        _error: Option<&Error>,
+    ) -> Result<(), Error> {
         if self.fail_on_restart {
-            return Err(Error::FunctionalCritical { description: "Intentional restart failure".to_owned() });
+            return Err(Error::FunctionalCritical {
+                description: "Intentional restart failure".to_owned(),
+            });
         }
         self.pre_start(ctx).await
     }
 
-    async fn pre_stop(&mut self, _ctx: &mut ActorContext<Self>) -> Result<(), Error> {
+    async fn pre_stop(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
         if self.fail_on_stop {
-            return Err(Error::FunctionalCritical { description: "Can not stop".to_string() });
+            return Err(Error::FunctionalCritical {
+                description: "Can not stop".to_string(),
+            });
         }
         Ok(())
     }
 
-    async fn post_stop(&mut self, _ctx: &mut ActorContext<Self>) -> Result<(), Error> {
+    async fn post_stop(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
         Ok(())
     }
 
     fn from_response(response: Self::Response) -> Result<Self::Event, Error> {
         match response {
             EdgeCaseResponse::Value(val) => Ok(EdgeCaseEvent(val)),
-            _ => Err(Error::Functional { description: "Cannot convert response to event".to_string() })
+            _ => Err(Error::Functional {
+                description: "Cannot convert response to event".to_string(),
+            }),
         }
     }
 }
@@ -106,16 +131,24 @@ impl Handler<EdgeCaseActor> for EdgeCaseActor {
         ctx: &mut ActorContext<EdgeCaseActor>,
     ) -> Result<EdgeCaseResponse, Error> {
         if self.fail_on_message {
-            return Err(Error::Functional { description: "Intentional message failure".to_owned() });
+            return Err(Error::Functional {
+                description: "Intentional message failure".to_owned(),
+            });
         }
 
         match msg {
             EdgeCaseCommand::TriggerError => {
-                ctx.emit_error(Error::Functional { description: "Test error".to_owned() }).await?;
+                ctx.emit_error(Error::Functional {
+                    description: "Test error".to_owned(),
+                })
+                .await?;
                 Ok(EdgeCaseResponse::Success)
             }
             EdgeCaseCommand::TriggerFault => {
-                ctx.emit_fail(Error::Functional { description: "Test fault".to_owned() }).await?;
+                ctx.emit_fail(Error::Functional {
+                    description: "Test fault".to_owned(),
+                })
+                .await?;
                 Ok(EdgeCaseResponse::Success)
             }
             EdgeCaseCommand::GetValue => Ok(EdgeCaseResponse::Value(42)),
@@ -144,15 +177,27 @@ impl Handler<EdgeCaseActor> for EdgeCaseActor {
         }
     }
 
-    async fn on_event(&mut self, _event: EdgeCaseEvent, _ctx: &mut ActorContext<EdgeCaseActor>) {
+    async fn on_event(
+        &mut self,
+        _event: EdgeCaseEvent,
+        _ctx: &mut ActorContext<EdgeCaseActor>,
+    ) {
         // Test internal event handling
     }
 
-    async fn on_child_error(&mut self, _error: Error, _ctx: &mut ActorContext<EdgeCaseActor>) {
+    async fn on_child_error(
+        &mut self,
+        _error: Error,
+        _ctx: &mut ActorContext<EdgeCaseActor>,
+    ) {
         // Test error handling from child
     }
 
-    async fn on_child_fault(&mut self, error: Error, _ctx: &mut ActorContext<EdgeCaseActor>) -> ChildAction {
+    async fn on_child_fault(
+        &mut self,
+        error: Error,
+        _ctx: &mut ActorContext<EdgeCaseActor>,
+    ) -> ChildAction {
         // Return different actions based on error type
         match error {
             Error::Functional { .. } => ChildAction::Restart,
@@ -174,7 +219,10 @@ impl Actor for FailingActor {
     type Response = EdgeCaseResponse;
     type Event = EdgeCaseEvent;
 
-    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
         info_span!("FailingActor", id = %id)
     }
 
@@ -182,8 +230,13 @@ impl Actor for FailingActor {
         SupervisionStrategy::Stop
     }
 
-    async fn pre_start(&mut self, _ctx: &mut ActorContext<Self>) -> Result<(), Error> {
-        Err(Error::FunctionalCritical { description: "Always fails".to_owned() } )
+    async fn pre_start(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        Err(Error::FunctionalCritical {
+            description: "Always fails".to_owned(),
+        })
     }
 }
 
@@ -214,7 +267,10 @@ async fn test_actor_with_retry_supervision() {
         fail_on_message: false,
     };
 
-    let actor_ref = system.create_root_actor("retry_actor", actor).await.unwrap();
+    let actor_ref = system
+        .create_root_actor("retry_actor", actor)
+        .await
+        .unwrap();
 
     // Wait for retry to complete
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -244,7 +300,7 @@ async fn test_custom_interval_strategy() {
             Duration::from_millis(10),
             Duration::from_millis(20),
             Duration::from_millis(30),
-        ]))
+        ])),
     );
 
     assert_eq!(strategy.max_retries(), 3);
@@ -275,7 +331,8 @@ async fn test_actor_ref_operations() {
         fail_on_message: false,
     };
 
-    let actor_ref = system.create_root_actor("test_actor", actor).await.unwrap();
+    let actor_ref =
+        system.create_root_actor("test_actor", actor).await.unwrap();
 
     // Test path
     assert_eq!(actor_ref.path().to_string(), "/user/test_actor");
@@ -306,7 +363,10 @@ async fn test_event_subscription() {
         fail_on_message: false,
     };
 
-    let actor_ref = system.create_root_actor("event_actor", actor).await.unwrap();
+    let actor_ref = system
+        .create_root_actor("event_actor", actor)
+        .await
+        .unwrap();
     let _receiver = actor_ref.subscribe();
 
     // Test event emission
@@ -336,12 +396,15 @@ async fn test_child_actor_management() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Verify child exists
-    let child = system.get_actor::<EdgeCaseActor>(&ActorPath::from("/user/parent/test_child")).await;
+    let child = system
+        .get_actor::<EdgeCaseActor>(&ActorPath::from("/user/parent/test_child"))
+        .await;
     assert!(child.is_ok());
 
     // Test parent access from child
     if let Ok(child_ref) = child {
-        let response = child_ref.ask(EdgeCaseCommand::TestParent).await.unwrap();
+        let response =
+            child_ref.ask(EdgeCaseCommand::TestParent).await.unwrap();
         assert_eq!(response, EdgeCaseResponse::Success);
     }
 }
@@ -359,7 +422,10 @@ async fn test_error_and_fault_handling() {
         fail_on_message: false,
     };
 
-    let parent_ref = system.create_root_actor("error_parent", parent).await.unwrap();
+    let parent_ref = system
+        .create_root_actor("error_parent", parent)
+        .await
+        .unwrap();
 
     // Create child that will fail
     let _failing_child = EdgeCaseActor {
@@ -376,11 +442,17 @@ async fn test_error_and_fault_handling() {
     // We'll test error handling through the main API instead
 
     // Test error emission
-    parent_ref.tell(EdgeCaseCommand::TriggerError).await.unwrap();
+    parent_ref
+        .tell(EdgeCaseCommand::TriggerError)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Test fault emission
-    parent_ref.tell(EdgeCaseCommand::TriggerFault).await.unwrap();
+    parent_ref
+        .tell(EdgeCaseCommand::TriggerFault)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
@@ -420,7 +492,10 @@ async fn test_system_children_listing() {
         fail_on_message: false,
     };
 
-    let parent_ref = system.create_root_actor("parent_with_children", actor).await.unwrap();
+    let parent_ref = system
+        .create_root_actor("parent_with_children", actor)
+        .await
+        .unwrap();
 
     // Create multiple children
     parent_ref.tell(EdgeCaseCommand::CreateChild).await.unwrap();
@@ -446,12 +521,17 @@ async fn test_retry_actor_functionality() {
         fail_on_message: false,
     };
 
-    let retry_strategy = Strategy::FixedInterval(
-        FixedIntervalStrategy::new(3, Duration::from_millis(10))
-    );
+    let retry_strategy = Strategy::FixedInterval(FixedIntervalStrategy::new(
+        3,
+        Duration::from_millis(10),
+    ));
 
-    let retry_actor = RetryActor::new(target, EdgeCaseCommand::GetValue, retry_strategy);
-    let retry_ref = system.create_root_actor("retry_test", retry_actor).await.unwrap();
+    let retry_actor =
+        RetryActor::new(target, EdgeCaseCommand::GetValue, retry_strategy);
+    let retry_ref = system
+        .create_root_actor("retry_test", retry_actor)
+        .await
+        .unwrap();
 
     // Start retry process
     retry_ref.tell(RetryMessage::Retry).await.unwrap();
@@ -475,7 +555,8 @@ async fn test_system_stop() {
         fail_on_message: false,
     };
 
-    let _actor_ref = system.create_root_actor("stop_test", actor).await.unwrap();
+    let _actor_ref =
+        system.create_root_actor("stop_test", actor).await.unwrap();
 
     // Stop system
     system.stop_system();
@@ -484,6 +565,7 @@ async fn test_system_stop() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Runner should have finished
-    let result = tokio::time::timeout(Duration::from_millis(100), runner_handle).await;
+    let result =
+        tokio::time::timeout(Duration::from_millis(100), runner_handle).await;
     assert!(result.is_ok());
 }

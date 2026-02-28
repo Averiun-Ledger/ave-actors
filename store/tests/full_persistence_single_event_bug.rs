@@ -1,19 +1,24 @@
 //! Test specific scenario: brand new actor, ONE event, graceful stop, no recovery
 
-use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber};
-use ave_actors_store::store::{PersistentActor, FullPersistence};
-use ave_actors_store::memory::MemoryManager;
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
-use tracing::info_span;
+use ave_actors_actor::{
+    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
+    Handler, Message, Response, build_tracing_subscriber,
+};
+use ave_actors_store::memory::MemoryManager;
+use ave_actors_store::store::{FullPersistence, PersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 
 static SHARED_MGR: OnceLock<Arc<TokioMutex<MemoryManager>>> = OnceLock::new();
 
-#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 struct SingleEventActor {
     data: String,
 }
@@ -31,7 +36,9 @@ struct Resp {
 }
 impl Response for Resp {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 struct DataSet(String);
 impl Event for DataSet {}
 
@@ -41,20 +48,33 @@ impl Actor for SingleEventActor {
     type Response = Resp;
     type Event = DataSet;
 
-     fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
-            info_span!("SingleEventActor", id = %id)
-        }
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("SingleEventActor", id = %id)
+    }
 
-    async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
-        println!("  [PRE_START] Actor starting, current data: '{}'", self.data);
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        println!(
+            "  [PRE_START] Actor starting, current data: '{}'",
+            self.data
+        );
         let manager_ref = SHARED_MGR.get_or_init(|| {
             Arc::new(TokioMutex::new(MemoryManager::default()))
         });
         let manager = manager_ref.lock().await.clone();
-        self.start_store("single_event_test", None, ctx, manager, None).await
+        self.start_store("single_event_test", None, ctx, manager, None)
+            .await
     }
 
-    async fn pre_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+    async fn pre_stop(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         println!("  [PRE_STOP] Actor stopping, current data: '{}'", self.data);
         self.stop_store(ctx).await
     }
@@ -72,11 +92,15 @@ impl Handler<SingleEventActor> for SingleEventActor {
             Msg::SetData(new_data) => {
                 println!("  [HANDLER] Setting data: '{}'", new_data);
                 self.persist(&DataSet(new_data), ctx).await?;
-                Ok(Resp { data: self.data.clone() })
+                Ok(Resp {
+                    data: self.data.clone(),
+                })
             }
             Msg::GetData => {
                 println!("  [HANDLER] Getting data: '{}'", self.data);
-                Ok(Resp { data: self.data.clone() })
+                Ok(Resp {
+                    data: self.data.clone(),
+                })
             }
         }
     }
@@ -89,7 +113,9 @@ impl PersistentActor for SingleEventActor {
 
     fn create_initial(_params: ()) -> Self {
         println!("  [CREATE_INITIAL] Creating actor with empty data");
-        Self { data: String::new() }
+        Self {
+            data: String::new(),
+        }
     }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
@@ -116,7 +142,10 @@ async fn test_single_event_no_recovery() {
         .unwrap();
 
     println!("\n📝 Persisting ONE event");
-    let resp = actor_ref.ask(Msg::SetData("Hello World".to_string())).await.unwrap();
+    let resp = actor_ref
+        .ask(Msg::SetData("Hello World".to_string()))
+        .await
+        .unwrap();
     println!("   Response data: '{}'", resp.data);
     assert_eq!(resp.data, "Hello World");
 
@@ -162,11 +191,22 @@ async fn test_debug_event_counter_after_first_event() {
 
     let memory_manager = MemoryManager::default();
 
-    println!("\n╔════════════════════════════════════════════════════════════╗");
+    println!(
+        "\n╔════════════════════════════════════════════════════════════╗"
+    );
     println!("║     Debug: Event Counter After Persisting First Event     ║");
-    println!("╚════════════════════════════════════════════════════════════╝\n");
+    println!(
+        "╚════════════════════════════════════════════════════════════╝\n"
+    );
 
-    let store = Store::<SingleEventActor>::new("test", "debug_counter", memory_manager.clone(), None, SingleEventActor::create_initial(())).unwrap();
+    let store = Store::<SingleEventActor>::new(
+        "test",
+        "debug_counter",
+        memory_manager.clone(),
+        None,
+        SingleEventActor::create_initial(()),
+    )
+    .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     println!("📝 Initial state");
@@ -177,7 +217,10 @@ async fn test_debug_event_counter_after_first_event() {
     }
 
     println!("\n📝 Persist ONE event");
-    store_ref.ask(StoreCommand::Persist(DataSet("test".to_string()))).await.unwrap();
+    store_ref
+        .ask(StoreCommand::Persist(DataSet("test".to_string())))
+        .await
+        .unwrap();
 
     println!("\n📝 Check event_counter");
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
@@ -185,13 +228,18 @@ async fn test_debug_event_counter_after_first_event() {
         println!("   event_counter = {}", count);
         if count == 0 {
             println!("   ❌ BUG: event_counter is still 0 after persisting!");
-            println!("   ❌ This means stop_store() condition (count > 0) will be FALSE");
+            println!(
+                "   ❌ This means stop_store() condition (count > 0) will be FALSE"
+            );
             println!("   ❌ No snapshot will be created!");
         } else if count == 1 {
             println!("   ✅ OK: event_counter incremented correctly");
             println!("   ✅ stop_store() will create snapshot");
         }
-        assert_eq!(count, 1, "event_counter should be 1 after persisting 1 event");
+        assert_eq!(
+            count, 1,
+            "event_counter should be 1 after persisting 1 event"
+        );
     }
 
     println!("\n📝 What happens in stop_store():");

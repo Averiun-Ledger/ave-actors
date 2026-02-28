@@ -1,5 +1,3 @@
-
-
 //! # Actor path
 //!
 //! The `path` module provides the `ActorPath` type. The `ActorPath` type is a path to an actor in the actor system.

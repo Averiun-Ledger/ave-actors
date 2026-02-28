@@ -1,5 +1,3 @@
-
-
 //! Core library for the Ave-Actors framework.
 //! Provides the foundational components for building actor-based applications.
 //! This library includes the core actor model, message passing, and persistence layers.
@@ -7,19 +5,22 @@
 
 pub use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction,
-    CustomIntervalStrategy, Error as ActorError, Event, 
+    CustomIntervalStrategy, EncryptedKey, Error as ActorError, Event,
     FixedIntervalStrategy, Handler, Message, NoIntervalStrategy,
-    Response, RetryActor, RetryMessage, RetryStrategy, Sink,
-    Strategy, Subscriber, SupervisionStrategy, SystemEvent, SystemRef,
-    SystemRunner, EncryptedKey, NotPersistentActor
+    NotPersistentActor, Response, RetryActor, RetryMessage, RetryStrategy,
+    Sink, Strategy, Subscriber, SupervisionStrategy, SystemEvent, SystemRef,
+    SystemRunner,
 };
 
 #[cfg(any(feature = "rocksdb", feature = "sqlite"))]
 pub use ave_actors_store::{
     Error as StoreError,
+    config::*,
     database::{Collection, DbManager, State},
-    store::{PersistentActor, FullPersistence, LightPersistence, Store, StoreCommand, StoreResponse}, 
-    config::*
+    store::{
+        FullPersistence, LightPersistence, PersistentActor, Store,
+        StoreCommand, StoreResponse,
+    },
 };
 
 #[cfg(feature = "rocksdb")]

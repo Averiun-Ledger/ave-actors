@@ -1,5 +1,3 @@
-
-
 //! # Errors module
 //!
 //! This module defines error types for the store system using `thiserror`.

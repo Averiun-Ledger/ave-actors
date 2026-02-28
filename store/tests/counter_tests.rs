@@ -6,12 +6,15 @@
 //! - state_counter = event_counter after snapshot means all events are applied
 
 use ave_actors_store::{
-    store::{Store, PersistentActor, StoreCommand, StoreResponse, FullPersistence},
     memory::MemoryManager,
+    store::{
+        FullPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
+    },
 };
 
 use ave_actors_actor::{
-    Actor, ActorContext, ActorSystem, EncryptedKey, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber
+    Actor, ActorContext, ActorSystem, EncryptedKey, Error as ActorError, Event,
+    Handler, Message, Response, build_tracing_subscriber,
 };
 
 use async_trait::async_trait;
@@ -19,7 +22,15 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
-#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
+    Default,
+)]
 struct CounterTestActor {
     value: i32,
 }
@@ -40,7 +51,14 @@ enum CounterResponse {
 
 impl Response for CounterResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
+)]
 struct CounterEvent {
     delta: i32,
 }
@@ -53,9 +71,12 @@ impl Actor for CounterTestActor {
     type Response = CounterResponse;
     type Event = CounterEvent;
 
-                        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
-            info_span!("CounterTestActor", id = %id)
-        }
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("CounterTestActor", id = %id)
+    }
 }
 
 #[async_trait]
@@ -108,7 +129,9 @@ async fn test_event_counter_starts_at_zero() {
     // Check that LastEventNumber returns 0 for empty store
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     match result {
-        StoreResponse::LastEventNumber(count) => assert_eq!(count, 0, "Empty store should have event_counter = 0"),
+        StoreResponse::LastEventNumber(count) => {
+            assert_eq!(count, 0, "Empty store should have event_counter = 0")
+        }
         _ => panic!("Expected LastEventNumber response"),
     }
 }
@@ -139,16 +162,26 @@ async fn test_event_counter_after_first_event() {
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     match result {
         StoreResponse::LastEventNumber(count) => {
-            assert_eq!(count, 1, "After first event, event_counter should be 1");
+            assert_eq!(
+                count, 1,
+                "After first event, event_counter should be 1"
+            );
         }
         _ => panic!("Expected LastEventNumber response"),
     }
 
     // Verify the event is at position 0
-    let result = store_ref.ask(StoreCommand::GetEvents { from: 0, to: 0 }).await.unwrap();
+    let result = store_ref
+        .ask(StoreCommand::GetEvents { from: 0, to: 0 })
+        .await
+        .unwrap();
     match result {
         StoreResponse::Events(events) => {
-            assert_eq!(events.len(), 1, "Should retrieve 1 event from position 0");
+            assert_eq!(
+                events.len(),
+                1,
+                "Should retrieve 1 event from position 0"
+            );
             assert_eq!(events[0].delta, 10);
         }
         _ => panic!("Expected Events response"),
@@ -189,10 +222,17 @@ async fn test_event_counter_multiple_events() {
     }
 
     // Verify all events are at positions 0-4
-    let result = store_ref.ask(StoreCommand::GetEvents { from: 0, to: 4 }).await.unwrap();
+    let result = store_ref
+        .ask(StoreCommand::GetEvents { from: 0, to: 4 })
+        .await
+        .unwrap();
     match result {
         StoreResponse::Events(events) => {
-            assert_eq!(events.len(), 5, "Should retrieve 5 events from positions 0-4");
+            assert_eq!(
+                events.len(),
+                5,
+                "Should retrieve 5 events from positions 0-4"
+            );
             for (i, event) in events.iter().enumerate() {
                 assert_eq!(event.delta, (i + 1) as i32);
             }
@@ -223,20 +263,29 @@ async fn test_state_counter_after_snapshot() {
     let mut actor = CounterTestActor { value: 0 };
     for i in 1..=3 {
         let event = CounterEvent { delta: i * 10 };
-        store_ref.ask(StoreCommand::Persist(event.clone())).await.unwrap();
+        store_ref
+            .ask(StoreCommand::Persist(event.clone()))
+            .await
+            .unwrap();
         actor.apply(&event).unwrap();
     }
 
     // At this point: event_counter = 3, value = 60
 
     // Take snapshot
-    store_ref.ask(StoreCommand::Snapshot(actor.clone())).await.unwrap();
+    store_ref
+        .ask(StoreCommand::Snapshot(actor.clone()))
+        .await
+        .unwrap();
 
     // Recover and verify state_counter = event_counter
     let result = store_ref.ask(StoreCommand::Recover).await.unwrap();
     match result {
         StoreResponse::State(Some(recovered)) => {
-            assert_eq!(recovered.value, 60, "Recovered state should have all events applied");
+            assert_eq!(
+                recovered.value, 60,
+                "Recovered state should have all events applied"
+            );
         }
         _ => panic!("Expected recovered state"),
     }
@@ -264,17 +313,26 @@ async fn test_recovery_with_events_after_snapshot() {
     let mut actor = CounterTestActor { value: 0 };
     for i in 1..=2 {
         let event = CounterEvent { delta: i * 10 };
-        store_ref.ask(StoreCommand::Persist(event.clone())).await.unwrap();
+        store_ref
+            .ask(StoreCommand::Persist(event.clone()))
+            .await
+            .unwrap();
         actor.apply(&event).unwrap();
     }
     // value = 30, event_counter = 2
-    store_ref.ask(StoreCommand::Snapshot(actor.clone())).await.unwrap();
+    store_ref
+        .ask(StoreCommand::Snapshot(actor.clone()))
+        .await
+        .unwrap();
     // state_counter = 2
 
     // Persist 3 more events
     for i in 3..=5 {
         let event = CounterEvent { delta: i * 10 };
-        store_ref.ask(StoreCommand::Persist(event.clone())).await.unwrap();
+        store_ref
+            .ask(StoreCommand::Persist(event.clone()))
+            .await
+            .unwrap();
         actor.apply(&event).unwrap();
     }
     // value = 150, event_counter = 5
@@ -321,7 +379,10 @@ async fn test_recovery_without_snapshot() {
     match result {
         StoreResponse::State(Some(state)) => {
             // With the fix, should recover from events: 10 + 20 + 30 = 60
-            assert_eq!(state.value, 60, "Should recover state by replaying events");
+            assert_eq!(
+                state.value, 60,
+                "Should recover state by replaying events"
+            );
         }
         StoreResponse::State(None) => {
             panic!("Expected state recovery from events, got None");
@@ -350,13 +411,19 @@ async fn test_snapshot_at_zero() {
 
     // Take snapshot without any events
     let actor = CounterTestActor { value: 0 };
-    store_ref.ask(StoreCommand::Snapshot(actor.clone())).await.unwrap();
+    store_ref
+        .ask(StoreCommand::Snapshot(actor.clone()))
+        .await
+        .unwrap();
 
     // Verify event_counter is still 0
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     match result {
         StoreResponse::LastEventNumber(count) => {
-            assert_eq!(count, 0, "event_counter should remain 0 after snapshot");
+            assert_eq!(
+                count, 0,
+                "event_counter should remain 0 after snapshot"
+            );
         }
         _ => panic!("Expected LastEventNumber response"),
     }
@@ -396,19 +463,33 @@ async fn test_last_events_from_positions() {
     }
 
     // LastEventsFrom(0) should return all 5 events
-    let result = store_ref.ask(StoreCommand::LastEventsFrom(0)).await.unwrap();
+    let result = store_ref
+        .ask(StoreCommand::LastEventsFrom(0))
+        .await
+        .unwrap();
     match result {
         StoreResponse::Events(events) => {
-            assert_eq!(events.len(), 5, "LastEventsFrom(0) should return 5 events");
+            assert_eq!(
+                events.len(),
+                5,
+                "LastEventsFrom(0) should return 5 events"
+            );
         }
         _ => panic!("Expected Events response"),
     }
 
     // LastEventsFrom(2) should return events from positions 2, 3, 4
-    let result = store_ref.ask(StoreCommand::LastEventsFrom(2)).await.unwrap();
+    let result = store_ref
+        .ask(StoreCommand::LastEventsFrom(2))
+        .await
+        .unwrap();
     match result {
         StoreResponse::Events(events) => {
-            assert_eq!(events.len(), 3, "LastEventsFrom(2) should return 3 events");
+            assert_eq!(
+                events.len(),
+                3,
+                "LastEventsFrom(2) should return 3 events"
+            );
             assert_eq!(events[0].delta, 30); // position 2
             assert_eq!(events[1].delta, 40); // position 3
             assert_eq!(events[2].delta, 50); // position 4
@@ -417,10 +498,17 @@ async fn test_last_events_from_positions() {
     }
 
     // LastEventsFrom(5) should return empty (no events at position 5 or beyond)
-    let result = store_ref.ask(StoreCommand::LastEventsFrom(5)).await.unwrap();
+    let result = store_ref
+        .ask(StoreCommand::LastEventsFrom(5))
+        .await
+        .unwrap();
     match result {
         StoreResponse::Events(events) => {
-            assert_eq!(events.len(), 0, "LastEventsFrom(5) should return 0 events");
+            assert_eq!(
+                events.len(),
+                0,
+                "LastEventsFrom(5) should return 0 events"
+            );
         }
         _ => panic!("Expected Events response"),
     }
@@ -449,27 +537,42 @@ async fn test_multiple_snapshots_and_recoveries() {
     // Cycle 1: 2 events + snapshot
     for i in 1..=2 {
         let event = CounterEvent { delta: i };
-        store_ref.ask(StoreCommand::Persist(event.clone())).await.unwrap();
+        store_ref
+            .ask(StoreCommand::Persist(event.clone()))
+            .await
+            .unwrap();
         actor.apply(&event).unwrap();
     }
     // value = 3, event_counter = 2
-    store_ref.ask(StoreCommand::Snapshot(actor.clone())).await.unwrap();
+    store_ref
+        .ask(StoreCommand::Snapshot(actor.clone()))
+        .await
+        .unwrap();
     // state_counter = 2
 
     // Cycle 2: 3 more events + snapshot
     for i in 3..=5 {
         let event = CounterEvent { delta: i };
-        store_ref.ask(StoreCommand::Persist(event.clone())).await.unwrap();
+        store_ref
+            .ask(StoreCommand::Persist(event.clone()))
+            .await
+            .unwrap();
         actor.apply(&event).unwrap();
     }
     // value = 15, event_counter = 5
-    store_ref.ask(StoreCommand::Snapshot(actor.clone())).await.unwrap();
+    store_ref
+        .ask(StoreCommand::Snapshot(actor.clone()))
+        .await
+        .unwrap();
     // state_counter = 5
 
     // Cycle 3: 2 more events (no snapshot)
     for i in 6..=7 {
         let event = CounterEvent { delta: i };
-        store_ref.ask(StoreCommand::Persist(event.clone())).await.unwrap();
+        store_ref
+            .ask(StoreCommand::Persist(event.clone()))
+            .await
+            .unwrap();
         actor.apply(&event).unwrap();
     }
     // value = 28, event_counter = 7
@@ -495,7 +598,8 @@ async fn test_event_counter_with_encryption() {
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let encrypt_key = EncryptedKey::new(b"0123456789abcdef0123456789abcdef").unwrap();
+    let encrypt_key =
+        EncryptedKey::new(b"0123456789abcdef0123456789abcdef").unwrap();
 
     let store = Store::<CounterTestActor>::new(
         "counter_test",
@@ -517,13 +621,19 @@ async fn test_event_counter_with_encryption() {
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     match result {
         StoreResponse::LastEventNumber(count) => {
-            assert_eq!(count, 3, "Encrypted store should have event_counter = 3");
+            assert_eq!(
+                count, 3,
+                "Encrypted store should have event_counter = 3"
+            );
         }
         _ => panic!("Expected LastEventNumber response"),
     }
 
     // Verify events can be retrieved and decrypted
-    let result = store_ref.ask(StoreCommand::GetEvents { from: 0, to: 2 }).await.unwrap();
+    let result = store_ref
+        .ask(StoreCommand::GetEvents { from: 0, to: 2 })
+        .await
+        .unwrap();
     match result {
         StoreResponse::Events(events) => {
             assert_eq!(events.len(), 3);

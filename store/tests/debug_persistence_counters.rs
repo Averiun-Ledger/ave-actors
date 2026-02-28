@@ -1,12 +1,15 @@
 //! Test to debug the state_counter and event_counter values during LightPersistence
 
 use ave_actors_store::{
-    store::{Store, PersistentActor, StoreCommand, StoreResponse, LightPersistence},
     memory::MemoryManager,
+    store::{
+        LightPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
+    },
 };
 
 use ave_actors_actor::{
-    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber
+    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler,
+    Message, Response, build_tracing_subscriber,
 };
 
 use async_trait::async_trait;
@@ -14,7 +17,15 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
-#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
+    Default,
+)]
 struct DebugActor {
     value: i32,
 }
@@ -35,7 +46,14 @@ enum DebugResponse {
 
 impl Response for DebugResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
+)]
 struct DebugEvent {
     delta: i32,
 }
@@ -47,9 +65,12 @@ impl Actor for DebugActor {
     type Message = DebugMessage;
     type Response = DebugResponse;
     type Event = DebugEvent;
-                        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
-            info_span!("DebugActor", id = %id)
-        }
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("DebugActor", id = %id)
+    }
 }
 
 #[async_trait]
@@ -119,7 +140,10 @@ async fn test_debug_light_persistence_counters() {
     let event = DebugEvent { delta: 10 };
 
     println!("Before persist: actor.value = {}", actor.value);
-    let result = store_ref.ask(StoreCommand::PersistLight(event, actor.clone())).await.unwrap();
+    let result = store_ref
+        .ask(StoreCommand::PersistLight(event, actor.clone()))
+        .await
+        .unwrap();
     match result {
         StoreResponse::Persisted => println!("Event persisted successfully"),
         _ => panic!("Expected Persisted response"),
@@ -157,7 +181,9 @@ async fn test_debug_light_persistence_counters() {
             println!("Actual: {}", state.value);
 
             if state.value == 20 {
-                println!("BUG CONFIRMED: Event was applied TWICE (10 + 10 = 20)");
+                println!(
+                    "BUG CONFIRMED: Event was applied TWICE (10 + 10 = 20)"
+                );
             } else if state.value == 10 {
                 println!("OK: Event was applied only once");
             }

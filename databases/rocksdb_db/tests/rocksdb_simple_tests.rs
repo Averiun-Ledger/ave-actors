@@ -1,16 +1,14 @@
-
-
 //! Simple edge case tests for RocksDB database to increase coverage
 
 use ave_actors_rocksdb::RocksDbManager;
-use ave_actors_store::{database::{Collection, DbManager, State}};
+use ave_actors_store::database::{Collection, DbManager, State};
 use tempfile::tempdir;
 
 #[test]
 fn test_rocksdb_manager_edge_cases() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test");
-    let manager = RocksDbManager::new(&db_path,  false, None).unwrap();
+    let manager = RocksDbManager::new(&db_path, false, None).unwrap();
 
     // Test collection operations
     let mut collection = manager.create_collection("test", "prefix").unwrap();

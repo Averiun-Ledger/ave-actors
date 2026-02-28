@@ -12,22 +12,28 @@
 //! Expected: vector [3]
 //! Actual: vector [3, 3] after restart
 
-use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber};
-use ave_actors_store::store::{PersistentActor, LightPersistence};
-use ave_actors_store::memory::MemoryManager;
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
-use tracing::info_span;
+use ave_actors_actor::{
+    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
+    Handler, Message, Response, build_tracing_subscriber,
+};
+use ave_actors_store::memory::MemoryManager;
+use ave_actors_store::store::{LightPersistence, PersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 
 // Shared manager for testing
-static SHARED_MANAGER: OnceLock<Arc<TokioMutex<MemoryManager>>> = OnceLock::new();
+static SHARED_MANAGER: OnceLock<Arc<TokioMutex<MemoryManager>>> =
+    OnceLock::new();
 
 // Actor with a vector that accumulates numbers
-#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 struct VectorActor {
     numbers: Vec<i32>,
 }
@@ -45,7 +51,9 @@ struct VectorResponse {
 }
 impl Response for VectorResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 struct NumberAdded(i32);
 impl Event for NumberAdded {}
 
@@ -55,11 +63,17 @@ impl Actor for VectorActor {
     type Response = VectorResponse;
     type Event = NumberAdded;
 
-    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
-            info_span!("VectorActor", id = %id)
-        }
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("VectorActor", id = %id)
+    }
 
-    async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         // Get or initialize the shared manager
         let manager_ref = SHARED_MANAGER.get_or_init(|| {
             Arc::new(TokioMutex::new(MemoryManager::default()))
@@ -67,10 +81,14 @@ impl Actor for VectorActor {
 
         let manager = manager_ref.lock().await.clone();
 
-        self.start_store("vector_test", None, ctx, manager, None).await
+        self.start_store("vector_test", None, ctx, manager, None)
+            .await
     }
 
-    async fn pre_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+    async fn pre_stop(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         self.stop_store(ctx).await
     }
 }
@@ -91,11 +109,9 @@ impl Handler<VectorActor> for VectorActor {
                     numbers: self.numbers.clone(),
                 })
             }
-            VectorMessage::Get => {
-                Ok(VectorResponse {
-                    numbers: self.numbers.clone(),
-                })
-            }
+            VectorMessage::Get => Ok(VectorResponse {
+                numbers: self.numbers.clone(),
+            }),
         }
     }
 }
@@ -131,10 +147,7 @@ async fn test_light_persistence_duplicates_data_on_restart() {
         .unwrap();
 
     // Add number 3
-    let response = actor_ref
-        .ask(VectorMessage::Add(3))
-        .await
-        .unwrap();
+    let response = actor_ref.ask(VectorMessage::Add(3)).await.unwrap();
 
     println!("After adding 3: {:?}", response.numbers);
     assert_eq!(response.numbers, vec![3], "Should have [3] after adding 3");
@@ -151,10 +164,7 @@ async fn test_light_persistence_duplicates_data_on_restart() {
         .unwrap();
 
     // Get the numbers after restart
-    let response = actor_ref2
-        .ask(VectorMessage::Get)
-        .await
-        .unwrap();
+    let response = actor_ref2.ask(VectorMessage::Get).await.unwrap();
 
     println!("After restart: {:?}", response.numbers);
 

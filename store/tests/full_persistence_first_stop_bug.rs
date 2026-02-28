@@ -1,20 +1,26 @@
 //! Test to investigate why FullPersistence doesn't recover state after FIRST stop
 //! when there was no previous snapshot
 
-use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber};
-use ave_actors_store::store::{PersistentActor, FullPersistence};
-use ave_actors_store::memory::MemoryManager;
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
-use tracing::info_span;
+use ave_actors_actor::{
+    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
+    Handler, Message, Response, build_tracing_subscriber,
+};
+use ave_actors_store::memory::MemoryManager;
+use ave_actors_store::store::{FullPersistence, PersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 
-static SHARED_MANAGER_FIRST_STOP: OnceLock<Arc<TokioMutex<MemoryManager>>> = OnceLock::new();
+static SHARED_MANAGER_FIRST_STOP: OnceLock<Arc<TokioMutex<MemoryManager>>> =
+    OnceLock::new();
 
-#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 struct TestActor {
     value: i32,
 }
@@ -32,7 +38,9 @@ struct TestResponse {
 }
 impl Response for TestResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 struct AddEvent(i32);
 impl Event for AddEvent {}
 
@@ -42,20 +50,30 @@ impl Actor for TestActor {
     type Response = TestResponse;
     type Event = AddEvent;
 
-    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
-            info_span!("TestActor", id = %id)
-        }
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("TestActor", id = %id)
+    }
 
-    async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         let manager_ref = SHARED_MANAGER_FIRST_STOP.get_or_init(|| {
             Arc::new(TokioMutex::new(MemoryManager::default()))
         });
 
         let manager = manager_ref.lock().await.clone();
-        self.start_store("test_first_stop", None, ctx, manager, None).await
+        self.start_store("test_first_stop", None, ctx, manager, None)
+            .await
     }
 
-    async fn pre_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+    async fn pre_stop(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         self.stop_store(ctx).await
     }
 }
@@ -73,9 +91,7 @@ impl Handler<TestActor> for TestActor {
                 self.persist(&AddEvent(delta), ctx).await?;
                 Ok(TestResponse { value: self.value })
             }
-            TestMessage::Get => {
-                Ok(TestResponse { value: self.value })
-            }
+            TestMessage::Get => Ok(TestResponse { value: self.value }),
         }
     }
 }
@@ -91,7 +107,12 @@ impl PersistentActor for TestActor {
     }
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        println!("  [APPLY] value: {} + {} = {}", self.value, event.0, self.value + event.0);
+        println!(
+            "  [APPLY] value: {} + {} = {}",
+            self.value,
+            event.0,
+            self.value + event.0
+        );
         self.value += event.0;
         Ok(())
     }
@@ -103,9 +124,13 @@ async fn test_full_persistence_first_stop_no_previous_snapshot() {
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    println!("\n╔════════════════════════════════════════════════════════════╗");
+    println!(
+        "\n╔════════════════════════════════════════════════════════════╗"
+    );
     println!("║  FullPersistence: First Stop Without Previous Snapshot    ║");
-    println!("╚════════════════════════════════════════════════════════════╝\n");
+    println!(
+        "╚════════════════════════════════════════════════════════════╝\n"
+    );
 
     println!("📝 SCENARIO:");
     println!("   - Brand new actor (no previous snapshot exists)");
@@ -176,17 +201,34 @@ async fn test_investigate_stop_store_snapshot_creation() {
 
     let memory_manager = MemoryManager::default();
 
-    println!("\n╔════════════════════════════════════════════════════════════╗");
+    println!(
+        "\n╔════════════════════════════════════════════════════════════╗"
+    );
     println!("║     Investigation: Does stop_store() Create Snapshot?     ║");
-    println!("╚════════════════════════════════════════════════════════════╝\n");
+    println!(
+        "╚════════════════════════════════════════════════════════════╝\n"
+    );
 
     // Create store and persist events
-    let store = Store::<TestActor>::new("test", "stop_investigation", memory_manager.clone(), None, TestActor::create_initial(())).unwrap();
+    let store = Store::<TestActor>::new(
+        "test",
+        "stop_investigation",
+        memory_manager.clone(),
+        None,
+        TestActor::create_initial(()),
+    )
+    .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     println!("📝 STEP 1: Persist 2 events");
-    store_ref.ask(StoreCommand::Persist(AddEvent(5))).await.unwrap();
-    store_ref.ask(StoreCommand::Persist(AddEvent(7))).await.unwrap();
+    store_ref
+        .ask(StoreCommand::Persist(AddEvent(5)))
+        .await
+        .unwrap();
+    store_ref
+        .ask(StoreCommand::Persist(AddEvent(7)))
+        .await
+        .unwrap();
 
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     if let StoreResponse::LastEventNumber(count) = result {
@@ -197,7 +239,14 @@ async fn test_investigate_stop_store_snapshot_creation() {
     println!("\n📝 STEP 2: Check if snapshot exists BEFORE stop");
     drop(store_ref);
 
-    let store2 = Store::<TestActor>::new("test", "stop_investigation", memory_manager.clone(), None, TestActor::create_initial(())).unwrap();
+    let store2 = Store::<TestActor>::new(
+        "test",
+        "stop_investigation",
+        memory_manager.clone(),
+        None,
+        TestActor::create_initial(()),
+    )
+    .unwrap();
     let store_ref2 = system.create_root_actor("store2", store2).await.unwrap();
 
     let result = store_ref2.ask(StoreCommand::Recover).await.unwrap();
@@ -206,7 +255,9 @@ async fn test_investigate_stop_store_snapshot_creation() {
             println!("   ✅ Snapshot exists (unexpected at this point)");
         }
         StoreResponse::State(None) => {
-            println!("   ❌ No snapshot exists (expected - we haven't called Snapshot command yet)");
+            println!(
+                "   ❌ No snapshot exists (expected - we haven't called Snapshot command yet)"
+            );
         }
         _ => panic!("Unexpected response"),
     }
@@ -244,7 +295,14 @@ async fn test_investigate_stop_store_snapshot_creation() {
     println!("\n📝 STEP 4: Verify snapshot was created");
     drop(store_ref2);
 
-    let store3 = Store::<TestActor>::new("test", "stop_investigation", memory_manager.clone(), None, TestActor::create_initial(())).unwrap();
+    let store3 = Store::<TestActor>::new(
+        "test",
+        "stop_investigation",
+        memory_manager.clone(),
+        None,
+        TestActor::create_initial(()),
+    )
+    .unwrap();
     let store_ref3 = system.create_root_actor("store3", store3).await.unwrap();
 
     let result = store_ref3.ask(StoreCommand::Recover).await.unwrap();

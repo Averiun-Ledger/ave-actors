@@ -406,8 +406,10 @@ where
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Ok(store) = ctx.get_child::<Store<Self>>("store").await {
-            if matches!(Self::Persistence::get_persistence(), PersistenceType::Full)
-            {
+            if matches!(
+                Self::Persistence::get_persistence(),
+                PersistenceType::Full
+            ) {
                 // Only snapshot if there are events
                 let response = store.ask(StoreCommand::LastEventNumber).await?;
                 if let StoreResponse::LastEventNumber(count) = response
@@ -840,7 +842,6 @@ where
                 } else {
                     debug!("State is up to date, no events to apply");
                 }
-
             } else {
                 debug!(
                     "No events found in database, using recovered state as-is"

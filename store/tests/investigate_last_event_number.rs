@@ -1,12 +1,15 @@
 //! Investigate if LastEventNumber might be returning 0 incorrectly
 
 use ave_actors_store::{
-    store::{Store, PersistentActor, StoreCommand, StoreResponse, FullPersistence},
     memory::MemoryManager,
+    store::{
+        FullPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
+    },
 };
 
 use ave_actors_actor::{
-    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber
+    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler,
+    Message, Response, build_tracing_subscriber,
 };
 
 use async_trait::async_trait;
@@ -14,7 +17,15 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
-#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
+    Default,
+)]
 struct TestActor {
     value: i32,
 }
@@ -27,7 +38,14 @@ impl Message for TestMessage {}
 struct TestResponse;
 impl Response for TestResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
+)]
 struct TestEvent(i32);
 impl Event for TestEvent {}
 
@@ -37,9 +55,12 @@ impl Actor for TestActor {
     type Response = TestResponse;
     type Event = TestEvent;
 
-         fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
-            info_span!("TestActor", id = %id)
-        }
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("TestActor", id = %id)
+    }
 }
 
 #[async_trait]
@@ -77,11 +98,22 @@ async fn test_last_event_number_after_persist() {
 
     let memory_manager = MemoryManager::default();
 
-    println!("\n╔════════════════════════════════════════════════════════════╗");
+    println!(
+        "\n╔════════════════════════════════════════════════════════════╗"
+    );
     println!("║  Investigation: LastEventNumber Behavior                  ║");
-    println!("╚════════════════════════════════════════════════════════════╝\n");
+    println!(
+        "╚════════════════════════════════════════════════════════════╝\n"
+    );
 
-    let store = Store::<TestActor>::new("test", "last_event", memory_manager.clone(), None, TestActor::create_initial(())).unwrap();
+    let store = Store::<TestActor>::new(
+        "test",
+        "last_event",
+        memory_manager.clone(),
+        None,
+        TestActor::create_initial(()),
+    )
+    .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     println!("📊 STEP 1: Initial state");
@@ -92,7 +124,10 @@ async fn test_last_event_number_after_persist() {
     }
 
     println!("\n📊 STEP 2: After persisting 1 event");
-    store_ref.ask(StoreCommand::Persist(TestEvent(10))).await.unwrap();
+    store_ref
+        .ask(StoreCommand::Persist(TestEvent(10)))
+        .await
+        .unwrap();
 
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     if let StoreResponse::LastEventNumber(count) = result {
@@ -110,7 +145,10 @@ async fn test_last_event_number_after_persist() {
     }
 
     println!("\n📊 STEP 3: After persisting 2nd event");
-    store_ref.ask(StoreCommand::Persist(TestEvent(20))).await.unwrap();
+    store_ref
+        .ask(StoreCommand::Persist(TestEvent(20)))
+        .await
+        .unwrap();
 
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     if let StoreResponse::LastEventNumber(count) = result {
@@ -125,14 +163,23 @@ async fn test_last_event_number_after_persist() {
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     if let StoreResponse::LastEventNumber(count) = result {
         println!("   LastEventNumber = {}", count);
-        println!("   (Should still be 2 - snapshot doesn't change event count)");
+        println!(
+            "   (Should still be 2 - snapshot doesn't change event count)"
+        );
         assert_eq!(count, 2);
     }
 
     println!("\n📊 STEP 5: After recovery");
     drop(store_ref);
 
-    let store2 = Store::<TestActor>::new("test", "last_event", memory_manager.clone(), None, TestActor::create_initial(())).unwrap();
+    let store2 = Store::<TestActor>::new(
+        "test",
+        "last_event",
+        memory_manager.clone(),
+        None,
+        TestActor::create_initial(()),
+    )
+    .unwrap();
     let store_ref2 = system.create_root_actor("store2", store2).await.unwrap();
 
     store_ref2.ask(StoreCommand::Recover).await.unwrap();

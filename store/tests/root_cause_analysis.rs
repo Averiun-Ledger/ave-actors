@@ -1,12 +1,15 @@
 //! Root cause analysis: persist_state doesn't increment event_counter
 
 use ave_actors_store::{
-    store::{Store, PersistentActor, StoreCommand, StoreResponse, LightPersistence},
     memory::MemoryManager,
+    store::{
+        LightPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
+    },
 };
 
 use ave_actors_actor::{
-    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber
+    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler,
+    Message, Response, build_tracing_subscriber,
 };
 
 use async_trait::async_trait;
@@ -14,7 +17,15 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
-#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
+    Default,
+)]
 struct TestActor {
     value: i32,
 }
@@ -27,7 +38,14 @@ impl Message for TestMessage {}
 struct TestResponse;
 impl Response for TestResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
+)]
 struct TestEvent {
     delta: i32,
 }
@@ -39,9 +57,12 @@ impl Actor for TestActor {
     type Response = TestResponse;
     type Event = TestEvent;
 
-    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
-            info_span!("TestActor", id = %id)
-        }
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("TestActor", id = %id)
+    }
 }
 
 #[async_trait]
@@ -78,12 +99,23 @@ async fn test_root_cause_persist_state_doesnt_increment_counter() {
     tokio::spawn(async move { runner.run().await });
 
     let memory_manager = MemoryManager::default();
-    let store = Store::<TestActor>::new("test", "root_cause", memory_manager.clone(), None, TestActor::create_initial(())).unwrap();
+    let store = Store::<TestActor>::new(
+        "test",
+        "root_cause",
+        memory_manager.clone(),
+        None,
+        TestActor::create_initial(()),
+    )
+    .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
-    println!("\n╔════════════════════════════════════════════════════════════╗");
+    println!(
+        "\n╔════════════════════════════════════════════════════════════╗"
+    );
     println!("║          ROOT CAUSE ANALYSIS: persist_state bug            ║");
-    println!("╚════════════════════════════════════════════════════════════╝\n");
+    println!(
+        "╚════════════════════════════════════════════════════════════╝\n"
+    );
 
     // Initial state
     println!("📊 INITIAL STATE:");
@@ -104,11 +136,17 @@ async fn test_root_cause_persist_state_doesnt_increment_counter() {
     // 2. persist() calls apply() on the actor (actor.value becomes 10)
     // 3. persist() calls store.ask(PersistLight(event, actor_with_value_10))
     actor.apply(&TestEvent { delta: 10 }).unwrap();
-    println!("   After apply(): actor.value = {} (event already applied!)", actor.value);
+    println!(
+        "   After apply(): actor.value = {} (event already applied!)",
+        actor.value
+    );
 
     let event = TestEvent { delta: 10 };
     println!("   Calling PersistLight...");
-    store_ref.ask(StoreCommand::PersistLight(event, actor.clone())).await.unwrap();
+    store_ref
+        .ask(StoreCommand::PersistLight(event, actor.clone()))
+        .await
+        .unwrap();
 
     // Check counter after persist
     println!("\n📊 AFTER persist_state():");
@@ -127,7 +165,14 @@ async fn test_root_cause_persist_state_doesnt_increment_counter() {
     // Recover
     println!("\n🔄 RECOVERY PROCESS:");
     drop(store_ref);
-    let store2 = Store::<TestActor>::new("test", "root_cause", memory_manager.clone(), None, TestActor::create_initial(())).unwrap();
+    let store2 = Store::<TestActor>::new(
+        "test",
+        "root_cause",
+        memory_manager.clone(),
+        None,
+        TestActor::create_initial(()),
+    )
+    .unwrap();
     let store_ref2 = system.create_root_actor("store2", store2).await.unwrap();
 
     println!("   1. Load snapshot: value=10, state_counter=0");
@@ -143,11 +188,16 @@ async fn test_root_cause_persist_state_doesnt_increment_counter() {
         println!("\n📊 RECOVERED STATE:");
         println!("   actor.value = {}", state.value);
         if state.value == 20 {
-            println!("   ❌ BUG CONFIRMED: Event applied TWICE (should be 10, got {})", state.value);
+            println!(
+                "   ❌ BUG CONFIRMED: Event applied TWICE (should be 10, got {})",
+                state.value
+            );
         }
     }
 
-    println!("\n╔════════════════════════════════════════════════════════════╗");
+    println!(
+        "\n╔════════════════════════════════════════════════════════════╗"
+    );
     println!("║                      THE ROOT CAUSE                        ║");
     println!("╠════════════════════════════════════════════════════════════╣");
     println!("║ persist_state() in store.rs:586-606                        ║");
@@ -164,5 +214,7 @@ async fn test_root_cause_persist_state_doesnt_increment_counter() {
     println!("║   if result.is_ok() {{                                     ║");
     println!("║       self.event_counter += 1  ← THIS IS MISSING!         ║");
     println!("║   }}                                                       ║");
-    println!("╚════════════════════════════════════════════════════════════╝\n");
+    println!(
+        "╚════════════════════════════════════════════════════════════╝\n"
+    );
 }

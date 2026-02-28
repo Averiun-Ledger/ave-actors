@@ -1,5 +1,3 @@
-
-
 //! RocksDB database module.
 //!
 //! This module contains the RocksDB database implementation.

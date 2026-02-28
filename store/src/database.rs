@@ -1,5 +1,3 @@
-
-
 //! Store manager
 
 use crate::error::Error;
@@ -233,7 +231,6 @@ pub trait Collection: Sync + Send + 'static {
         reverse: bool,
     ) -> Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>;
 
-
     /// Returns a vector of values in the collection that are in the given range.
     ///
     /// # Arguments
@@ -272,7 +269,9 @@ pub trait Collection: Sync + Send + 'static {
                 let mut iter = iter.peekable();
                 loop {
                     let Some((current_key, _)) = iter.peek() else {
-                        return Err(Error::EntryNotFound { key: "None".to_owned() });
+                        return Err(Error::EntryNotFound {
+                            key: "None".to_owned(),
+                        });
                     };
                     if current_key == &key {
                         break;

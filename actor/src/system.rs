@@ -49,7 +49,7 @@ impl ActorSystem {
     /// to trigger graceful shutdown.
     ///
     pub fn create(token: CancellationToken) -> (SystemRef, SystemRunner) {
-        let (event_sender, event_receiver) = mpsc::channel(10);
+        let (event_sender, event_receiver) = mpsc::channel(4);
         let system = SystemRef::new(event_sender, token);
         let runner = SystemRunner::new(event_receiver);
         (system, runner)
@@ -162,14 +162,18 @@ impl SystemRef {
     ///
     /// Returns the actor reference.
     ///
-    pub async fn get_actor<A>(&self, path: &ActorPath) -> Result<ActorRef<A>, Error>
+    pub async fn get_actor<A>(
+        &self,
+        path: &ActorPath,
+    ) -> Result<ActorRef<A>, Error>
     where
         A: Actor + Handler<A>,
     {
         let actors = self.actors.read().await;
         actors
             .get(path)
-            .and_then(|any| any.downcast_ref::<ActorRef<A>>().cloned()).ok_or_else(|| Error::NotFound { path: path.clone() })
+            .and_then(|any| any.downcast_ref::<ActorRef<A>>().cloned())
+            .ok_or_else(|| Error::NotFound { path: path.clone() })
     }
 
     /// Creates an actor in this actor system with the given path and actor type.
@@ -402,7 +406,9 @@ impl SystemRunner {
     ///
     /// Returns a new SystemRunner instance.
     ///
-    pub(crate) const fn new(event_receiver: mpsc::Receiver<SystemEvent>) -> Self {
+    pub(crate) const fn new(
+        event_receiver: mpsc::Receiver<SystemEvent>,
+    ) -> Self {
         Self { event_receiver }
     }
 
@@ -451,7 +457,9 @@ pub fn build_tracing_subscriber() {
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new("info"));
 
-        let layer = fmt::layer().with_test_writer().with_span_events(FmtSpan::NONE);
+        let layer = fmt::layer()
+            .with_test_writer()
+            .with_span_events(FmtSpan::NONE);
 
         tracing_subscriber::registry()
             .with(filter)

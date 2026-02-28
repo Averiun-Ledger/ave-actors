@@ -1,5 +1,3 @@
-
-
 //! # Errors module
 //!
 //! This module defines error types for the actor system using `thiserror`.
@@ -43,7 +41,9 @@ pub enum Error {
     /// Actor returned an unexpected response type.
     ///
     /// This error occurs when an actor's response doesn't match the expected type.
-    #[error("actor '{path}' returned unexpected response, expected: {expected}")]
+    #[error(
+        "actor '{path}' returned unexpected response, expected: {expected}"
+    )]
     UnexpectedResponse {
         /// The path of the actor that sent the unexpected response.
         path: ActorPath,

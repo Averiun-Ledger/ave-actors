@@ -1,5 +1,3 @@
-
-
 //! Event sink and subscriber pattern implementation.
 //!
 //! This module provides a sink/subscriber pattern for processing actor events.
@@ -67,18 +65,16 @@ impl<E: Event> Sink<E> {
                 Ok(event) => {
                     self.subscriber.notify(event).await;
                 }
-                Err(error) => {
-                    match error {
-                        RecvError::Closed => {
-                            debug!("Event channel closed, sink stopping");
-                            break;
-                        }
-                        RecvError::Lagged(skipped) => {
-                            warn!(skipped, "Sink lagged, skipped events");
-                            continue;
-                        }
+                Err(error) => match error {
+                    RecvError::Closed => {
+                        debug!("Event channel closed, sink stopping");
+                        break;
                     }
-                }
+                    RecvError::Lagged(skipped) => {
+                        warn!(skipped, "Sink lagged, skipped events");
+                        continue;
+                    }
+                },
             }
         }
     }

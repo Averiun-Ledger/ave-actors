@@ -7,7 +7,7 @@ use async_trait::async_trait;
 
 use tokio::sync::{mpsc, oneshot};
 
-use tracing::{error};
+use tracing::error;
 
 use std::marker::PhantomData;
 
@@ -121,16 +121,14 @@ pub type MailboxSender<A> = mpsc::Sender<BoxedMessageHandler<A>>;
 /// Created during actor initialization and split for use by different components.
 pub type Mailbox<A> = (MailboxSender<A>, MailboxReceiver<A>);
 
-/// Creates a new unbounded mailbox for an actor.
-/// The mailbox uses an unbounded channel to prevent message send operations
-/// from blocking, delegating backpressure management to the application level.
+/// Creates a new mailbox for an actor.
 ///
 /// # Returns
 ///
 /// Returns a tuple of (sender, receiver) for the actor's mailbox.
 ///
 pub fn mailbox<A>() -> Mailbox<A> {
-    mpsc::channel(10000)
+    mpsc::channel(1024)
 }
 
 /// Handle helper for sending messages to an actor.
@@ -181,11 +179,12 @@ where
         message: A::Message,
     ) -> Result<(), Error> {
         let msg = ActorMessage::new(message, sender, None);
-        self.sender.send(Box::new(msg)).await.map_err(|error| {
-            Error::Send {
+        self.sender
+            .send(Box::new(msg))
+            .await
+            .map_err(|error| Error::Send {
                 reason: error.to_string(),
-            }
-        })
+            })
     }
 
     /// Sends a message to the actor and waits for a response (request-response).
@@ -213,16 +212,15 @@ where
         let (response_sender, response_receiver) = oneshot::channel();
         let msg = ActorMessage::new(message, sender, Some(response_sender));
 
-        self.sender.send(Box::new(msg)).await.map_err(|error| {
-            Error::Send {
+        self.sender
+            .send(Box::new(msg))
+            .await
+            .map_err(|error| Error::Send {
                 reason: error.to_string(),
-            }
-        })?;
+            })?;
 
-        response_receiver.await.map_err(|error| {
-            Error::Send {
-                reason: error.to_string(),
-            }
+        response_receiver.await.map_err(|error| Error::Send {
+            reason: error.to_string(),
         })?
     }
 

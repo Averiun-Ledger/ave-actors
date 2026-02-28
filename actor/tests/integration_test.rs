@@ -1,12 +1,10 @@
-
-
 // Integrations tests for the actor module
 
+use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
     Event, Handler, Message, Response, build_tracing_subscriber,
 };
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
@@ -55,7 +53,10 @@ impl Actor for TestActor {
     type Response = TestResponse;
     type Event = TestEvent;
 
-    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
         info_span!("TestActor", id = %id)
     }
 
@@ -112,7 +113,12 @@ impl Handler<TestActor> for TestActor {
         error: Error,
         ctx: &mut ActorContext<TestActor>,
     ) {
-        assert_eq!(error, Error::Functional { description: "Value is too high".to_owned() });
+        assert_eq!(
+            error,
+            Error::Functional {
+                description: "Value is too high".to_owned()
+            }
+        );
         ctx.publish_event(TestEvent(0)).await.unwrap();
     }
 
@@ -124,7 +130,9 @@ impl Handler<TestActor> for TestActor {
     ) -> ChildAction {
         assert_eq!(
             error,
-            Error::Functional { description: "Value produces a fault".to_owned() }
+            Error::Functional {
+                description: "Value produces a fault".to_owned()
+            }
         );
         ctx.publish_event(TestEvent(100)).await.unwrap();
         ChildAction::Stop
@@ -173,10 +181,12 @@ impl Actor for ChildActor {
     type Response = ChildResponse;
     type Event = ChildEvent;
 
-    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
         info_span!("ChildActor", id = %id)
     }
-
 }
 
 // Implements handler for child actor.

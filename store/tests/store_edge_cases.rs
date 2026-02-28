@@ -12,7 +12,8 @@ use ave_actors_store::{
 
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, EncryptedKey,
-    Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber,
+    Error as ActorError, Event, Handler, Message, Response,
+    build_tracing_subscriber,
 };
 
 use async_trait::async_trait;
@@ -158,8 +159,7 @@ impl Handler<EncryptedActor> for EncryptedActor {
                 data: self.data.clone(),
             }),
             EncryptedMessage::TriggerRecovery => {
-                if let Ok(store) = ctx.get_child::<Store<Self>>("store").await
-                {
+                if let Ok(store) = ctx.get_child::<Store<Self>>("store").await {
                     let response = store.ask(StoreCommand::Recover).await?;
                     if let StoreResponse::State(Some(state)) = response {
                         self.update(state);
@@ -182,8 +182,7 @@ impl Handler<EncryptedActor> for EncryptedActor {
                 Ok(EncryptedResponse::Success)
             }
             EncryptedMessage::Purge => {
-                if let Ok(store) = ctx.get_child::<Store<Self>>("store").await
-                {
+                if let Ok(store) = ctx.get_child::<Store<Self>>("store").await {
                     store.ask(StoreCommand::Purge).await?;
                     Ok(EncryptedResponse::Success)
                 } else {

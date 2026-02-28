@@ -1,18 +1,22 @@
-
-
 //! # SQLite database backend.
 //!
 //! This module contains the SQLite database backend implementation.
 //!
 
 use ave_actors_store::{
-    Error, config::{MachineSpec, resolve_spec}, database::{Collection, DbManager, State}
+    Error,
+    config::{MachineSpec, resolve_spec},
+    database::{Collection, DbManager, State},
 };
 
 use rusqlite::{Connection, OpenFlags, params};
 use tracing::{debug, error, info, warn};
 
-use std::{collections::VecDeque, path::PathBuf, sync::{Arc, Mutex}};
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use std::{fs, path::Path};
 
 type EntryIterator = Box<dyn Iterator<Item = (String, Vec<u8>)>>;
@@ -53,7 +57,11 @@ impl SqliteManager {
     /// - The directory cannot be created
     /// - The SQLite connection cannot be opened
     ///
-    pub fn new(path: &PathBuf, durability: bool, spec: Option<MachineSpec>) -> Result<Self, Error> {
+    pub fn new(
+        path: &PathBuf,
+        durability: bool,
+        spec: Option<MachineSpec>,
+    ) -> Result<Self, Error> {
         info!("Creating SQLite database manager");
         if !Path::new(&path).exists() {
             debug!("Path does not exist, creating it");
@@ -134,21 +142,30 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
             })?;
         }
 
-        debug!(table = identifier, prefix = prefix, "Collection table created");
+        debug!(
+            table = identifier,
+            prefix = prefix,
+            "Collection table created"
+        );
         Ok(SqliteCollection::new(self.conn.clone(), identifier, prefix))
     }
 
-    
     fn stop(self) -> Result<(), Error> {
         debug!("Stopping SQLite manager, flushing WAL");
         let conn = self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock on stop");
-            Error::Store { operation: "lock_connection".to_owned(), reason: format!("{}", e) }
+            Error::Store {
+                operation: "lock_connection".to_owned(),
+                reason: format!("{}", e),
+            }
         })?;
         conn.execute_batch("PRAGMA optimize; PRAGMA wal_checkpoint(TRUNCATE);")
             .map_err(|e| {
                 error!(error = %e, "Failed to checkpoint WAL on stop");
-                Error::Store { operation: "wal_checkpoint".to_owned(), reason: format!("{}", e) }
+                Error::Store {
+                    operation: "wal_checkpoint".to_owned(),
+                    reason: format!("{}", e),
+                }
             })?;
         drop(conn);
         debug!("SQLite WAL checkpoint complete");
@@ -204,7 +221,7 @@ impl SqliteCollection {
     }
 
     /// Create a new iterator filtering by prefix.
-fn make_iter(&self, reverse: bool) -> EntryIterator {
+    fn make_iter(&self, reverse: bool) -> EntryIterator {
         Box::new(SqliteChunkedIterator::new(
             self.conn.clone(),
             self.table.clone(),
@@ -261,7 +278,7 @@ impl SqliteChunkedIterator {
         };
 
         let order = if self.reverse { "DESC" } else { "ASC" };
-        let cmp   = if self.reverse { "<" } else { ">" };
+        let cmp = if self.reverse { "<" } else { ">" };
 
         let rows: Vec<(String, Vec<u8>)> = match &self.last_key {
             None => {
@@ -270,8 +287,10 @@ impl SqliteChunkedIterator {
                     self.table, order, ITER_CHUNK_SIZE
                 );
                 match conn.prepare(&q).and_then(|mut s| {
-                    s.query_map(params![self.prefix], |r| Ok((r.get(0)?, r.get(1)?)))
-                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    s.query_map(params![self.prefix], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
                 }) {
                     Ok(rows) => rows,
                     Err(e) => {
@@ -282,15 +301,16 @@ impl SqliteChunkedIterator {
                 }
             }
             Some(last) => {
-                
                 let q = format!(
                     "SELECT sn, value FROM {} WHERE prefix = ?1 AND sn {} ?2 ORDER BY sn {} LIMIT {}",
                     self.table, cmp, order, ITER_CHUNK_SIZE
                 );
                 let last = last.clone();
                 match conn.prepare(&q).and_then(|mut s| {
-                    s.query_map(params![self.prefix, last], |r| Ok((r.get(0)?, r.get(1)?)))
-                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    s.query_map(params![self.prefix, last], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
                 }) {
                     Ok(rows) => rows,
                     Err(e) => {
@@ -471,7 +491,11 @@ impl Collection for SqliteCollection {
 }
 
 /// Open a SQLite database connection.
-pub fn open<P: AsRef<Path>>(path: P, durability: bool, spec: Option<MachineSpec>) -> Result<Connection, Error> {
+pub fn open<P: AsRef<Path>>(
+    path: P,
+    durability: bool,
+    spec: Option<MachineSpec>,
+) -> Result<Connection, Error> {
     let path = path.as_ref();
     debug!(path = %path.display(), "Opening SQLite database");
     let flags =
@@ -512,13 +536,15 @@ pub fn open<P: AsRef<Path>>(path: P, durability: bool, spec: Option<MachineSpec>
     )
     .map_err(|e| {
         error!(error = %e, "Failed to execute SQLite PRAGMA statements");
-        Error::Store { operation: "execute_batch".to_owned(), reason: format!("{}", e) }
+        Error::Store {
+            operation: "execute_batch".to_owned(),
+            reason: format!("{}", e),
+        }
     })?;
 
     debug!("SQLite database opened and configured successfully");
     Ok(conn)
 }
-
 
 /// Compute SQLite tuning parameters from available RAM.
 ///
@@ -563,7 +589,6 @@ struct SqliteTuning {
     mmap_size_bytes: i64,
 }
 
-
 #[cfg(test)]
 mod tests {
     pub fn create_temp_dir() -> String {
@@ -585,13 +610,8 @@ mod tests {
         fn default() -> Self {
             let path = format!("{}/database.db", create_temp_dir());
             let conn = open(&path, false, None)
-                .map_err(|e| {
-                    Error::CreateStore {
-                        reason: format!(
-                        "fail SQLite open connection: {}",
-                        e
-                    ),
-                    }
+                .map_err(|e| Error::CreateStore {
+                    reason: format!("fail SQLite open connection: {}", e),
                 })
                 .expect("Cannot open the database ");
 

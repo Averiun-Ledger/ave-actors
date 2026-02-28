@@ -1,5 +1,3 @@
-
-
 //! # Actor runner
 //!
 
@@ -38,7 +36,7 @@ pub struct ActorRunner<A: Actor> {
     actor: A,
     lifecycle: ActorLifecycle,
     receiver: MailboxReceiver<A>,
-    
+
     event_sender: EventSender<A::Event>,
 
     // si es root me para alguien y sino mi padre.
@@ -66,10 +64,10 @@ where
         parent_sender: Option<ChildErrorSender>,
     ) -> (Self, ActorRef<A>, StopSender) {
         let (sender, receiver) = mailbox();
-        let (stop_sender, stop_receiver) = mpsc::channel(100);
-        let (error_sender, error_receiver) = mpsc::channel(1000);
-        let (event_sender, event_receiver) = broadcast::channel(10000);
-        let (inner_sender, inner_receiver) = mpsc::channel(10000);
+        let (stop_sender, stop_receiver) = mpsc::channel(4);
+        let (error_sender, error_receiver) = mpsc::channel(256);
+        let (event_sender, event_receiver) = broadcast::channel(1024);
+        let (inner_sender, inner_receiver) = mpsc::channel(1024);
         let helper = HandleHelper::new(sender);
 
         //let error_helper = ErrorHelper::new(error_sender);
@@ -111,7 +109,7 @@ where
             system.clone(),
             self.error_sender.clone(),
             self.inner_sender.clone(),
-            span
+            span,
         );
 
         // Main loop of the actor.
@@ -276,7 +274,8 @@ where
             }
             InnerAction::Error(error) => {
                 if let Some(parent_helper) = self.parent_sender.as_mut()
-                    && let Err(err) = parent_helper.send(ChildError::Error { error }).await
+                    && let Err(err) =
+                        parent_helper.send(ChildError::Error { error }).await
                 {
                     error!(error = %err, "Failed to send error to parent");
                 }
@@ -285,10 +284,13 @@ where
                 // If the actor has a parent, send the fail to the parent.
                 if let Some(parent_helper) = self.parent_sender.as_mut() {
                     let (action_sender, action_receiver) = oneshot::channel();
-                    if let Err(err) = parent_helper.send(ChildError::Fault {
-                        error,
-                        sender: action_sender,
-                    }).await {
+                    if let Err(err) = parent_helper
+                        .send(ChildError::Fault {
+                            error,
+                            sender: action_sender,
+                        })
+                        .await
+                    {
                         error!(error = %err, "Failed to send fail to parent");
                     } else {
                         // Sets the state from action.
@@ -296,7 +298,8 @@ where
                             ctx.clean_error();
                             match action {
                                 ChildAction::Stop => {}
-                                ChildAction::Restart | ChildAction::Delegate => {
+                                ChildAction::Restart
+                                | ChildAction::Delegate => {
                                     debug!("Parent requested actor restart");
                                     self.lifecycle = ActorLifecycle::Restarted;
                                 }
@@ -326,9 +329,16 @@ where
             }
             SupervisionStrategy::Retry(mut retry_strategy) => {
                 if *retries < retry_strategy.max_retries() {
-                    debug!(retries = *retries, max_retries = retry_strategy.max_retries(), "Applying retry strategy");
+                    debug!(
+                        retries = *retries,
+                        max_retries = retry_strategy.max_retries(),
+                        "Applying retry strategy"
+                    );
                     if let Some(duration) = retry_strategy.next_backoff() {
-                        debug!(backoff_ms = duration.as_millis(), "Waiting before retry");
+                        debug!(
+                            backoff_ms = duration.as_millis(),
+                            "Waiting before retry"
+                        );
                         tokio::time::sleep(duration).await;
                     }
                     *retries += 1;
@@ -343,7 +353,10 @@ where
                         }
                     }
                 } else {
-                    error!(retries = *retries, "Max retries exceeded, stopping actor");
+                    error!(
+                        retries = *retries,
+                        "Max retries exceeded, stopping actor"
+                    );
                     self.lifecycle = ActorLifecycle::Stopped;
                 }
             }
@@ -368,14 +381,18 @@ mod tests {
     use super::*;
 
     use crate::{
-        Error, actor::{Actor, ActorContext, Event, Handler, Message}, build_tracing_subscriber, supervision::{FixedIntervalStrategy, Strategy, SupervisionStrategy}, system::SystemRef
+        Error,
+        actor::{Actor, ActorContext, Event, Handler, Message},
+        build_tracing_subscriber,
+        supervision::{FixedIntervalStrategy, Strategy, SupervisionStrategy},
+        system::SystemRef,
     };
     use async_trait::async_trait;
     use serde::{Deserialize, Serialize};
 
+    use borsh::{BorshDeserialize, BorshSerialize};
     use tokio_util::sync::CancellationToken;
     use tracing::{Instrument, info, info_span};
-    use borsh::{BorshSerialize, BorshDeserialize};
 
     use std::time::Duration;
 
@@ -389,7 +406,9 @@ mod tests {
         Stop,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+    #[derive(
+        Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+    )]
     pub struct TestEvent;
 
     impl Event for TestEvent {}
@@ -405,9 +424,12 @@ mod tests {
         type Response = ();
         type Event = TestEvent;
 
-            fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
-        info_span!("TestActor", id = %id)
-    }
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("TestActor", id = %id)
+        }
 
         fn supervision_strategy() -> SupervisionStrategy {
             SupervisionStrategy::Retry(Strategy::FixedInterval(
@@ -420,7 +442,9 @@ mod tests {
             _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             if self.failed {
-                Err(Error::FunctionalCritical { description: "PreStart failed".to_owned() })
+                Err(Error::FunctionalCritical {
+                    description: "PreStart failed".to_owned(),
+                })
             } else {
                 Ok(())
             }
@@ -479,9 +503,19 @@ mod tests {
         let inner_system = system.clone();
 
         // Init the actor runner.
-        tokio::spawn(async move {
-            runner.init(inner_system, stop_sender, None, TestActor::get_span("id", None)).await;
-        }.instrument(TestActor::get_span("spawn", None)));
+        tokio::spawn(
+            async move {
+                runner
+                    .init(
+                        inner_system,
+                        stop_sender,
+                        None,
+                        TestActor::get_span("id", None),
+                    )
+                    .await;
+            }
+            .instrument(TestActor::get_span("spawn", None)),
+        );
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         actor_ref

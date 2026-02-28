@@ -1,5 +1,3 @@
-
-
 //! Supervision strategies
 //!
 
@@ -63,9 +61,7 @@ impl RetryStrategy for Strategy {
         match self {
             Self::NoInterval(strategy) => strategy.max_retries(),
             Self::FixedInterval(strategy) => strategy.max_retries(),
-            Self::CustomIntervalStrategy(strategy) => {
-                strategy.max_retries()
-            }
+            Self::CustomIntervalStrategy(strategy) => strategy.max_retries(),
         }
     }
 
@@ -73,9 +69,7 @@ impl RetryStrategy for Strategy {
         match self {
             Self::NoInterval(strategy) => strategy.next_backoff(),
             Self::FixedInterval(strategy) => strategy.next_backoff(),
-            Self::CustomIntervalStrategy(strategy) => {
-                strategy.next_backoff()
-            }
+            Self::CustomIntervalStrategy(strategy) => strategy.next_backoff(),
         }
     }
 }

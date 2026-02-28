@@ -44,12 +44,12 @@ impl MachineProfile {
     /// Canonical RAM for this profile in megabytes.
     pub const fn ram_mb(self) -> u64 {
         match self {
-            Self::Nano    =>   512,
-            Self::Micro   =>  1024,
-            Self::Small   =>  2048,
-            Self::Medium  =>  4096,
-            Self::Large   =>  8192,
-            Self::XLarge  => 16384,
+            Self::Nano => 512,
+            Self::Micro => 1024,
+            Self::Small => 2048,
+            Self::Medium => 4096,
+            Self::Large => 8192,
+            Self::XLarge => 16384,
             Self::XXLarge => 32768,
         }
     }
@@ -57,12 +57,12 @@ impl MachineProfile {
     /// vCPU count for this profile.
     pub const fn cpu_cores(self) -> usize {
         match self {
-            Self::Nano    => 2,
-            Self::Micro   => 2,
-            Self::Small   => 2,
-            Self::Medium  => 2,
-            Self::Large   => 2,
-            Self::XLarge  => 4,
+            Self::Nano => 2,
+            Self::Micro => 2,
+            Self::Small => 2,
+            Self::Medium => 2,
+            Self::Large => 2,
+            Self::XLarge => 4,
             Self::XXLarge => 8,
         }
     }
@@ -71,12 +71,12 @@ impl MachineProfile {
 impl Display for MachineProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Nano    => write!(f, "nano"),
-            Self::Micro   => write!(f, "micro"),
-            Self::Small   => write!(f, "small"),
-            Self::Medium  => write!(f, "medium"),
-            Self::Large   => write!(f, "large"),
-            Self::XLarge  => write!(f, "xlarge"),
+            Self::Nano => write!(f, "nano"),
+            Self::Micro => write!(f, "micro"),
+            Self::Small => write!(f, "small"),
+            Self::Medium => write!(f, "medium"),
+            Self::Large => write!(f, "large"),
+            Self::XLarge => write!(f, "xlarge"),
             Self::XXLarge => write!(f, "2xlarge"),
         }
     }
@@ -100,10 +100,9 @@ pub fn resolve_spec(spec: Option<MachineSpec>) -> ResolvedSpec {
             ram_mb: p.ram_mb(),
             cpu_cores: p.cpu_cores(),
         },
-        Some(MachineSpec::Custom { ram_mb, cpu_cores }) => ResolvedSpec {
-            ram_mb,
-            cpu_cores,
-        },
+        Some(MachineSpec::Custom { ram_mb, cpu_cores }) => {
+            ResolvedSpec { ram_mb, cpu_cores }
+        }
         None => ResolvedSpec {
             ram_mb: detect_total_memory_mb().unwrap_or(4096),
             cpu_cores: detect_cpu_cores(),

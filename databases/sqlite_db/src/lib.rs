@@ -1,5 +1,3 @@
-
-
 //! # SQLite database module.
 //!
 //! This module contains the SQLite database backend implementation.

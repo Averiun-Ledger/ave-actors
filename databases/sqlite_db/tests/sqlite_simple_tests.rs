@@ -1,10 +1,7 @@
-
-
 //! Simple edge case tests for SQLite database to increase coverage
 
-
 use ave_actors_sqlite::SqliteManager;
-use ave_actors_store::{database::{Collection, DbManager, State}};
+use ave_actors_store::database::{Collection, DbManager, State};
 use tempfile::tempdir;
 
 #[test]

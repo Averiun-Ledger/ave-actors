@@ -48,7 +48,10 @@ impl Actor for TestActor {
     type Response = TestResponse;
     type Event = SinkTestEvent;
 
-    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
         info_span!("TestActor", id = %id)
     }
 }
@@ -246,7 +249,10 @@ impl Actor for FailingHandlerActor {
     type Response = TestResponse;
     type Event = SinkTestEvent;
 
-    fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
         info_span!("FailingHandlerActor", id = %id)
     }
 }
@@ -329,7 +335,10 @@ async fn test_message_serialization_edge_cases() {
         type Response = TestResponse;
         type Event = SinkTestEvent;
 
-        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
             info_span!("ComplexHandlerActor", id = %id)
         }
     }
@@ -400,7 +409,10 @@ async fn test_message_ordering_and_mailbox() {
         type Response = TestResponse;
         type Event = SinkTestEvent;
 
-        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
             info_span!("OrderingActor", id = %id)
         }
     }
@@ -474,7 +486,10 @@ async fn test_handler_context_operations() {
         type Response = TestResponse;
         type Event = SinkTestEvent;
 
-        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
             info_span!("ContextActor", id = %id)
         }
     }

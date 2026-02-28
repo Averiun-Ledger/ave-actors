@@ -1,20 +1,26 @@
 //! Test to investigate why FullPersistence doesn't recover state
 
-use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event, Handler, Message, Response, build_tracing_subscriber};
-use ave_actors_store::store::{PersistentActor, FullPersistence};
-use ave_actors_store::memory::MemoryManager;
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
-use tracing::info_span;
+use ave_actors_actor::{
+    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
+    Handler, Message, Response, build_tracing_subscriber,
+};
+use ave_actors_store::memory::MemoryManager;
+use ave_actors_store::store::{FullPersistence, PersistentActor};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 
 // Shared manager for testing
-static SHARED_MANAGER_FULL_RECOVERY: OnceLock<Arc<TokioMutex<MemoryManager>>> = OnceLock::new();
+static SHARED_MANAGER_FULL_RECOVERY: OnceLock<Arc<TokioMutex<MemoryManager>>> =
+    OnceLock::new();
 
-#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 struct CounterActor {
     count: i32,
 }
@@ -32,7 +38,9 @@ struct CounterResponse {
 }
 impl Response for CounterResponse {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 struct Incremented;
 impl Event for Incremented {}
 
@@ -42,21 +50,31 @@ impl Actor for CounterActor {
     type Response = CounterResponse;
     type Event = Incremented;
 
-        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
-            info_span!("CounterActor", id = %id)
-        }
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("CounterActor", id = %id)
+    }
 
-    async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         let manager_ref = SHARED_MANAGER_FULL_RECOVERY.get_or_init(|| {
             Arc::new(TokioMutex::new(MemoryManager::default()))
         });
 
         let manager = manager_ref.lock().await.clone();
 
-        self.start_store("counter_test_full", None, ctx, manager, None).await
+        self.start_store("counter_test_full", None, ctx, manager, None)
+            .await
     }
 
-    async fn pre_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+    async fn pre_stop(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         self.stop_store(ctx).await
     }
 }
@@ -72,14 +90,10 @@ impl Handler<CounterActor> for CounterActor {
         match msg {
             CounterMessage::Increment => {
                 self.persist(&Incremented, ctx).await?;
-                Ok(CounterResponse {
-                    count: self.count,
-                })
+                Ok(CounterResponse { count: self.count })
             }
             CounterMessage::GetCount => {
-                Ok(CounterResponse {
-                    count: self.count,
-                })
+                Ok(CounterResponse { count: self.count })
             }
         }
     }
@@ -95,7 +109,11 @@ impl PersistentActor for CounterActor {
     }
 
     fn apply(&mut self, _event: &Self::Event) -> Result<(), ActorError> {
-        println!("  [APPLY] Incrementing count from {} to {}", self.count, self.count + 1);
+        println!(
+            "  [APPLY] Incrementing count from {} to {}",
+            self.count,
+            self.count + 1
+        );
         self.count += 1;
         Ok(())
     }
@@ -107,9 +125,13 @@ async fn test_full_persistence_doesnt_recover_state() {
     let (system, mut runner) = ActorSystem::create(CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    println!("\n╔════════════════════════════════════════════════════════════╗");
+    println!(
+        "\n╔════════════════════════════════════════════════════════════╗"
+    );
     println!("║     FullPersistence State Recovery Investigation          ║");
-    println!("╚════════════════════════════════════════════════════════════╝\n");
+    println!(
+        "╚════════════════════════════════════════════════════════════╝\n"
+    );
 
     // First lifecycle: persist multiple events
     println!("🔷 FIRST LIFECYCLE: Persisting events");
@@ -126,7 +148,10 @@ async fn test_full_persistence_doesnt_recover_state() {
 
     let final_count = actor_ref.ask(CounterMessage::GetCount).await.unwrap();
     println!("   Final count before stop: {}", final_count.count);
-    assert_eq!(final_count.count, 3, "Should have count=3 after 3 increments");
+    assert_eq!(
+        final_count.count, 3,
+        "Should have count=3 after 3 increments"
+    );
 
     println!("\n🛑 STOPPING ACTOR (should create snapshot)");
     actor_ref.ask_stop().await.unwrap();
@@ -139,17 +164,23 @@ async fn test_full_persistence_doesnt_recover_state() {
         .await
         .unwrap();
 
-    let recovered_count = actor_ref2.ask(CounterMessage::GetCount).await.unwrap();
+    let recovered_count =
+        actor_ref2.ask(CounterMessage::GetCount).await.unwrap();
     println!("   Recovered count: {}", recovered_count.count);
 
     println!("\n📊 RESULTS:");
     if recovered_count.count == 0 {
         println!("   ❌ BUG: State NOT recovered (count=0, expected 3)");
-        println!("   ❌ Actor started with initial state instead of recovering");
+        println!(
+            "   ❌ Actor started with initial state instead of recovering"
+        );
     } else if recovered_count.count == 3 {
         println!("   ✅ OK: State recovered correctly (count=3)");
     } else {
-        println!("   ⚠️  UNEXPECTED: count={} (expected 3)", recovered_count.count);
+        println!(
+            "   ⚠️  UNEXPECTED: count={} (expected 3)",
+            recovered_count.count
+        );
     }
 
     assert_eq!(

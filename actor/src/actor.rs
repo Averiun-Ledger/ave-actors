@@ -1,5 +1,3 @@
-
-
 //! # Actor
 //!
 //! The `actor` module provides the `Actor` trait and the `ActorRef` type. The `Actor` trait is the
@@ -42,7 +40,7 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     /// Child action senders.
     child_senders: Vec<StopSender>,
 
-    span: tracing::Span
+    span: tracing::Span,
 }
 
 impl<A> ActorContext<A>
@@ -147,7 +145,9 @@ where
     ///
     /// Returns the actor parent or None if the actor is root actor.
     ///
-    pub async fn get_parent<P: Actor + Handler<P>>(&self) -> Result<ActorRef<P>, Error> {
+    pub async fn get_parent<P: Actor + Handler<P>>(
+        &self,
+    ) -> Result<ActorRef<P>, Error> {
         self.system.get_actor(&self.path.parent()).await
     }
 
@@ -201,7 +201,6 @@ where
     ///   If None, the stop is fire-and-forget.
     ///
     pub async fn stop(&self, sender: Option<oneshot::Sender<()>>) {
-
         let _ = self.stop.send(sender).await;
     }
 
@@ -221,10 +220,13 @@ where
     ///
     pub async fn publish_event(&self, event: A::Event) -> Result<(), Error> {
         self.inner_sender
-            .send(InnerAction::Event(event)).await
+            .send(InnerAction::Event(event))
+            .await
             .map_err(|e| {
                 tracing::error!(error = %e, "Failed to publish event");
-                Error::SendEvent { reason: e.to_string() }
+                Error::SendEvent {
+                    reason: e.to_string(),
+                }
             })
     }
 
@@ -245,10 +247,13 @@ where
     pub async fn emit_error(&mut self, error: Error) -> Result<(), Error> {
         tracing::warn!(error = %error, "Emitting error");
         self.inner_sender
-            .send(InnerAction::Error(error)).await
+            .send(InnerAction::Error(error))
+            .await
             .map_err(|e| {
                 tracing::error!(error = %e, "Failed to emit error");
-                Error::Send { reason: e.to_string() }
+                Error::Send {
+                    reason: e.to_string(),
+                }
             })
     }
 
@@ -273,10 +278,13 @@ where
         self.set_error(error.clone());
         // Send fail to parent actor.
         self.inner_sender
-            .send(InnerAction::Fail(error.clone())).await
+            .send(InnerAction::Fail(error.clone()))
+            .await
             .map_err(|e| {
                 tracing::error!(error = %e, "Failed to emit fail");
-                Error::Send { reason: e.to_string() }
+                Error::Send {
+                    reason: e.to_string(),
+                }
             })
     }
 
@@ -309,7 +317,12 @@ where
         let path = self.path.clone() / name;
         let result = self
             .system
-            .create_actor_path(path, actor, Some(self.error_sender.clone()), C::get_span(name, Some(self.span.clone())))
+            .create_actor_path(
+                path,
+                actor,
+                Some(self.error_sender.clone()),
+                C::get_span(name, Some(self.span.clone())),
+            )
             .await;
 
         match result {
@@ -524,7 +537,9 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
 
     /// Create event from response.
     fn from_response(_response: Self::Response) -> Result<Self::Event, Error> {
-        Err(Error::Functional { description: "Not implemented".to_string() })
+        Err(Error::Functional {
+            description: "Not implemented".to_string(),
+        })
     }
 }
 
@@ -727,12 +742,12 @@ where
         if self.stop_sender.send(Some(response_sender)).await.is_err() {
             Ok(())
         } else {
-            response_receiver
-                .await
-                .map_err(|error| {
-                    tracing::error!(error = %error, "Failed to confirm actor stop");
-                    Error::Send { reason: error.to_string() }
-                })
+            response_receiver.await.map_err(|error| {
+                tracing::error!(error = %error, "Failed to confirm actor stop");
+                Error::Send {
+                    reason: error.to_string(),
+                }
+            })
         }
     }
 
@@ -802,7 +817,10 @@ mod test {
 
     use super::*;
 
-    use crate::{build_tracing_subscriber, sink::{Sink, Subscriber}};
+    use crate::{
+        build_tracing_subscriber,
+        sink::{Sink, Subscriber},
+    };
 
     use serde::{Deserialize, Serialize};
     use tokio::sync::mpsc;
@@ -837,7 +855,10 @@ mod test {
         type Event = TestEvent;
         type Response = TestResponse;
 
-        fn get_span(id: &str, _parent_span: Option<tracing::Span>) -> tracing::Span {
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
             info_span!("TestActor", id = %id)
         }
     }

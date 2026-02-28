@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use memsecurity::{EncryptedMem};
+use memsecurity::EncryptedMem;
 use zeroize::Zeroizing;
 
 use crate::error::Error;
@@ -49,7 +49,9 @@ impl EncryptedKey {
         })?;
 
         tracing::debug!("EncryptedKey created");
-        Ok(Self { key: Arc::new(encrypted_mem) })
+        Ok(Self {
+            key: Arc::new(encrypted_mem),
+        })
     }
 
     /// Get the decrypted 32-byte key in a zeroizing container.
@@ -69,7 +71,9 @@ impl EncryptedKey {
     /// corruption or a bug in the encryption implementation.
     pub fn key(&self) -> Result<Zeroizing<[u8; 32]>, Error> {
         let decrypted = self.key.decrypt().map_err(|_| {
-            tracing::error!("Key decryption failed, possible memory corruption");
+            tracing::error!(
+                "Key decryption failed, possible memory corruption"
+            );
             Error::Helper {
                 name: "decryption".to_owned(),
                 reason: "Failed to decrypt key".to_owned(),
