@@ -113,7 +113,7 @@ impl Handler<CounterTestActor> for CounterTestActor {
 #[tokio::test]
 async fn test_event_counter_starts_at_zero() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let store = Store::<CounterTestActor>::new(
@@ -141,7 +141,7 @@ async fn test_event_counter_starts_at_zero() {
 
 async fn test_event_counter_after_first_event() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let store = Store::<CounterTestActor>::new(
@@ -193,7 +193,7 @@ async fn test_event_counter_after_first_event() {
 
 async fn test_event_counter_multiple_events() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let store = Store::<CounterTestActor>::new(
@@ -246,7 +246,7 @@ async fn test_event_counter_multiple_events() {
 
 async fn test_state_counter_after_snapshot() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let store = Store::<CounterTestActor>::new(
@@ -296,7 +296,7 @@ async fn test_state_counter_after_snapshot() {
 
 async fn test_recovery_with_events_after_snapshot() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let store = Store::<CounterTestActor>::new(
@@ -355,7 +355,7 @@ async fn test_recovery_with_events_after_snapshot() {
 
 async fn test_recovery_without_snapshot() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let store = Store::<CounterTestActor>::new(
@@ -396,7 +396,7 @@ async fn test_recovery_without_snapshot() {
 
 async fn test_snapshot_at_zero() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let store = Store::<CounterTestActor>::new(
@@ -443,7 +443,7 @@ async fn test_snapshot_at_zero() {
 
 async fn test_last_events_from_positions() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let store = Store::<CounterTestActor>::new(
@@ -519,7 +519,7 @@ async fn test_last_events_from_positions() {
 
 async fn test_multiple_snapshots_and_recoveries() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let store = Store::<CounterTestActor>::new(
@@ -595,7 +595,7 @@ async fn test_multiple_snapshots_and_recoveries() {
 
 async fn test_event_counter_with_encryption() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let encrypt_key =

@@ -109,7 +109,7 @@ impl PersistentActor for DebugActor {
 
 async fn test_debug_light_persistence_counters() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let memory_manager = MemoryManager::default();

@@ -117,7 +117,7 @@ impl PersistentActor for PathActor {
 #[tokio::test]
 async fn test_path_mismatch_scenario() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     println!("\n╔═══════════════════════════════════════════════════════════╗");
@@ -160,7 +160,7 @@ async fn test_path_mismatch_scenario() {
 #[tokio::test]
 async fn test_explicit_prefix_usage() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     println!("\n╔═══════════════════════════════════════════════════════════╗");

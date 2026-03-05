@@ -123,7 +123,7 @@ impl Subscriber<SinkTestEvent> for CollectingSubscriber {
 #[tokio::test]
 async fn test_sink_basic_functionality() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = TestActor { counter: 0 };
@@ -170,7 +170,7 @@ async fn test_sink_basic_functionality() {
 #[tokio::test]
 async fn test_sink_with_failing_subscriber() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = TestActor { counter: 0 };
@@ -204,7 +204,7 @@ async fn test_sink_with_failing_subscriber() {
 #[tokio::test]
 async fn test_sink_with_closed_receiver() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = TestActor { counter: 0 };
@@ -286,7 +286,7 @@ impl Handler<FailingHandlerActor> for FailingHandlerActor {
 #[tokio::test]
 async fn test_handler_error_scenarios() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = FailingHandlerActor {
@@ -362,7 +362,7 @@ async fn test_message_serialization_edge_cases() {
         }
     }
 
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = ComplexHandlerActor;
@@ -432,7 +432,7 @@ async fn test_message_ordering_and_mailbox() {
         }
     }
 
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = OrderingActor {
@@ -525,7 +525,7 @@ async fn test_handler_context_operations() {
         }
     }
 
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = ContextActor {

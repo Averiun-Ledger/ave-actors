@@ -257,7 +257,7 @@ impl Handler<FailingActor> for FailingActor {
 async fn test_actor_with_retry_supervision() {
     build_tracing_subscriber();
 
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = EdgeCaseActor {
@@ -282,7 +282,7 @@ async fn test_actor_with_retry_supervision() {
 #[tokio::test]
 async fn test_actor_with_stop_supervision() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = FailingActor;
@@ -321,7 +321,7 @@ async fn test_no_interval_strategy() {
 #[tokio::test]
 async fn test_actor_ref_operations() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = EdgeCaseActor {
@@ -353,7 +353,7 @@ async fn test_actor_ref_operations() {
 #[tokio::test]
 async fn test_event_subscription() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = EdgeCaseActor {
@@ -379,7 +379,7 @@ async fn test_event_subscription() {
 #[tokio::test]
 async fn test_child_actor_management() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let parent = EdgeCaseActor {
@@ -412,7 +412,7 @@ async fn test_child_actor_management() {
 #[tokio::test]
 async fn test_error_and_fault_handling() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let parent = EdgeCaseActor {
@@ -459,7 +459,7 @@ async fn test_error_and_fault_handling() {
 #[tokio::test]
 async fn test_system_helpers() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     #[derive(Clone)]
@@ -482,7 +482,7 @@ async fn test_system_helpers() {
 #[tokio::test]
 async fn test_system_children_listing() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = EdgeCaseActor {
@@ -510,7 +510,7 @@ async fn test_system_children_listing() {
 #[tokio::test]
 async fn test_retry_actor_functionality() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     // Create target actor for retry
@@ -545,7 +545,7 @@ async fn test_retry_actor_functionality() {
 #[tokio::test]
 async fn test_system_stop() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     let runner_handle = tokio::spawn(async move { runner.run().await });
 
     let actor = EdgeCaseActor {

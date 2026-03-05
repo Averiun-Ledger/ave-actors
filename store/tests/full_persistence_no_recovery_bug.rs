@@ -122,7 +122,7 @@ impl PersistentActor for CounterActor {
 #[tokio::test]
 async fn test_full_persistence_doesnt_recover_state() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     println!(

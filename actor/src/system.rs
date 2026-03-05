@@ -18,6 +18,40 @@ use tracing::{Instrument, Span, debug, error, warn};
 
 use std::{any::Any, collections::HashMap, sync::Arc};
 
+/// The reason why the actor system stopped.
+///
+/// Returned by [`SystemRunner::run()`] so the caller can decide the appropriate
+/// exit code or recovery action.
+///
+/// # Example
+///
+/// ```ignore
+/// let reason = runner.run().await;
+/// std::process::exit(reason.exit_code());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShutdownReason {
+    /// System was stopped gracefully (e.g., SIGTERM or explicit operator request).
+    /// Exit with code 0 — no automatic restart needed.
+    Graceful,
+    /// System crashed due to an internal actor failure.
+    /// Exit with a non-zero code so the supervisor (e.g., Docker) restarts the process.
+    Crash,
+}
+
+impl ShutdownReason {
+    /// Returns the appropriate process exit code for this shutdown reason.
+    ///
+    /// - `0` for graceful shutdown.
+    /// - `1` for crash (supervisor should restart).
+    pub const fn exit_code(&self) -> i32 {
+        match self {
+            Self::Graceful => 0,
+            Self::Crash => 1,
+        }
+    }
+}
+
 /// Actor system factory.
 ///
 /// This is the main entry point for creating an actor system instance.
@@ -29,28 +63,27 @@ pub struct ActorSystem {}
 /// Default implementation for `ActorSystem`.
 impl ActorSystem {
     /// Creates a new actor system with its reference and runner.
-    /// The actor system manages the lifecycle of all actors and provides
-    /// the infrastructure for actor communication and supervision.
     ///
     /// # Arguments
     ///
-    /// * `token` - CancellationToken for coordinated shutdown of the entire system.
+    /// * `graceful_token` - Cancelled by an external signal (SIGTERM, operator).
+    ///   Results in [`ShutdownReason::Graceful`] and exit code 0.
+    /// * `crash_token` - Cancelled by an actor on unrecoverable failure.
+    ///   Results in [`ShutdownReason::Crash`] and exit code 1, triggering a
+    ///   supervisor restart.
     ///
     /// # Returns
     ///
-    /// Returns a tuple containing:
+    /// Returns a tuple of:
     /// - `SystemRef` - Cloneable reference for creating and managing actors.
-    /// - `SystemRunner` - Event loop that must be run to process system events.
+    /// - `SystemRunner` - Event loop that must be driven to process system events.
     ///
-    /// # Usage
-    ///
-    /// The system runner should be spawned in a separate task and the system
-    /// reference can be used to create and manage actors. Cancel the token
-    /// to trigger graceful shutdown.
-    ///
-    pub fn create(token: CancellationToken) -> (SystemRef, SystemRunner) {
+    pub fn create(
+        graceful_token: CancellationToken,
+        crash_token: CancellationToken,
+    ) -> (SystemRef, SystemRunner) {
         let (event_sender, event_receiver) = mpsc::channel(4);
-        let system = SystemRef::new(event_sender, token);
+        let system = SystemRef::new(event_sender, graceful_token, crash_token);
         let runner = SystemRunner::new(event_receiver);
         (system, runner)
     }
@@ -61,9 +94,9 @@ impl ActorSystem {
 ///
 #[derive(Debug, Clone)]
 pub enum SystemEvent {
-    /// Signals that the actor system should stop gracefully.
-    /// This triggers shutdown of all root actors and system cleanup.
-    StopSystem,
+    /// Signals that the actor system should stop.
+    /// Carries the reason so the runner can report it to the caller.
+    StopSystem(ShutdownReason),
 }
 
 /// Cloneable reference to the actor system.
@@ -91,8 +124,10 @@ pub struct SystemRef {
     /// Stop senders for root-level actors to enable coordinated shutdown.
     root_senders: Arc<RwLock<Vec<StopSender>>>,
 
-    /// Cancellation token for system-wide shutdown coordination.
-    token: CancellationToken,
+    /// Cancelled by an external signal (SIGTERM, operator). Exit code 0.
+    graceful_token: CancellationToken,
+    /// Cancelled by an actor on unrecoverable failure. Exit code 1.
+    crash_token: CancellationToken,
 }
 
 impl SystemRef {
@@ -118,15 +153,20 @@ impl SystemRef {
     ///
     pub fn new(
         event_sender: mpsc::Sender<SystemEvent>,
-        token: CancellationToken,
+        graceful_token: CancellationToken,
+        crash_token: CancellationToken,
     ) -> Self {
         let root_senders = Arc::new(RwLock::new(Vec::<StopSender>::new()));
         let root_sender_clone = root_senders.clone();
-        let token_clone = token.clone();
+        let graceful_clone = graceful_token.clone();
+        let crash_clone = crash_token.clone();
 
         tokio::spawn(async move {
-            token_clone.cancelled().await;
-            debug!("Stopping actor system");
+            let reason = tokio::select! {
+                _ = graceful_clone.cancelled() => ShutdownReason::Graceful,
+                _ = crash_clone.cancelled()   => ShutdownReason::Crash,
+            };
+            debug!(reason = ?reason, "Stopping actor system");
             let mut root_senders = root_sender_clone.write().await;
             while let Some(sender) = root_senders.pop() {
                 let (stop_sender, stop_receiver) = oneshot::channel();
@@ -138,7 +178,7 @@ impl SystemRef {
                 };
             }
 
-            if let Err(e) = event_sender.send(SystemEvent::StopSystem).await {
+            if let Err(e) = event_sender.send(SystemEvent::StopSystem(reason)).await {
                 error!(error = %e, "Failed to send StopSystem event");
             }
         });
@@ -146,7 +186,8 @@ impl SystemRef {
         Self {
             actors: Arc::new(RwLock::new(HashMap::new())),
             helpers: Arc::new(RwLock::new(HashMap::new())),
-            token,
+            graceful_token,
+            crash_token,
             root_senders,
         }
     }
@@ -301,8 +342,16 @@ impl SystemRef {
     /// - Root actors are stopped in reverse order of creation.
     /// - System runner receives StopSystem event when complete.
     ///
+    /// Initiates graceful shutdown. Use this for external signals (SIGTERM, operator).
+    /// [`SystemRunner::run()`] will return [`ShutdownReason::Graceful`] (exit code 0).
     pub fn stop_system(&self) {
-        self.token.cancel();
+        self.graceful_token.cancel();
+    }
+
+    /// Initiates a crash shutdown. Actors call this on unrecoverable failure.
+    /// [`SystemRunner::run()`] will return [`ShutdownReason::Crash`] (exit code 1).
+    pub fn crash_system(&self) {
+        self.crash_token.cancel();
     }
 
     /// Retrieves all direct children of the specified actor.
@@ -422,13 +471,22 @@ impl SystemRunner {
     /// - Processes StopSystem event by logging and exiting the loop.
     /// - Returns when the system is stopped.
     ///
-    pub async fn run(&mut self) {
+    /// Runs the system event loop until the system stops.
+    ///
+    /// Returns the [`ShutdownReason`] so the caller can choose the exit code:
+    ///
+    /// ```ignore
+    /// let reason = runner.run().await;
+    /// std::process::exit(reason.exit_code());
+    /// ```
+    pub async fn run(&mut self) -> ShutdownReason {
         debug!("Running actor system");
         tokio::select! {
             Some(event) = self.event_receiver.recv() => {
                 match event {
-                    SystemEvent::StopSystem => {
-                        debug!("Actor system stopped");
+                    SystemEvent::StopSystem(reason) => {
+                        debug!(reason = ?reason, "Actor system stopped");
+                        reason
                     }
                 }
             }
@@ -477,7 +535,7 @@ mod tests {
     #[tokio::test]
     async fn test_helpers() {
         build_tracing_subscriber();
-        let (system, _) = ActorSystem::create(CancellationToken::new());
+        let (system, _) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
         let helper = TestHelper { value: 42 };
         system.add_helper("test", helper).await;
         let helper: Option<TestHelper> = system.get_helper("test").await;

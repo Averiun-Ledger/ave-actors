@@ -137,7 +137,7 @@ impl PersistentActor for VectorActor {
 #[tokio::test]
 async fn test_light_persistence_duplicates_data_on_restart() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     // Create and start the actor (pre_start will initialize with shared manager)

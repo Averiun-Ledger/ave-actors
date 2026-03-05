@@ -128,7 +128,7 @@ impl PersistentActor for SingleEventActor {
 #[tokio::test]
 async fn test_single_event_no_recovery() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     println!("\n╔═══════════════════════════════════════════════════════════╗");
@@ -186,7 +186,7 @@ async fn test_debug_event_counter_after_first_event() {
     build_tracing_subscriber();
     use ave_actors_store::store::{Store, StoreCommand, StoreResponse};
 
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let memory_manager = MemoryManager::default();

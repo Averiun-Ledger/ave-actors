@@ -495,7 +495,7 @@ mod tests {
         build_tracing_subscriber();
         let (event_sender, _) = mpsc::channel(100);
 
-        let system = SystemRef::new(event_sender, CancellationToken::new());
+        let system = SystemRef::new(event_sender, CancellationToken::new(), CancellationToken::new());
 
         let actor = TestActor { failed: false };
         let (mut runner, actor_ref, stop_sender) =

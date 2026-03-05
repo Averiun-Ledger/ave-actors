@@ -293,7 +293,7 @@ mod tests {
     async fn test_retry_actor() {
         build_tracing_subscriber();
         let (system, mut runner) =
-            ActorSystem::create(CancellationToken::new());
+            ActorSystem::create(CancellationToken::new(), CancellationToken::new());
 
         tokio::spawn(async move {
             runner.run().await;

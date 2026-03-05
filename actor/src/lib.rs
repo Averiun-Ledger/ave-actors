@@ -52,4 +52,4 @@ pub use supervision::{
     CustomIntervalStrategy, FixedIntervalStrategy, NoIntervalStrategy,
     RetryStrategy, Strategy, SupervisionStrategy,
 };
-pub use system::{ActorSystem, SystemEvent, SystemRef, SystemRunner};
+pub use system::{ActorSystem, ShutdownReason, SystemEvent, SystemRef, SystemRunner};

@@ -895,7 +895,7 @@ mod test {
     async fn test_actor() {
         build_tracing_subscriber();
         let (event_sender, _event_receiver) = mpsc::channel(100);
-        let system = SystemRef::new(event_sender, CancellationToken::new());
+        let system = SystemRef::new(event_sender, CancellationToken::new(), CancellationToken::new());
         let actor = TestActor { counter: 0 };
         let actor_ref = system.create_root_actor("test", actor).await.unwrap();
 

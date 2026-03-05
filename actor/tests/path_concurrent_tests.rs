@@ -242,7 +242,7 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
 #[tokio::test]
 async fn test_concurrent_message_handling() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = ConcurrentActor::new();
@@ -291,7 +291,7 @@ async fn test_concurrent_message_handling() {
 #[tokio::test]
 async fn test_multiple_actor_communication() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     // Create parent actor
@@ -359,7 +359,7 @@ async fn test_multiple_actor_communication() {
 #[tokio::test]
 async fn test_multiple_event_subscribers() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = ConcurrentActor::new();
@@ -395,7 +395,7 @@ async fn test_multiple_event_subscribers() {
 #[tokio::test]
 async fn test_rapid_actor_lifecycle() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     // Rapidly create and destroy actors
@@ -432,7 +432,7 @@ async fn test_rapid_actor_lifecycle() {
 #[tokio::test]
 async fn test_concurrent_error_handling() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let parent = ConcurrentActor::new();
@@ -462,7 +462,7 @@ async fn test_concurrent_error_handling() {
 #[tokio::test]
 async fn test_system_shutdown_with_active_actors() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new());
+    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     let runner_handle = tokio::spawn(async move { runner.run().await });
 
     // Create multiple actors
