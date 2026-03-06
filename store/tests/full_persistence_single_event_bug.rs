@@ -71,13 +71,6 @@ impl Actor for SingleEventActor {
             .await
     }
 
-    async fn pre_stop(
-        &mut self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        println!("  [PRE_STOP] Actor stopping, current data: '{}'", self.data);
-        self.stop_store(ctx).await
-    }
 }
 
 #[async_trait]

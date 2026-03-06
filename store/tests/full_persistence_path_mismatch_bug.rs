@@ -70,13 +70,6 @@ impl Actor for PathActor {
             .await
     }
 
-    async fn pre_stop(
-        &mut self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        println!("  [PRE_STOP] Stopping, value={}", self.value);
-        self.stop_store(ctx).await
-    }
 }
 
 #[async_trait]
@@ -208,12 +201,6 @@ async fn test_explicit_prefix_usage() {
             .await
         }
 
-        async fn pre_stop(
-            &mut self,
-            ctx: &mut ActorContext<Self>,
-        ) -> Result<(), ActorError> {
-            self.stop_store(ctx).await
-        }
     }
 
     #[async_trait]

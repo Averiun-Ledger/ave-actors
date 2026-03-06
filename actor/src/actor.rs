@@ -454,6 +454,14 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
 
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span;
 
+    /// Maximum time to spend processing critical messages during shutdown.
+    /// After this duration, remaining critical messages are also dropped and
+    /// their ask callers receive `Error::ActorStopped`.
+    /// Default is 5 seconds.
+    fn drain_timeout() -> std::time::Duration {
+        std::time::Duration::from_secs(5)
+    }
+
     /// Defines the supervision strategy to use for this actor. By default it is
     /// `Stop` which simply stops the actor if an error occurs at startup or when an
     /// error or fault is issued from a handler.
@@ -553,7 +561,15 @@ pub trait Event:
 }
 
 /// Defines what an actor will receive as its message, and with what it should respond.
-pub trait Message: Clone + Send + Sync + 'static {}
+pub trait Message: Clone + Send + Sync + 'static {
+    /// Returns true if this message must be processed before the actor stops.
+    /// Non-critical messages will be discarded during shutdown; their ask callers
+    /// will receive `Error::ActorStopped`.
+    /// Default is false.
+    fn is_critical(&self) -> bool {
+        false
+    }
+}
 
 /// Defines the response of a message.
 pub trait Response: Send + Sync + 'static {}

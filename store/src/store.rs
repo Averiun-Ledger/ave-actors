@@ -384,50 +384,6 @@ where
         Ok(())
     }
 
-    /// Stop the child store and snapshot the state.
-    ///
-    /// For Full persistence mode, a snapshot is only created if there are
-    /// persisted events. Actors without events won't create a snapshot.
-    ///
-    /// # Arguments
-    ///
-    /// - ctx: The actor context.
-    ///
-    /// # Returns
-    ///
-    /// Void.
-    ///
-    /// # Errors
-    ///
-    /// An error if the operation failed.
-    ///
-    async fn stop_store(
-        &mut self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        if let Ok(store) = ctx.get_child::<Store<Self>>("store").await {
-            if matches!(
-                Self::Persistence::get_persistence(),
-                PersistenceType::Full
-            ) {
-                // Only snapshot if there are events
-                let response = store.ask(StoreCommand::LastEventNumber).await?;
-                if let StoreResponse::LastEventNumber(count) = response
-                    && count > 0
-                {
-                    let _ =
-                        store.ask(StoreCommand::Snapshot(self.clone())).await?;
-                }
-            }
-
-            store.ask_stop().await
-        } else {
-            Err(ActorError::StoreOperation {
-                operation: "get_store".to_owned(),
-                reason: "Can't get store".to_string(),
-            })
-        }
-    }
 }
 
 /// Store actor that manages persistent storage for a PersistentActor.
@@ -903,6 +859,38 @@ where
         }
     }
 
+    /// Snapshot the current reconstructed state if there are events since the
+    /// last snapshot. Only relevant for FullPersistence — LightPersistence
+    /// already stores state with every event.
+    ///
+    /// Called automatically during shutdown via `pre_stop`.
+    fn snapshot_if_needed(&mut self) -> Result<(), Error> {
+        if !matches!(P::Persistence::get_persistence(), PersistenceType::Full) {
+            return Ok(());
+        }
+
+        if self.event_counter == 0 || self.event_counter <= self.state_counter {
+            return Ok(());
+        }
+
+        // Reconstruct state from last snapshot (or initial) + pending events.
+        let mut state = if let Some((s, _)) = self.get_state()? {
+            s
+        } else {
+            self.initial_state.clone()
+        };
+
+        let events = self.events(self.state_counter, self.event_counter - 1)?;
+        for event in &events {
+            state.apply(event).map_err(|e| Error::Store {
+                operation: "apply_event_on_stop".to_owned(),
+                reason: e.to_string(),
+            })?;
+        }
+
+        self.snapshot(&state)
+    }
+
     /// Purge the store.
     ///
     /// # Returns
@@ -1169,6 +1157,19 @@ where
     ) -> tracing::Span {
         info_span!("Store", id = %id)
     }
+
+    /// On shutdown, snapshot the current state if there are unsnapshotted
+    /// events (FullPersistence only). This replaces the old `stop_store()`
+    /// pattern where the parent actor was responsible for triggering snapshots.
+    async fn pre_stop(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        if let Err(e) = self.snapshot_if_needed() {
+            error!(error = %e, "Failed to snapshot state during Store shutdown");
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1401,25 +1402,6 @@ mod tests {
             Ok(())
         }
 
-        async fn pre_stop(
-            &mut self,
-            ctx: &mut ActorContext<Self>,
-        ) -> Result<(), ActorError> {
-            let store: ActorRef<Store<Self>> =
-                ctx.get_child("store").await.unwrap();
-            let response = store
-                .ask(StoreCommand::Snapshot(self.clone()))
-                .await
-                .unwrap();
-            if let StoreResponse::Snapshotted = response {
-                store.ask_stop().await
-            } else {
-                Err(ActorError::StoreOperation {
-                    operation: "snapshot_state".to_owned(),
-                    reason: "Can't snapshot state".to_string(),
-                })
-            }
-        }
     }
 
     #[async_trait]
@@ -1457,25 +1439,6 @@ mod tests {
             Ok(())
         }
 
-        async fn pre_stop(
-            &mut self,
-            ctx: &mut ActorContext<Self>,
-        ) -> Result<(), ActorError> {
-            let store: ActorRef<Store<Self>> =
-                ctx.get_child("store").await.unwrap();
-            let response = store
-                .ask(StoreCommand::Snapshot(self.clone()))
-                .await
-                .unwrap();
-            if let StoreResponse::Snapshotted = response {
-                store.ask_stop().await
-            } else {
-                Err(ActorError::StoreOperation {
-                    operation: "snapshot_state".to_owned(),
-                    reason: "Can't snapshot state".to_string(),
-                })
-            }
-        }
     }
 
     #[async_trait]

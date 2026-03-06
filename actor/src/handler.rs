@@ -1,6 +1,6 @@
 use crate::{
     ActorPath, Error,
-    actor::{Actor, ActorContext, Handler},
+    actor::{Actor, ActorContext, Handler, Message},
 };
 
 use async_trait::async_trait;
@@ -25,6 +25,13 @@ pub trait MessageHandler<A: Actor>: Send + Sync {
     /// * `ctx` - Actor context providing access to system and actor state.
     ///
     async fn handle(&mut self, actor: &mut A, ctx: &mut ActorContext<A>);
+
+    /// Returns true if this message must be processed before the actor stops.
+    fn is_critical(&self) -> bool;
+
+    /// Responds to the caller with `Error::ActorStopped` if this message
+    /// expects a response (ask pattern). No-op for fire-and-forget messages.
+    fn respond_stopped(&mut self);
 }
 
 /// Internal actor message wrapper that encapsulates the message content,
@@ -101,6 +108,18 @@ where
             && rsvp.send(result).is_err()
         {
             error!("Failed to send response back to caller");
+        }
+    }
+
+    fn is_critical(&self) -> bool {
+        self.message.is_critical()
+    }
+
+    fn respond_stopped(&mut self) {
+        if let Some(rsvp) = self.rsvp.take()
+            && rsvp.send(Err(crate::Error::ActorStopped)).is_err()
+        {
+            error!("Failed to send ActorStopped response to caller");
         }
     }
 }

@@ -9,7 +9,7 @@ use crate::{
         ChildErrorReceiver, ChildErrorSender, Handler,
     },
     //error::{error_box, ErrorBoxReceiver, ErrorHelper, SystemError},
-    handler::{HandleHelper, MailboxReceiver, mailbox},
+    handler::{BoxedMessageHandler, HandleHelper, MailboxReceiver, mailbox},
     supervision::{RetryStrategy, SupervisionStrategy},
     system::SystemRef,
 };
@@ -199,17 +199,25 @@ where
     pub(crate) async fn run(&mut self, ctx: &mut ActorContext<A>) {
         loop {
             select! {
+                biased;
+
                 stop = self.stop_receiver.recv() => {
+                    // 1. Drain mailbox: process critical, discard non-critical.
+                    self.drain_mailbox(ctx).await;
+
+                    // 2. Stop children.
+                    ctx.stop_childs().await;
+
+                    // 3. Pre-stop hook.
                     if let Err(e) = self.actor.pre_stop(ctx).await {
                         error!(error = %e, "pre_stop failed");
                         let _ = ctx.emit_fail(e).await;
                     }
 
-                    ctx.stop_childs().await;
                     ctx.remove_actor().await;
 
-                    if let Some(Some(stop)) = stop {
-                        let _ = stop.send(());
+                    if let Some(Some(stop_sender)) = stop {
+                        let _ = stop_sender.send(());
                     }
 
                     if self.lifecycle == ActorLifecycle::Started {
@@ -218,7 +226,7 @@ where
                     break;
                 }
                 // Handle error from `ErrorBoxReceiver`.
-                error =  self.error_receiver.recv(), if !self.stop_signal => {
+                error = self.error_receiver.recv(), if !self.stop_signal => {
                     if let Some(error) = error {
                         match error {
                             ChildError::Error { error } => {
@@ -256,6 +264,52 @@ where
                         self.stop_signal = true;
                     }
                 }
+            }
+        }
+    }
+
+    /// Drains pending mailbox messages on shutdown.
+    /// Critical messages are processed (with a timeout); non-critical messages
+    /// are discarded and their ask callers receive `Error::ActorStopped`.
+    async fn drain_mailbox(&mut self, ctx: &mut ActorContext<A>) {
+        let mut critical: Vec<BoxedMessageHandler<A>> = Vec::new();
+
+        while let Ok(mut msg) = self.receiver.try_recv() {
+            if msg.is_critical() {
+                critical.push(msg);
+            } else {
+                msg.respond_stopped();
+            }
+        }
+
+        if critical.is_empty() {
+            return;
+        }
+
+        let deadline = tokio::time::Instant::now() + A::drain_timeout();
+        let mut timed_out = false;
+
+        for mut msg in critical {
+            if timed_out {
+                msg.respond_stopped();
+                continue;
+            }
+
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                warn!("Drain timeout exceeded, dropping remaining critical messages");
+                timed_out = true;
+                msg.respond_stopped();
+                continue;
+            }
+
+            if tokio::time::timeout(remaining, msg.handle(&mut self.actor, ctx))
+                .await
+                .is_err()
+            {
+                warn!("Critical message handling timed out");
+                timed_out = true;
+                msg.respond_stopped();
             }
         }
     }

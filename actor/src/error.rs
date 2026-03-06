@@ -91,6 +91,14 @@ pub enum Error {
     #[error("maximum retry attempts reached")]
     Retry,
 
+    // ===== Shutdown Errors =====
+    /// The actor was stopped before processing this message.
+    ///
+    /// This error occurs when an actor is shutting down and discards
+    /// non-critical messages from its mailbox.
+    #[error("actor stopped before processing message")]
+    ActorStopped,
+
     // ===== Functional Errors =====
     /// A recoverable functional error.
     ///

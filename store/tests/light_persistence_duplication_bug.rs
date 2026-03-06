@@ -85,12 +85,6 @@ impl Actor for VectorActor {
             .await
     }
 
-    async fn pre_stop(
-        &mut self,
-        ctx: &mut ActorContext<Self>,
-    ) -> Result<(), ActorError> {
-        self.stop_store(ctx).await
-    }
 }
 
 #[async_trait]
