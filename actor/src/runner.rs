@@ -271,7 +271,13 @@ where
     /// Drains pending mailbox messages on shutdown.
     /// Critical messages are processed (with a timeout); non-critical messages
     /// are discarded and their ask callers receive `Error::ActorStopped`.
+    ///
+    /// The receiver is closed before draining so that any concurrent senders
+    /// get an immediate error and no messages can sneak in between the drain
+    /// and the channel being dropped at the end of `init()`.
     async fn drain_mailbox(&mut self, ctx: &mut ActorContext<A>) {
+        self.receiver.close();
+
         let mut critical: Vec<BoxedMessageHandler<A>> = Vec::new();
 
         while let Ok(mut msg) = self.receiver.try_recv() {
@@ -585,5 +591,264 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    // ========== Shutdown drain tests ==========
+
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, Notify};
+
+    // --- Shared types for drain tests ---
+
+    #[derive(Debug, Clone)]
+    enum DrainMsg {
+        /// Blocks processing until `release` is notified.
+        Block,
+        /// Critical message: processed during drain.
+        Critical,
+        /// Non-critical message: discarded during drain.
+        Normal,
+    }
+
+    impl Message for DrainMsg {
+        fn is_critical(&self) -> bool {
+            matches!(self, Self::Critical)
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct DrainEvent;
+    impl Event for DrainEvent {}
+
+    struct DrainActor {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        processed: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl crate::NotPersistentActor for DrainActor {}
+
+    impl Actor for DrainActor {
+        type Message = DrainMsg;
+        type Event = DrainEvent;
+        type Response = ();
+
+        fn get_span(id: &str, _parent: Option<tracing::Span>) -> tracing::Span {
+            info_span!("DrainActor", id = %id)
+        }
+    }
+
+    #[async_trait]
+    impl Handler<DrainActor> for DrainActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            msg: DrainMsg,
+            _ctx: &mut ActorContext<DrainActor>,
+        ) -> Result<(), Error> {
+            match msg {
+                DrainMsg::Block => {
+                    self.started.notify_one();
+                    self.release.notified().await;
+                }
+                DrainMsg::Critical => {
+                    self.processed.lock().await.push("critical");
+                }
+                DrainMsg::Normal => {
+                    self.processed.lock().await.push("normal");
+                }
+            }
+            Ok(())
+        }
+    }
+
+    // --- Actor with a very short drain_timeout for timeout test ---
+
+    #[derive(Debug, Clone)]
+    enum SlowMsg {
+        /// Non-critical blocker for setup.
+        Block,
+        /// Critical but slow (exceeds drain_timeout).
+        SlowCritical,
+    }
+
+    impl Message for SlowMsg {
+        fn is_critical(&self) -> bool {
+            matches!(self, Self::SlowCritical)
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct SlowEvent;
+    impl Event for SlowEvent {}
+
+    struct SlowActor {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl crate::NotPersistentActor for SlowActor {}
+
+    impl Actor for SlowActor {
+        type Message = SlowMsg;
+        type Event = SlowEvent;
+        type Response = ();
+
+        fn get_span(id: &str, _parent: Option<tracing::Span>) -> tracing::Span {
+            info_span!("SlowActor", id = %id)
+        }
+
+        fn drain_timeout() -> Duration {
+            Duration::from_millis(50)
+        }
+    }
+
+    #[async_trait]
+    impl Handler<SlowActor> for SlowActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            msg: SlowMsg,
+            _ctx: &mut ActorContext<SlowActor>,
+        ) -> Result<(), Error> {
+            match msg {
+                SlowMsg::Block => {
+                    self.started.notify_one();
+                    self.release.notified().await;
+                }
+                SlowMsg::SlowCritical => {
+                    // Sleeps well beyond drain_timeout (50ms)
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    // --- Tests ---
+
+    /// tell/ask to a fully stopped actor must return Error::ActorStopped.
+    #[tokio::test]
+    async fn test_send_to_stopped_actor_returns_actor_stopped() {
+        build_tracing_subscriber();
+        let (tx, _rx) = tokio::sync::mpsc::channel(100);
+        let system = SystemRef::new(tx, CancellationToken::new(), CancellationToken::new());
+
+        let actor = DrainActor {
+            started: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            processed: Arc::new(Mutex::new(vec![])),
+        };
+        let actor_ref = system.create_root_actor("stopped", actor).await.unwrap();
+
+        // ask_stop waits for the actor to confirm shutdown, so the channel is
+        // already closed when this returns.
+        actor_ref.ask_stop().await.unwrap();
+
+        assert_eq!(
+            actor_ref.tell(DrainMsg::Normal).await,
+            Err(Error::ActorStopped)
+        );
+        assert_eq!(
+            actor_ref.ask(DrainMsg::Normal).await,
+            Err(Error::ActorStopped)
+        );
+    }
+
+    /// During shutdown drain: critical messages are processed, non-critical ask
+    /// callers receive Error::ActorStopped.
+    ///
+    /// Setup:
+    ///  1. Block the actor (it's busy, stop signal won't be seen yet).
+    ///  2. Queue a Normal ask and a Critical ask into the mailbox.
+    ///  3. Send the stop signal.
+    ///  4. Release the block → actor finishes, biased select picks stop →
+    ///     drain runs → Normal discarded, Critical processed.
+    #[tokio::test]
+    async fn test_drain_critical_processed_normal_stopped() {
+        build_tracing_subscriber();
+        let (tx, _rx) = tokio::sync::mpsc::channel(100);
+        let system = SystemRef::new(tx, CancellationToken::new(), CancellationToken::new());
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let processed = Arc::new(Mutex::new(vec![]));
+
+        let actor = DrainActor {
+            started: started.clone(),
+            release: release.clone(),
+            processed: processed.clone(),
+        };
+        let actor_ref = system.create_root_actor("drain", actor).await.unwrap();
+
+        // Step 1: block the actor
+        actor_ref.tell(DrainMsg::Block).await.unwrap();
+        started.notified().await; // wait until actor is inside the Block handler
+
+        // Step 2: queue Normal and Critical asks concurrently
+        let normal_join = tokio::spawn({
+            let r = actor_ref.clone();
+            async move { r.ask(DrainMsg::Normal).await }
+        });
+        let critical_join = tokio::spawn({
+            let r = actor_ref.clone();
+            async move { r.ask(DrainMsg::Critical).await }
+        });
+
+        // Give the spawned tasks time to place their messages in the mailbox.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Step 3: send stop signal (non-blocking, no confirmation wait)
+        actor_ref.tell_stop().await;
+
+        // Step 4: release the block
+        release.notify_one();
+
+        let normal_result = normal_join.await.unwrap();
+        let critical_result = critical_join.await.unwrap();
+
+        assert_eq!(normal_result, Err(Error::ActorStopped));
+        assert!(critical_result.is_ok(), "critical message should be processed: {critical_result:?}");
+
+        let done = processed.lock().await;
+        assert_eq!(*done, vec!["critical"]);
+    }
+
+    /// When drain_timeout expires while processing a slow critical message, the
+    /// remaining critical messages are dropped and their ask callers receive
+    /// Error::ActorStopped.
+    #[tokio::test]
+    async fn test_drain_timeout_drops_slow_critical() {
+        build_tracing_subscriber();
+        let (tx, _rx) = tokio::sync::mpsc::channel(100);
+        let system = SystemRef::new(tx, CancellationToken::new(), CancellationToken::new());
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+
+        let actor = SlowActor {
+            started: started.clone(),
+            release: release.clone(),
+        };
+        let actor_ref = system.create_root_actor("slow_timeout", actor).await.unwrap();
+
+        // Block the actor so we can queue the slow critical before stop runs
+        actor_ref.tell(SlowMsg::Block).await.unwrap();
+        started.notified().await;
+
+        // Queue the slow critical ask while actor is blocked
+        let slow_join = tokio::spawn({
+            let r = actor_ref.clone();
+            async move { r.ask(SlowMsg::SlowCritical).await }
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        actor_ref.tell_stop().await;
+        release.notify_one();
+
+        // drain_timeout = 50ms, SlowCritical handler sleeps 300ms → timeout fires
+        let result = slow_join.await.unwrap();
+        assert_eq!(result, Err(Error::ActorStopped));
     }
 }

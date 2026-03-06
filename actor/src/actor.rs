@@ -168,13 +168,20 @@ where
         if child_count > 0 {
             tracing::debug!(child_count, "Stopping child actors");
         }
+
+        // Send all stop signals first so all children begin shutdown concurrently.
+        let mut receivers = Vec::with_capacity(child_count);
         while let Some(sender) = self.child_senders.pop() {
             let (stop_sender, stop_receiver) = oneshot::channel();
-            if sender.send(Some(stop_sender)).await.is_err() {
-                continue;
-            } else {
-                let _ = stop_receiver.await;
-            };
+            if sender.send(Some(stop_sender)).await.is_ok() {
+                receivers.push(stop_receiver);
+            }
+        }
+
+        // Wait for all confirmations. Children shut down in parallel so the
+        // total wait is max(child_shutdown_time) rather than the sum.
+        for receiver in receivers {
+            let _ = receiver.await;
         }
     }
 

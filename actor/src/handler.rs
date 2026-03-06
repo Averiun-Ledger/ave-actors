@@ -201,9 +201,7 @@ where
         self.sender
             .send(Box::new(msg))
             .await
-            .map_err(|error| Error::Send {
-                reason: error.to_string(),
-            })
+            .map_err(|_| Error::ActorStopped)
     }
 
     /// Sends a message to the actor and waits for a response (request-response).
@@ -220,8 +218,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns Error::Send if the message couldn't be sent or if
-    /// the response channel was closed before receiving a response.
+    /// Returns `Error::ActorStopped` if the actor's mailbox is closed
+    /// (actor has stopped) or if the response channel is dropped before
+    /// a response is received.
     ///
     pub(crate) async fn ask(
         &self,
@@ -234,13 +233,9 @@ where
         self.sender
             .send(Box::new(msg))
             .await
-            .map_err(|error| Error::Send {
-                reason: error.to_string(),
-            })?;
+            .map_err(|_| Error::ActorStopped)?;
 
-        response_receiver.await.map_err(|error| Error::Send {
-            reason: error.to_string(),
-        })?
+        response_receiver.await.map_err(|_| Error::ActorStopped)?
     }
 
     /// Waits for the sender to be closed.
