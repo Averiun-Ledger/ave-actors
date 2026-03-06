@@ -113,8 +113,7 @@ impl ActorPath {
     /// Returns `true` if the path is an ancestor of the other path.
     ///
     pub fn is_ancestor_of(&self, other: &Self) -> bool {
-        let me = format!("{}/", self);
-        other.to_string().as_str().starts_with(me.as_str())
+        self.0.len() < other.0.len() && other.0.starts_with(&self.0)
     }
 
     /// Returns if the path is a descendant of another path.
@@ -128,8 +127,7 @@ impl ActorPath {
     /// Returns `true` if the path is a descendant of the other path.
     ///
     pub fn is_descendant_of(&self, other: &Self) -> bool {
-        let me = self.to_string();
-        me.as_str().starts_with(format!("{}/", other).as_str())
+        other.0.len() < self.0.len() && self.0.starts_with(&other.0)
     }
 
     /// Returns if the path is a parent of another path.
@@ -354,6 +352,20 @@ mod tests {
         let root = path.root();
         assert!(root.is_ancestor_of(&path));
         assert!(path.is_descendant_of(&root));
+    }
+
+    #[test]
+    fn test_root_slash_relationships() {
+        let root = ActorPath::from("/");
+        let child = ActorPath::from("/acme");
+        let grandchild = ActorPath::from("/acme/building");
+
+        assert!(root.is_ancestor_of(&child));
+        assert!(root.is_ancestor_of(&grandchild));
+        assert!(child.is_descendant_of(&root));
+        assert!(grandchild.is_descendant_of(&root));
+        assert!(!root.is_ancestor_of(&root));
+        assert!(!root.is_descendant_of(&root));
     }
 
     #[test]

@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::Span;
 
-use std::fmt::Debug;
+use std::{collections::HashMap, fmt::Debug};
 
 /// The `ActorContext` is the context of the actor.
 /// It is passed to the actor when it is started, and can be used to interact with the actor
@@ -38,7 +38,7 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     /// Inner sender.
     inner_sender: InnerSender<A>,
     /// Child action senders.
-    child_senders: Vec<StopSender>,
+    child_senders: HashMap<ActorPath, StopSender>,
 
     span: tracing::Span,
 }
@@ -61,7 +61,7 @@ where
     ///
     /// Returns a new actor context.
     ///
-    pub(crate) const fn new(
+    pub(crate) fn new(
         stop: StopSender,
         path: ActorPath,
         system: SystemRef,
@@ -77,7 +77,7 @@ where
             error: None,
             error_sender,
             inner_sender,
-            child_senders: Vec::new(),
+            child_senders: HashMap::new(),
         }
     }
 
@@ -158,7 +158,7 @@ where
     ///
     /// # Behavior
     ///
-    /// - Extracts all child stop senders one by one (pop).
+    /// - Drains all tracked child stop senders from the registry.
     /// - For each child, creates a oneshot channel for confirmation.
     /// - Sends the stop signal and waits for confirmation.
     /// - If sending fails, continues with the next child.
@@ -171,7 +171,7 @@ where
 
         // Send all stop signals first so all children begin shutdown concurrently.
         let mut receivers = Vec::with_capacity(child_count);
-        while let Some(sender) = self.child_senders.pop() {
+        for (_, sender) in std::mem::take(&mut self.child_senders) {
             let (stop_sender, stop_receiver) = oneshot::channel();
             if sender.send(Some(stop_sender)).await.is_ok() {
                 receivers.push(stop_receiver);
@@ -325,7 +325,7 @@ where
         let result = self
             .system
             .create_actor_path(
-                path,
+                path.clone(),
                 actor,
                 Some(self.error_sender.clone()),
                 C::get_span(name, Some(self.span.clone())),
@@ -334,7 +334,15 @@ where
 
         match result {
             Ok((actor_ref, stop_sender)) => {
-                self.child_senders.push(stop_sender);
+                let child_path = path.clone();
+                self.child_senders.insert(path, stop_sender.clone());
+                let inner_sender = self.inner_sender.clone();
+                tokio::spawn(async move {
+                    stop_sender.closed().await;
+                    let _ = inner_sender
+                        .send(InnerAction::ChildStopped(child_path))
+                        .await;
+                });
                 tracing::debug!(child_name = %name, "Child actor created");
                 Ok(actor_ref)
             }
@@ -342,6 +350,20 @@ where
                 tracing::debug!(child_name = %name, error = %e, "Failed to create child actor");
                 Err(e)
             }
+        }
+    }
+
+    /// Removes a child stop sender only if it is already closed.
+    /// This protects against stale close notifications from a previous child
+    /// instance after a same-path child has been recreated.
+    pub(crate) fn remove_closed_child(&mut self, child_path: &ActorPath) {
+        let should_remove = self
+            .child_senders
+            .get(child_path)
+            .map(|sender| sender.is_closed())
+            .unwrap_or(false);
+        if should_remove {
+            self.child_senders.remove(child_path);
         }
     }
 

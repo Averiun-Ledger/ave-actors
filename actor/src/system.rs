@@ -172,7 +172,7 @@ impl SystemRef {
                 let (stop_sender, stop_receiver) = oneshot::channel();
                 if sender.send(Some(stop_sender)).await.is_err() {
                     warn!("Failed to send stop signal to root actor");
-                    return;
+                    continue;
                 } else {
                     let _ = stop_receiver.await;
                 };
@@ -229,24 +229,20 @@ impl SystemRef {
     where
         A: Actor + Handler<A>,
     {
-        // Check if the actor already exists.
-        {
-            let actors = self.actors.read().await;
-            if actors.contains_key(&path) {
-                debug!(path = %path, "Actor already exists");
-                return Err(Error::Exists { path });
-            }
-        }
         // Create the actor runner and init it.
         let system = self.clone();
         let (mut runner, actor_ref, stop_sender) =
             ActorRunner::create(path.clone(), actor, parent_error_sender);
 
-        // Store the actor reference.
-        let any = Box::new(actor_ref.clone());
+        // Atomically check+insert under the same write lock to avoid
+        // concurrent duplicate creations for the same path.
         {
             let mut actors = self.actors.write().await;
-            actors.insert(path.clone(), any);
+            if actors.contains_key(&path) {
+                debug!(path = %path, "Actor already exists");
+                return Err(Error::Exists { path });
+            }
+            actors.insert(path.clone(), Box::new(actor_ref.clone()));
         }
         let (sender, receiver) = oneshot::channel::<bool>();
 

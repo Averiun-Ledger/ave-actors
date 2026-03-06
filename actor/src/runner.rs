@@ -35,6 +35,7 @@ pub struct ActorRunner<A: Actor> {
     path: ActorPath,
     actor: A,
     lifecycle: ActorLifecycle,
+    supervision_strategy: SupervisionStrategy,
     receiver: MailboxReceiver<A>,
 
     event_sender: EventSender<A::Event>,
@@ -81,6 +82,7 @@ where
             path,
             actor,
             lifecycle: ActorLifecycle::Created,
+            supervision_strategy: A::supervision_strategy(),
             receiver,
             stop_receiver,
             event_sender,
@@ -114,6 +116,7 @@ where
 
         // Main loop of the actor.
         let mut retries = 0;
+        let mut pending_stop_ack: Option<oneshot::Sender<()>> = None;
         loop {
             match self.lifecycle {
                 // State: CREATED
@@ -138,7 +141,7 @@ where
                     {
                         error!(error = %err, "Failed to send start signal");
                     }
-                    self.run(&mut ctx).await;
+                    pending_stop_ack = self.run(&mut ctx).await;
                     if ctx.error().is_some() {
                         self.lifecycle = ActorLifecycle::Failed;
                     }
@@ -146,18 +149,16 @@ where
                 // State: RESTARTED
                 ActorLifecycle::Restarted => {
                     // Apply supervision strategy.
-                    self.apply_supervision_strategy(
-                        A::supervision_strategy(),
-                        &mut ctx,
-                        &mut retries,
-                    )
-                    .await;
+                    self.apply_supervision_strategy(&mut ctx, &mut retries).await;
                 }
                 // State: STOPPED
                 ActorLifecycle::Stopped => {
                     // Post stop hook.
                     if let Err(e) = self.actor.post_stop(&mut ctx).await {
                         error!(error = %e, "Actor failed post_stop");
+                    }
+                    if let Some(stop_sender) = pending_stop_ack.take() {
+                        let _ = stop_sender.send(());
                     }
                     self.lifecycle = ActorLifecycle::Terminated;
                 }
@@ -167,14 +168,45 @@ where
                     if self.parent_sender.is_none() {
                         self.lifecycle = ActorLifecycle::Restarted;
                     } else {
-                        // TODO aquí debería decir el padre el qué hacer.
-                        self.lifecycle = ActorLifecycle::Terminated;
+                        let error = ctx.error().unwrap_or_else(|| Error::FunctionalCritical {
+                            description: format!(
+                                "Actor '{}' entered Failed without error context",
+                                self.path
+                            ),
+                        });
+
+                        let (action_sender, action_receiver) = oneshot::channel();
+                        if let Some(parent_sender) = self.parent_sender.as_mut() {
+                            if let Err(err) = parent_sender
+                                .send(ChildError::Fault {
+                                    error,
+                                    sender: action_sender,
+                                })
+                                .await
+                            {
+                                error!(error = %err, "Failed to send fail to parent");
+                                self.lifecycle = ActorLifecycle::Terminated;
+                            } else {
+                                match action_receiver.await {
+                                    Ok(ChildAction::Stop) => {
+                                        self.lifecycle = ActorLifecycle::Terminated;
+                                    }
+                                    Ok(ChildAction::Restart | ChildAction::Delegate) => {
+                                        debug!("Parent requested actor restart");
+                                        self.lifecycle = ActorLifecycle::Restarted;
+                                    }
+                                    Err(err) => {
+                                        error!(error = %err, "Failed to receive parent action");
+                                        self.lifecycle = ActorLifecycle::Terminated;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 // State: TERMINATED
                 ActorLifecycle::Terminated => {
                     debug!("Actor terminated");
-                    ctx.system().remove_actor(&self.path.clone()).await;
                     if let Some(sender) = sender.take()
                         && let Err(err) = sender.send(false)
                     {
@@ -196,7 +228,11 @@ where
     ///
     /// * `ctx` - The actor context.
     ///
-    pub(crate) async fn run(&mut self, ctx: &mut ActorContext<A>) {
+    pub(crate) async fn run(
+        &mut self,
+        ctx: &mut ActorContext<A>,
+    ) -> Option<oneshot::Sender<()>> {
+        let mut stop_ack: Option<oneshot::Sender<()>> = None;
         loop {
             select! {
                 biased;
@@ -217,7 +253,7 @@ where
                     ctx.remove_actor().await;
 
                     if let Some(Some(stop_sender)) = stop {
-                        let _ = stop_sender.send(());
+                        stop_ack = Some(stop_sender);
                     }
 
                     if self.lifecycle == ActorLifecycle::Started {
@@ -266,6 +302,7 @@ where
                 }
             }
         }
+        stop_ack
     }
 
     /// Drains pending mailbox messages on shutdown.
@@ -370,6 +407,9 @@ where
                 ctx.stop(None).await;
                 self.stop_signal = true;
             }
+            InnerAction::ChildStopped(path) => {
+                ctx.remove_closed_child(&path);
+            }
         }
     }
 
@@ -378,14 +418,19 @@ where
     ///
     async fn apply_supervision_strategy(
         &mut self,
-        strategy: SupervisionStrategy,
         ctx: &mut ActorContext<A>,
         retries: &mut usize,
     ) {
+        let strategy = std::mem::replace(
+            &mut self.supervision_strategy,
+            SupervisionStrategy::Stop,
+        );
+
         match strategy {
             SupervisionStrategy::Stop => {
                 error!("Actor failed, supervision strategy is Stop");
                 self.lifecycle = ActorLifecycle::Stopped;
+                self.supervision_strategy = SupervisionStrategy::Stop;
             }
             SupervisionStrategy::Retry(mut retry_strategy) => {
                 if *retries < retry_strategy.max_retries() {
@@ -407,9 +452,12 @@ where
                         Ok(_) => {
                             self.lifecycle = ActorLifecycle::Started;
                             *retries = 0;
+                            self.supervision_strategy = A::supervision_strategy();
                         }
                         Err(err) => {
                             ctx.set_error(err);
+                            self.supervision_strategy =
+                                SupervisionStrategy::Retry(retry_strategy);
                         }
                     }
                 } else {
@@ -418,6 +466,7 @@ where
                         "Max retries exceeded, stopping actor"
                     );
                     self.lifecycle = ActorLifecycle::Stopped;
+                    self.supervision_strategy = A::supervision_strategy();
                 }
             }
         }
@@ -433,6 +482,8 @@ pub enum InnerAction<A: Actor> {
     Error(Error),
     /// Fail
     Fail(Error),
+    /// Child actor channel closed notification.
+    ChildStopped(ActorPath),
 }
 
 #[cfg(test)]
