@@ -4,12 +4,12 @@
 //!
 
 use ave_actors_store::{
-    Error,
+    Error, StoreOperation,
     config::{MachineSpec, resolve_spec},
     database::{Collection, DbManager, State},
 };
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use tracing::{debug, error, info, warn};
 
 use std::{
@@ -106,7 +106,10 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
         {
             let conn = self.conn.lock().map_err(|e| {
                 error!(error = %e, "Failed to acquire connection lock for state creation");
-                Error::Store { operation: "lock_connection".to_owned(), reason: format!("{}", e) }
+                Error::Store {
+                    operation: StoreOperation::LockConnection,
+                    reason: format!("{}", e),
+                }
             })?;
 
             conn.execute(stmt.as_str(), ()).map_err(|e| {
@@ -133,7 +136,10 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
         {
             let conn = self.conn.lock().map_err(|e| {
                 error!(error = %e, "Failed to acquire connection lock for collection creation");
-                Error::Store { operation: "lock_connection".to_owned(), reason: format!("{}", e) }
+                Error::Store {
+                    operation: StoreOperation::LockConnection,
+                    reason: format!("{}", e),
+                }
             })?;
 
             conn.execute(stmt.as_str(), ()).map_err(|e| {
@@ -150,12 +156,12 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
         Ok(SqliteCollection::new(self.conn.clone(), identifier, prefix))
     }
 
-    fn stop(self) -> Result<(), Error> {
+    fn stop(&mut self) -> Result<(), Error> {
         debug!("Stopping SQLite manager, flushing WAL");
         let conn = self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock on stop");
             Error::Store {
-                operation: "lock_connection".to_owned(),
+                operation: StoreOperation::LockConnection,
                 reason: format!("{}", e),
             }
         })?;
@@ -163,7 +169,7 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
             .map_err(|e| {
                 error!(error = %e, "Failed to checkpoint WAL on stop");
                 Error::Store {
-                    operation: "wal_checkpoint".to_owned(),
+                    operation: StoreOperation::WalCheckpoint,
                     reason: format!("{}", e),
                 }
             })?;
@@ -348,7 +354,10 @@ impl State for SqliteCollection {
             format!("SELECT value FROM {} WHERE prefix = ?1", &self.table);
         let row: Vec<u8> = self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock for state get");
-            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+            Error::Store {
+                operation: StoreOperation::OpenConnection,
+                reason: format!("{}", e),
+            }
         })?.query_row(&query, params![self.prefix], |row| row.get(0))
             .map_err(|e| Error::EntryNotFound { key: e.to_string() })?;
 
@@ -362,11 +371,17 @@ impl State for SqliteCollection {
         );
         self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock for state put");
-            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+            Error::Store {
+                operation: StoreOperation::OpenConnection,
+                reason: format!("{}", e),
+            }
         })?.execute(&stmt, params![self.prefix, data])
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to put state");
-                Error::Store { operation: "insert".to_owned(), reason: format!("{}", e) }
+                Error::Store {
+                    operation: StoreOperation::Insert,
+                    reason: format!("{}", e),
+                }
             })?;
         Ok(())
     }
@@ -375,7 +390,10 @@ impl State for SqliteCollection {
         let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
         self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock for state delete");
-            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+            Error::Store {
+                operation: StoreOperation::OpenConnection,
+                reason: format!("{}", e),
+            }
         })?.execute(&stmt, params![self.prefix,])
             .map_err(|e| {
                 warn!(table = %self.table, error = %e, "Failed to delete state");
@@ -388,11 +406,17 @@ impl State for SqliteCollection {
         let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
         self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock for state purge");
-            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+            Error::Store {
+                operation: StoreOperation::OpenConnection,
+                reason: format!("{}", e),
+            }
         })?.execute(&stmt, params![self.prefix])
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to purge state");
-                Error::Store { operation: "purge".to_owned(), reason: format!("{}", e) }
+                Error::Store {
+                    operation: StoreOperation::Purge,
+                    reason: format!("{}", e),
+                }
             })?;
         debug!(table = %self.table, "State purged");
         Ok(())
@@ -411,7 +435,10 @@ impl Collection for SqliteCollection {
         );
         let row: Vec<u8> = self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock for collection get");
-            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+            Error::Store {
+                operation: StoreOperation::OpenConnection,
+                reason: format!("{}", e),
+            }
         })?.query_row(&query, params![self.prefix, key], |row| row.get(0))
             .map_err(|e| Error::EntryNotFound { key: e.to_string() })?;
 
@@ -425,11 +452,17 @@ impl Collection for SqliteCollection {
         );
         self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock for collection put");
-            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+            Error::Store {
+                operation: StoreOperation::OpenConnection,
+                reason: format!("{}", e),
+            }
         })?.execute(&stmt, params![self.prefix, key, data])
             .map_err(|e| {
                 error!(table = %self.table, key = key, error = %e, "Failed to put collection entry");
-                Error::Store { operation: "insert".to_owned(), reason: format!("{}", e) }
+                Error::Store {
+                    operation: StoreOperation::Insert,
+                    reason: format!("{}", e),
+                }
             })?;
         Ok(())
     }
@@ -441,7 +474,10 @@ impl Collection for SqliteCollection {
         );
         self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock for collection delete");
-            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+            Error::Store {
+                operation: StoreOperation::OpenConnection,
+                reason: format!("{}", e),
+            }
         })?.execute(&stmt, params![self.prefix, key])
             .map_err(|e| {
                 warn!(table = %self.table, key = key, error = %e, "Failed to delete collection entry");
@@ -454,20 +490,34 @@ impl Collection for SqliteCollection {
         let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
         self.conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock for collection purge");
-            Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+            Error::Store {
+                operation: StoreOperation::OpenConnection,
+                reason: format!("{}", e),
+            }
         })?.execute(&stmt, params![self.prefix])
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to purge collection");
-                Error::Store { operation: "purge".to_owned(), reason: format!("{}", e) }
+                Error::Store {
+                    operation: StoreOperation::Purge,
+                    reason: format!("{}", e),
+                }
             })?;
         debug!(table = %self.table, "Collection purged");
         Ok(())
     }
 
-    fn last(&self) -> Option<(String, Vec<u8>)> {
-        let conn = self.conn.lock()
-            .map_err(|e| warn!(table = %self.table, error = %e, "Failed to acquire lock in last()"))
-            .ok()?;
+    fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
+        let conn = self.conn.lock().map_err(|e| {
+            error!(
+                table = %self.table,
+                error = %e,
+                "Failed to acquire lock in last()"
+            );
+            Error::Store {
+                operation: StoreOperation::LockConnection,
+                reason: format!("{}", e),
+            }
+        })?;
         let query = format!(
             "SELECT sn, value FROM {} WHERE prefix = ?1 ORDER BY sn DESC LIMIT 1",
             self.table
@@ -475,14 +525,18 @@ impl Collection for SqliteCollection {
         conn.query_row(&query, params![self.prefix], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
         })
-        .ok()
+        .optional()
+        .map_err(|e| Error::Get {
+            key: self.prefix.clone(),
+            reason: format!("{}", e),
+        })
     }
 
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a> {
-        self.make_iter(reverse)
+    ) -> Result<Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>, Error> {
+        Ok(self.make_iter(reverse))
     }
 
     fn name(&self) -> &str {
@@ -502,7 +556,10 @@ pub fn open<P: AsRef<Path>>(
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE;
     let conn = Connection::open_with_flags(path, flags).map_err(|e| {
         error!(path = %path.display(), error = %e, "Failed to open SQLite database");
-        Error::Store { operation: "open_connection".to_owned(), reason: format!("{}", e) }
+        Error::Store {
+            operation: StoreOperation::OpenConnection,
+            reason: format!("{}", e),
+        }
     })?;
 
     let spec = resolve_spec(spec);
@@ -537,7 +594,7 @@ pub fn open<P: AsRef<Path>>(
     .map_err(|e| {
         error!(error = %e, "Failed to execute SQLite PRAGMA statements");
         Error::Store {
-            operation: "execute_batch".to_owned(),
+            operation: StoreOperation::ExecuteBatch,
             reason: format!("{}", e),
         }
     })?;

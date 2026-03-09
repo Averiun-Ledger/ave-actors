@@ -1,7 +1,7 @@
 //! Comprehensive edge case tests for Store module to increase coverage
 
 use ave_actors_store::{
-    Error as StoreError,
+    Error as StoreError, StoreOperation,
     database::{Collection, DbManager, State},
     memory::MemoryManager,
     store::{
@@ -287,10 +287,9 @@ struct FailingCollection {
 }
 
 impl Collection for FailingCollection {
-    fn last(&self) -> Option<(String, Vec<u8>)> {
-        let mut iter = self.iter(true);
-        let value = iter.next();
-        value
+    fn last(&self) -> Result<Option<(String, Vec<u8>)>, StoreError> {
+        let mut iter = self.iter(true)?;
+        Ok(iter.next())
     }
 
     fn name(&self) -> &str {
@@ -300,7 +299,7 @@ impl Collection for FailingCollection {
     fn get(&self, _key: &str) -> Result<Vec<u8>, StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: "test".to_owned(),
+                operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
             })
         } else {
@@ -313,7 +312,7 @@ impl Collection for FailingCollection {
     fn put(&mut self, key: &str, data: &[u8]) -> Result<(), StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: "test".to_owned(),
+                operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
             })
         } else {
@@ -325,7 +324,7 @@ impl Collection for FailingCollection {
     fn del(&mut self, _key: &str) -> Result<(), StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: "test".to_owned(),
+                operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
             })
         } else {
@@ -336,7 +335,7 @@ impl Collection for FailingCollection {
     fn purge(&mut self) -> Result<(), StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: "test".to_owned(),
+                operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
             })
         } else {
@@ -348,8 +347,10 @@ impl Collection for FailingCollection {
     fn iter<'a>(
         &'a self,
         _reverse: bool,
-    ) -> Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a> {
-        Box::new(self.data.iter().map(|(k, v)| (k.clone(), v.clone())))
+    ) -> Result<Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>, StoreError> {
+        Ok(Box::new(
+            self.data.iter().map(|(k, v)| (k.clone(), v.clone())),
+        ))
     }
 }
 
@@ -359,22 +360,15 @@ impl State for FailingCollection {
     }
 
     fn get(&self) -> Result<Vec<u8>, StoreError> {
-        if self.fail_operations {
-            Err(StoreError::Store {
-                operation: "test".to_owned(),
-                reason: "Intentional failure".to_string(),
-            })
-        } else {
-            Err(StoreError::EntryNotFound {
-                key: "Not found".to_string(),
-            })
-        }
+        Err(StoreError::EntryNotFound {
+            key: "Not found".to_string(),
+        })
     }
 
     fn put(&mut self, data: &[u8]) -> Result<(), StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: "test".to_owned(),
+                operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
             })
         } else {
@@ -386,7 +380,7 @@ impl State for FailingCollection {
     fn del(&mut self) -> Result<(), StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: "test".to_owned(),
+                operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
             })
         } else {
@@ -398,7 +392,7 @@ impl State for FailingCollection {
     fn purge(&mut self) -> Result<(), StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: "test".to_owned(),
+                operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
             })
         } else {
@@ -416,7 +410,7 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
     ) -> Result<FailingCollection, StoreError> {
         if self.fail_create {
             Err(StoreError::Store {
-                operation: "create_collection".to_owned(),
+                operation: StoreOperation::CreateCollection,
                 reason: "Failed to create collection".to_string(),
             })
         } else {
@@ -428,7 +422,7 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
         }
     }
 
-    fn stop(self) -> Result<(), StoreError> {
+    fn stop(&mut self) -> Result<(), StoreError> {
         Ok(())
     }
 
@@ -439,7 +433,7 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
     ) -> Result<FailingCollection, StoreError> {
         if self.fail_create {
             Err(StoreError::Store {
-                operation: "create_state".to_owned(),
+                operation: StoreOperation::CreateState,
                 reason: "Failed to create state".to_string(),
             })
         } else {
@@ -605,11 +599,8 @@ async fn test_store_error_scenarios() {
         data: "test".to_string(),
     };
 
-    let result = store_ref.ask(StoreCommand::Persist(event)).await.unwrap();
-    match result {
-        StoreResponse::Error(_) => {} // Expected
-        _ => panic!("Expected error response"),
-    }
+    let result = store_ref.ask(StoreCommand::Persist(event)).await;
+    assert!(matches!(result, Err(ActorError::StoreOperation { .. })));
 
     // Test snapshot failure
     let actor = EncryptedActor {
@@ -617,19 +608,15 @@ async fn test_store_error_scenarios() {
         data: "test".to_string(),
     };
 
-    let result = store_ref.ask(StoreCommand::Snapshot(actor)).await.unwrap();
-    match result {
-        StoreResponse::Error(_) => {} // Expected
-        _ => panic!("Expected error response"),
-    }
+    let result = store_ref.ask(StoreCommand::Snapshot(actor)).await;
+    assert!(matches!(result, Err(ActorError::StoreOperation { .. })));
 
     // Test recover with no state
-    let result = store_ref.ask(StoreCommand::Recover).await.unwrap();
-    match result {
-        StoreResponse::State(None) => {} // Expected for empty store
-        StoreResponse::Error(_) => {} // Also acceptable due to failing operations
-        _ => panic!("Expected None state or error response"),
-    }
+    let result = store_ref.ask(StoreCommand::Recover).await;
+    assert!(matches!(
+        result,
+        Ok(StoreResponse::State(None)) | Err(ActorError::StoreOperation { .. })
+    ));
 }
 
 #[tokio::test]

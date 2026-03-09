@@ -66,7 +66,7 @@ fn test_sqlite_iteration() {
     let mut collection = manager.create_collection("iter", "prefix").unwrap();
 
     // Test empty iteration
-    let items: Vec<_> = collection.iter(false).collect();
+    let items: Vec<_> = collection.iter(false).unwrap().collect();
     assert_eq!(items.len(), 0);
 
     // Add items
@@ -75,10 +75,10 @@ fn test_sqlite_iteration() {
     Collection::put(&mut collection, "c", b"3").unwrap();
 
     // Test forward iteration
-    let items: Vec<_> = collection.iter(false).collect();
+    let items: Vec<_> = collection.iter(false).unwrap().collect();
     assert_eq!(items.len(), 3);
 
     // Test reverse iteration
-    let items: Vec<_> = collection.iter(true).collect();
+    let items: Vec<_> = collection.iter(true).unwrap().collect();
     assert_eq!(items.len(), 3);
 }

@@ -3,7 +3,7 @@
 
 use crate::{
     database::{Collection, DbManager, State},
-    error::Error,
+    error::{Error, StoreOperation},
 };
 
 use std::{
@@ -27,7 +27,7 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
         prefix: &str,
     ) -> Result<MemoryStore, Error> {
         let mut data_lock = self.data.write().map_err(|e| Error::Store {
-            operation: "lock_manager_data".to_owned(),
+            operation: StoreOperation::LockManagerData,
             reason: format!("{}", e),
         })?;
         let data = data_lock
@@ -43,7 +43,7 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
         })
     }
 
-    fn stop(self) -> Result<(), Error> {
+    fn stop(&mut self) -> Result<(), Error> {
         Ok(())
     }
 
@@ -53,7 +53,7 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
         prefix: &str,
     ) -> Result<MemoryStore, Error> {
         let mut data_lock = self.data.write().map_err(|e| Error::Store {
-            operation: "lock_manager_data".to_owned(),
+            operation: StoreOperation::LockManagerData,
             reason: format!("{}", e),
         })?;
         let data = data_lock
@@ -79,6 +79,12 @@ pub struct MemoryStore {
     data: Arc<RwLock<BTreeMap<String, Vec<u8>>>>,
 }
 
+impl MemoryStore {
+    fn collection_prefix(&self) -> String {
+        format!("{}.", self.prefix)
+    }
+}
+
 impl State for MemoryStore {
     fn name(&self) -> &str {
         &self.name
@@ -86,7 +92,7 @@ impl State for MemoryStore {
 
     fn get(&self) -> Result<Vec<u8>, Error> {
         let lock = self.data.read().map_err(|e| Error::Store {
-            operation: "lock_data".to_owned(),
+            operation: StoreOperation::LockData,
             reason: format!("{}", e),
         })?;
 
@@ -104,7 +110,7 @@ impl State for MemoryStore {
         self.data
             .write()
             .map_err(|e| Error::Store {
-                operation: "lock_data".to_owned(),
+                operation: StoreOperation::LockData,
                 reason: format!("{}", e),
             })?
             .insert(self.prefix.clone(), data.to_vec());
@@ -114,7 +120,7 @@ impl State for MemoryStore {
 
     fn del(&mut self) -> Result<(), Error> {
         let mut lock = self.data.write().map_err(|e| Error::Store {
-            operation: "lock_data".to_owned(),
+            operation: StoreOperation::LockData,
             reason: format!("{}", e),
         })?;
         match lock.remove(&self.prefix) {
@@ -127,27 +133,18 @@ impl State for MemoryStore {
 
     fn purge(&mut self) -> Result<(), Error> {
         let mut lock = self.data.write().map_err(|e| Error::Store {
-            operation: "lock_data".to_owned(),
+            operation: StoreOperation::LockData,
             reason: format!("{}", e),
         })?;
-
-        let keys_to_remove: Vec<String> = lock
-            .keys()
-            .filter(|key| key.starts_with(&self.prefix))
-            .cloned()
-            .collect();
-        for key in keys_to_remove {
-            lock.remove(&key);
-        }
-        drop(lock);
+        let _ = lock.remove(&self.prefix);
         Ok(())
     }
 }
 
 impl Collection for MemoryStore {
-    fn last(&self) -> Option<(String, Vec<u8>)> {
-        let mut iter = self.iter(true);
-        iter.next()
+    fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
+        let mut iter = self.iter(true)?;
+        Ok(iter.next())
     }
 
     fn name(&self) -> &str {
@@ -157,7 +154,7 @@ impl Collection for MemoryStore {
     fn get(&self, key: &str) -> Result<Vec<u8>, Error> {
         let key = format!("{}.{}", self.prefix, key);
         let lock = self.data.read().map_err(|e| Error::Store {
-            operation: "lock_data".to_owned(),
+            operation: StoreOperation::LockData,
             reason: format!("{}", e),
         })?;
 
@@ -176,7 +173,7 @@ impl Collection for MemoryStore {
         self.data
             .write()
             .map_err(|e| Error::Store {
-                operation: "lock_data".to_owned(),
+                operation: StoreOperation::LockData,
                 reason: format!("{}", e),
             })?
             .insert(key, data.to_vec());
@@ -187,7 +184,7 @@ impl Collection for MemoryStore {
     fn del(&mut self, key: &str) -> Result<(), Error> {
         let key = format!("{}.{}", self.prefix, key);
         let mut lock = self.data.write().map_err(|e| Error::Store {
-            operation: "lock_data".to_owned(),
+            operation: StoreOperation::LockData,
             reason: format!("{}", e),
         })?;
         match lock.remove(&key) {
@@ -200,13 +197,14 @@ impl Collection for MemoryStore {
 
     fn purge(&mut self) -> Result<(), Error> {
         let mut lock = self.data.write().map_err(|e| Error::Store {
-            operation: "lock_data".to_owned(),
+            operation: StoreOperation::LockData,
             reason: format!("{}", e),
         })?;
+        let collection_prefix = self.collection_prefix();
 
         let keys_to_remove: Vec<String> = lock
             .keys()
-            .filter(|key| key.starts_with(&self.prefix))
+            .filter(|key| key.starts_with(&collection_prefix))
             .cloned()
             .collect();
         for key in keys_to_remove {
@@ -219,31 +217,34 @@ impl Collection for MemoryStore {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a> {
-        let Ok(lock) = self.data.read() else {
-            return Box::new(std::iter::empty());
-        };
+    ) -> Result<Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>, Error> {
+        let lock = self.data.read().map_err(|e| Error::Store {
+            operation: StoreOperation::LockData,
+            reason: format!("{}", e),
+        })?;
+        let collection_prefix = self.collection_prefix();
+        let prefix_len = collection_prefix.len();
 
         let items: Vec<(String, Vec<u8>)> = if reverse {
             lock.iter()
                 .rev()
-                .filter(|(key, _)| key.starts_with(&self.prefix))
+                .filter(|(key, _)| key.starts_with(&collection_prefix))
                 .map(|(key, value)| {
-                    let key = &key[self.prefix.len() + 1..];
+                    let key = &key[prefix_len..];
                     (key.to_owned(), value.clone())
                 })
                 .collect()
         } else {
             lock.iter()
-                .filter(|(key, _)| key.starts_with(&self.prefix))
+                .filter(|(key, _)| key.starts_with(&collection_prefix))
                 .map(|(key, value)| {
-                    let key = &key[self.prefix.len() + 1..];
+                    let key = &key[prefix_len..];
                     (key.to_owned(), value.clone())
                 })
                 .collect()
         };
 
-        Box::new(items.into_iter())
+        Ok(Box::new(items.into_iter()))
     }
 }
 

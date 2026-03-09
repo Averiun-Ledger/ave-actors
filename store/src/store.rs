@@ -10,7 +10,7 @@
 
 use crate::{
     database::{Collection, DbManager, State},
-    error::Error,
+    error::{Error, StoreOperation},
 };
 
 use ave_actors_actor::{
@@ -35,6 +35,23 @@ use std::fmt::Debug;
 
 /// Nonce size for XChaCha20-Poly1305 encryption.
 const NONCE_SIZE: usize = 24;
+
+fn store_error(operation: StoreOperation, reason: impl ToString) -> Error {
+    Error::Store {
+        operation,
+        reason: reason.to_string(),
+    }
+}
+
+fn actor_store_error(
+    operation: StoreOperation,
+    reason: impl ToString,
+) -> ActorError {
+    ActorError::StoreOperation {
+        operation: operation.to_string(),
+        reason: reason.to_string(),
+    }
+}
 
 /// Defines the persistence strategy for an actor.
 /// This determines how events and state are stored.
@@ -217,6 +234,26 @@ where
         *self = state;
     }
 
+    /// Snapshot cadence for `FullPersistence`.
+    ///
+    /// - `None`: snapshots are only manual or done during store shutdown.
+    /// - `Some(n)`: after every `n` persisted events since the last snapshot,
+    ///   the store snapshots the current actor state automatically.
+    ///
+    /// Default: `Some(100)`.
+    fn snapshot_every() -> Option<u64> {
+        Some(100)
+    }
+
+    /// Whether already snapshotted events should be compacted after a
+    /// successful snapshot.
+    ///
+    /// Default: `false`, so `FullPersistence` keeps the full audit log unless
+    /// the actor opts into retention explicitly.
+    fn compact_on_snapshot() -> bool {
+        false
+    }
+
     /// Persists an event by applying it to state and storing it in the database.
     /// This is the main method for persisting state changes in event sourcing.
     ///
@@ -259,37 +296,67 @@ where
         let prev_state = self.clone();
 
         if let Err(e) = self.apply(event) {
-            self.update(prev_state);
+            self.update(prev_state.clone());
             return Err(e);
         }
 
         let response = match Self::Persistence::get_persistence() {
-            PersistenceType::Light => store
-                .ask(StoreCommand::PersistLight(event.clone(), self.clone()))
-                .await
-                .map_err(|e| ActorError::StoreOperation {
-                    operation: "persist ligth".to_owned(),
-                    reason: e.to_string(),
-                })?,
-            PersistenceType::Full => store
-                .ask(StoreCommand::Persist(event.clone()))
-                .await
-                .map_err(|e| ActorError::StoreOperation {
-                    operation: "persist".to_owned(),
-                    reason: e.to_string(),
-                })?,
+            PersistenceType::Light => {
+                match store
+                    .ask(StoreCommand::PersistLight(
+                        event.clone(),
+                        self.clone(),
+                    ))
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(e) => {
+                        self.update(prev_state.clone());
+                        return Err(actor_store_error(
+                            StoreOperation::PersistLight,
+                            e,
+                        ));
+                    }
+                }
+            }
+            PersistenceType::Full => {
+                match store
+                    .ask(StoreCommand::PersistFullEvent {
+                        event: event.clone(),
+                        snapshot_every: Self::snapshot_every(),
+                    })
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(e) => {
+                        self.update(prev_state.clone());
+                        return Err(actor_store_error(
+                            StoreOperation::PersistFull,
+                            e,
+                        ));
+                    }
+                }
+            }
         };
 
         match response {
             StoreResponse::Persisted => Ok(()),
-            StoreResponse::Error(error) => Err(ActorError::StoreOperation {
-                operation: "response".to_owned(),
-                reason: error.to_string(),
-            }),
-            _ => Err(ActorError::UnexpectedResponse {
-                path: ActorPath::from(format!("{}/store", ctx.path().clone())),
-                expected: "StoreResponse::Persisted".to_owned(),
-            }),
+            StoreResponse::SnapshotRequired => {
+                self.snapshot(ctx).await?;
+                Ok(())
+            }
+            _ => {
+                self.update(prev_state);
+                Err(ActorError::UnexpectedResponse {
+                    path: ActorPath::from(format!(
+                        "{}/store",
+                        ctx.path().clone()
+                    )),
+                    expected:
+                        "StoreResponse::Persisted | StoreResponse::SnapshotRequired"
+                            .to_owned(),
+                })
+            }
         }
     }
 
@@ -315,10 +382,7 @@ where
         store
             .ask(StoreCommand::Snapshot(self.clone()))
             .await
-            .map_err(|e| ActorError::StoreOperation {
-                operation: "snapshot".to_owned(),
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| actor_store_error(StoreOperation::Snapshot, e))?;
         Ok(())
     }
 
@@ -361,22 +425,13 @@ where
 
         let store =
             Store::<Self>::new(name, &prefix, manager, key_box, self.clone())
-                .map_err(|e| ActorError::StoreOperation {
-                operation: "store_operation".to_owned(),
-                reason: e.to_string(),
-            })?;
+                .map_err(|e| actor_store_error(StoreOperation::StoreInit, e))?;
         let store = ctx.create_child("store", store).await?;
         let response = store.ask(StoreCommand::Recover).await?;
 
         match response {
             StoreResponse::State(Some(state)) => {
                 self.update(state);
-            }
-            StoreResponse::Error(error) => {
-                return Err(ActorError::StoreOperation {
-                    operation: "store_operation".to_owned(),
-                    reason: error.to_string(),
-                });
             }
             _ => {}
         }
@@ -404,14 +459,23 @@ where
     P: PersistentActor,
     P::Event: BorshSerialize + BorshDeserialize,
 {
-    /// Current event sequence number (auto-incrementing).
+    /// Next free event index.
+    ///
+    /// This is not the number of the last persisted event; it is the index that
+    /// the next persisted event will use.
     event_counter: u64,
-    /// Current state version number (for snapshots).
+    /// Number of events already included in the latest snapshot.
+    ///
+    /// If `state_counter == 10`, the snapshot contains events `0..=9`.
     state_counter: u64,
+    /// Exclusive upper bound of the event range already compacted from the log.
+    compacted_until: u64,
     /// Collection for storing events with sequence numbers as keys.
     events: Box<dyn Collection>,
     /// Storage for the latest state snapshot.
     states: Box<dyn State>,
+    /// Storage for log metadata used to resume after snapshots/compaction.
+    metadata: Box<dyn State>,
     /// Encrypted password for data encryption (XChaCha20-Poly1305).
     /// If None, data is stored unencrypted.
     key_box: Option<EncryptedKey>,
@@ -425,6 +489,12 @@ where
     P: PersistentActor,
     P::Event: BorshSerialize + BorshDeserialize,
 {
+}
+
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct StoreMetadata {
+    next_event_index: u64,
+    compacted_until: u64,
 }
 
 impl<P> Store<P>
@@ -465,28 +535,109 @@ where
             manager.create_collection(&format!("{}_events", name), prefix)?;
         let states =
             manager.create_state(&format!("{}_states", name), prefix)?;
+        let metadata =
+            manager.create_state(&format!("{}_metadata", name), prefix)?;
 
-        // Initialize event_counter from the last event in the database
-        // event_counter works like vector.len(): last position + 1
-        let initial_event_counter = if let Some((key, _)) = events.last() {
-            key.parse::<u64>().unwrap_or(0) + 1
+        let mut store = Self {
+            event_counter: 0,
+            state_counter: 0,
+            compacted_until: 0,
+            events: Box::new(events),
+            states: Box::new(states),
+            metadata: Box::new(metadata),
+            key_box,
+            initial_state,
+        };
+
+        // Initialize event_counter from persisted metadata when available.
+        // Fall back to the latest snapshot boundary and event log for
+        // backwards compatibility with stores created before metadata existed.
+        let last_event_counter = if let Some((key, _)) = store.events.last()? {
+            key.parse::<u64>()
+                .map_err(|e| store_error(StoreOperation::ParseEventKey, e))?
+                + 1
         } else {
             0
         };
 
+        let snapshot_counter = if let Some((_, counter)) = store.get_state()? {
+            counter
+        } else {
+            0
+        };
+
+        if let Some(metadata) = store.get_metadata()? {
+            store.event_counter =
+                last_event_counter.max(metadata.next_event_index);
+            store.compacted_until = metadata.compacted_until;
+        } else {
+            store.event_counter = last_event_counter.max(snapshot_counter);
+        }
+
         debug!(
-            "Initializing Store with event_counter: {}",
-            initial_event_counter
+            "Initializing Store with event_counter: {}, compacted_until: {}",
+            store.event_counter,
+            store.compacted_until
         );
 
-        Ok(Self {
-            event_counter: initial_event_counter,
-            state_counter: 0,
-            events: Box::new(events),
-            states: Box::new(states),
-            key_box,
-            initial_state,
-        })
+        Ok(store)
+    }
+
+    fn pending_events_since_snapshot(&self) -> u64 {
+        self.event_counter.saturating_sub(self.state_counter)
+    }
+
+    fn get_metadata(&self) -> Result<Option<StoreMetadata>, Error> {
+        let data = match self.metadata.get() {
+            Ok(data) => data,
+            Err(Error::EntryNotFound { .. }) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+
+        let bytes = if let Some(key_box) = &self.key_box {
+            self.decrypt(key_box, data.as_slice())?
+        } else {
+            data
+        };
+
+        let metadata: StoreMetadata = borsh::from_slice(&bytes).map_err(|e| {
+            error!("Can't decode metadata: {}", e);
+            store_error(StoreOperation::DecodeState, e)
+        })?;
+
+        Ok(Some(metadata))
+    }
+
+    fn persist_metadata(&mut self) -> Result<(), Error> {
+        let metadata = StoreMetadata {
+            next_event_index: self.event_counter,
+            compacted_until: self.compacted_until,
+        };
+        let data = borsh::to_vec(&metadata).map_err(|e| {
+            error!("Can't encode metadata: {}", e);
+            store_error(StoreOperation::EncodeActor, e)
+        })?;
+
+        let bytes = if let Some(key_box) = &self.key_box {
+            self.encrypt(key_box, data.as_slice())?
+        } else {
+            data
+        };
+
+        self.metadata.put(&bytes)
+    }
+
+    fn compact_to_snapshot(&mut self) -> Result<(), Error> {
+        for idx in self.compacted_until..self.state_counter {
+            let key = format!("{:020}", idx);
+            match self.events.del(&key) {
+                Ok(()) | Err(Error::EntryNotFound { .. }) => {
+                    self.compacted_until = idx + 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
     }
 
     /// Persist an event.
@@ -507,10 +658,7 @@ where
 
         let bytes = borsh::to_vec(event).map_err(|e| {
             error!("Can't encode event: {}", e);
-            Error::Store {
-                operation: "encode_event".to_owned(),
-                reason: format!("{}", e),
-            }
+            store_error(StoreOperation::EncodeEvent, e)
         })?;
 
         let bytes = if let Some(key_box) = &self.key_box {
@@ -567,10 +715,7 @@ where
 
         let bytes = borsh::to_vec(event).map_err(|e| {
             error!("Can't encode event: {}", e);
-            Error::Store {
-                operation: "encode_event".to_owned(),
-                reason: format!("{}", e),
-            }
+            store_error(StoreOperation::EncodeEvent, e)
         })?;
 
         let bytes = if let Some(key_box) = &self.key_box {
@@ -590,9 +735,8 @@ where
         );
 
         // 1. First persist the event
-        let result = self
-            .events
-            .put(&format!("{:020}", next_event_number), &bytes);
+        let event_key = format!("{:020}", next_event_number);
+        let result = self.events.put(&event_key, &bytes);
 
         // 2. Only increment counter if persist was successful
         if result.is_ok() {
@@ -607,7 +751,19 @@ where
 
         // 3. NOW create snapshot with the updated event_counter
         // This ensures state_counter = event_counter after the snapshot
-        self.snapshot(state)?;
+        if let Err(snapshot_err) = self.snapshot(state) {
+            self.event_counter = next_event_number;
+            if let Err(rollback_err) = self.events.del(&event_key) {
+                return Err(store_error(
+                    StoreOperation::RollbackPersistLight,
+                    format!(
+                        "snapshot failed: {}; rollback delete failed: {}",
+                        snapshot_err, rollback_err
+                    ),
+                ));
+            }
+            return Err(snapshot_err);
+        }
 
         Ok(())
     }
@@ -621,7 +777,7 @@ where
     /// An error if the operation failed.
     ///
     fn last_event(&self) -> Result<Option<P::Event>, Error> {
-        if let Some((_, data)) = self.events.last() {
+        if let Some((_, data)) = self.events.last()? {
             let data = if let Some(key_box) = &self.key_box {
                 self.decrypt(key_box, data.as_slice())?
             } else {
@@ -630,10 +786,7 @@ where
 
             let event: P::Event = borsh::from_slice(&data).map_err(|e| {
                 error!("Can't decode event: {}", e);
-                Error::Store {
-                    operation: "decode_event".to_owned(),
-                    reason: format!("{}", e),
-                }
+                store_error(StoreOperation::DecodeEvent, e)
             })?;
 
             Ok(Some(event))
@@ -662,10 +815,7 @@ where
 
         let state: (P, u64) = borsh::from_slice(&bytes).map_err(|e| {
             error!("Can't decode state: {}", e);
-            Error::Store {
-                operation: "decode_state".to_owned(),
-                reason: format!("{}", e),
-            }
+            store_error(StoreOperation::DecodeState, e)
         })?;
 
         Ok(Some(state))
@@ -673,29 +823,27 @@ where
 
     /// Retrieve events.
     fn events(&self, from: u64, to: u64) -> Result<Vec<P::Event>, Error> {
+        if from > to {
+            return Ok(Vec::new());
+        }
+
         let mut events = Vec::new();
 
         for i in from..=to {
-            if let Ok(data) = self.events.get(&format!("{:020}", i)) {
-                let data = if let Some(key_box) = &self.key_box {
-                    self.decrypt(key_box, data.as_slice())?
-                } else {
-                    data
-                };
-
-                let event: P::Event =
-                    borsh::from_slice(&data).map_err(|e| {
-                        error!("Can't decode event: {}", e);
-                        Error::Store {
-                            operation: "decode_event".to_owned(),
-                            reason: format!("{}", e),
-                        }
-                    })?;
-
-                events.push(event);
+            let key = format!("{:020}", i);
+            let data = self.events.get(&key)?;
+            let data = if let Some(key_box) = &self.key_box {
+                self.decrypt(key_box, data.as_slice())?
             } else {
-                break;
-            }
+                data
+            };
+
+            let event: P::Event = borsh::from_slice(&data).map_err(|e| {
+                error!("Can't decode event: {}", e);
+                store_error(StoreOperation::DecodeEvent, e)
+            })?;
+
+            events.push(event);
         }
         Ok(events)
     }
@@ -713,15 +861,12 @@ where
     fn snapshot(&mut self, actor: &P) -> Result<(), Error> {
         debug!("Snapshotting state: {:?}", actor);
 
-        self.state_counter = self.event_counter;
+        let next_state_counter = self.event_counter;
 
         let data =
-            borsh::to_vec(&(actor, self.state_counter)).map_err(|e| {
+            borsh::to_vec(&(actor, next_state_counter)).map_err(|e| {
                 error!("Can't encode actor: {}", e);
-                Error::Store {
-                    operation: "encode_actor".to_owned(),
-                    reason: format!("{}", e),
-                }
+                store_error(StoreOperation::EncodeActor, e)
             })?;
 
         let bytes = if let Some(key_box) = &self.key_box {
@@ -730,7 +875,23 @@ where
             data
         };
 
-        self.states.put(&bytes)
+        self.states.put(&bytes)?;
+        self.state_counter = next_state_counter;
+        self.persist_metadata()?;
+        if P::compact_on_snapshot() {
+            if let Err(err) = self.compact_to_snapshot() {
+                warn!(
+                    error = %err,
+                    "Snapshot persisted but event compaction failed; keeping event log"
+                );
+            } else if let Err(err) = self.persist_metadata() {
+                warn!(
+                    error = %err,
+                    "Snapshot metadata persisted but compaction watermark update failed"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Recover the state.
@@ -748,59 +909,57 @@ where
             self.state_counter = counter;
             debug!("Recovered state with counter: {}", counter);
 
-            if let Some((key, ..)) = self.events.last() {
-                self.event_counter =
-                    key.parse::<u64>().map_err(|e| Error::Store {
-                        operation: "parse_event_key".to_owned(),
-                        reason: format!("{}", e),
-                    })? + 1;
-
-                debug!(
-                    "Recovery state: event_counter={}, state_counter={}",
-                    self.event_counter, self.state_counter
-                );
-
-                if self.event_counter != self.state_counter {
-                    warn!(
-                        event_counter = self.event_counter,
-                        state_counter = self.state_counter,
-                        "State mismatch detected, replaying events"
-                    );
-                    debug!(
-                        "Applying events from {} to {}",
-                        self.state_counter,
-                        self.event_counter - 1
-                    );
-                    let events = self
-                        .events(self.state_counter, self.event_counter - 1)?;
-                    debug!("Found {} events to replay", events.len());
-
-                    for (i, event) in events.iter().enumerate() {
-                        debug!("Applying event {} of {}", i + 1, events.len());
-                        state.apply(event).map_err(|e| Error::Store {
-                            operation: "apply_event".to_owned(),
-                            reason: e.to_string(),
-                        })?;
-                    }
-
-                    debug!(
-                        "Updating snapshot after applying {} events",
-                        events.len()
-                    );
-                    self.snapshot(&state)?;
-                    debug!(
-                        "Recovery completed. Final event_counter: {}",
-                        self.event_counter
-                    );
-                    // Note: We don't increment event_counter here as it already has the correct value
-                    // from the last persisted event key
-                } else {
-                    debug!("State is up to date, no events to apply");
-                }
+            let last_event_counter = if let Some((key, ..)) = self.events.last()? {
+                key.parse::<u64>()
+                    .map_err(|e| store_error(StoreOperation::ParseEventKey, e))?
+                    + 1
             } else {
-                debug!(
-                    "No events found in database, using recovered state as-is"
+                0
+            };
+
+            // When old events have been compacted away, the snapshot counter is
+            // still the authoritative lower bound for the next event index.
+            self.event_counter = self.state_counter.max(last_event_counter);
+
+            debug!(
+                "Recovery state: event_counter={}, state_counter={}",
+                self.event_counter, self.state_counter
+            );
+
+            if self.event_counter > self.state_counter {
+                warn!(
+                    event_counter = self.event_counter,
+                    state_counter = self.state_counter,
+                    "State mismatch detected, replaying events"
                 );
+                debug!(
+                    "Applying events from {} to {}",
+                    self.state_counter,
+                    self.event_counter - 1
+                );
+                let events =
+                    self.events(self.state_counter, self.event_counter - 1)?;
+                debug!("Found {} events to replay", events.len());
+
+                for (i, event) in events.iter().enumerate() {
+                    debug!("Applying event {} of {}", i + 1, events.len());
+                    state.apply(event)
+                        .map_err(|e| store_error(StoreOperation::ApplyEvent, e))?;
+                }
+
+                debug!(
+                    "Updating snapshot after applying {} events",
+                    events.len()
+                );
+                self.snapshot(&state)?;
+                debug!(
+                    "Recovery completed. Final event_counter: {}",
+                    self.event_counter
+                );
+                // Note: We don't increment event_counter here as it already has the correct value
+                // from the last persisted event key or the latest snapshot boundary.
+            } else {
+                debug!("State is up to date, no events to apply");
             }
 
             Ok(Some(state))
@@ -808,16 +967,14 @@ where
             debug!("No previous state found");
 
             // Check if there are any events in the database
-            if let Some((key, ..)) = self.events.last() {
+            if let Some((key, ..)) = self.events.last()? {
                 debug!(
                     "No snapshot but events found - replaying from beginning"
                 );
 
-                self.event_counter =
-                    key.parse::<u64>().map_err(|e| Error::Store {
-                        operation: "parse_event_key".to_owned(),
-                        reason: format!("{}", e),
-                    })? + 1;
+                self.event_counter = key.parse::<u64>().map_err(|e| {
+                    store_error(StoreOperation::ParseEventKey, e)
+                })? + 1;
                 self.state_counter = 0;
 
                 debug!(
@@ -835,9 +992,8 @@ where
 
                 for (i, event) in events.iter().enumerate() {
                     debug!("Applying event {} of {}", i + 1, events.len());
-                    state.apply(event).map_err(|e| Error::Store {
-                        operation: "apply_event".to_owned(),
-                        reason: e.to_string(),
+                    state.apply(event).map_err(|e| {
+                        store_error(StoreOperation::ApplyEvent, e)
                     })?;
                 }
 
@@ -881,9 +1037,8 @@ where
 
         let events = self.events(self.state_counter, self.event_counter - 1)?;
         for event in &events {
-            state.apply(event).map_err(|e| Error::Store {
-                operation: "apply_event_on_stop".to_owned(),
-                reason: e.to_string(),
+            state.apply(event).map_err(|e| {
+                store_error(StoreOperation::ApplyEventOnStop, e)
             })?;
         }
 
@@ -899,8 +1054,10 @@ where
     pub fn purge(&mut self) -> Result<(), Error> {
         self.events.purge()?;
         self.states.purge()?;
+        self.metadata.purge()?;
         self.event_counter = 0;
         self.state_counter = 0;
+        self.compacted_until = 0;
         Ok(())
     }
 
@@ -944,7 +1101,7 @@ where
                     "Invalid encryption key length"
                 );
                 return Err(Error::Store {
-                    operation: "validate_key_length".to_owned(),
+                    operation: StoreOperation::ValidateKeyLength,
                     reason: format!(
                         "Invalid key length: expected 32 bytes, got {}",
                         key.len()
@@ -964,10 +1121,7 @@ where
             let ciphertext: Vec<u8> =
                 cipher.encrypt(&nonce, bytes.as_ref()).map_err(|e| {
                     error!(error = %e, "Encryption failed");
-                    Error::Store {
-                        operation: "encrypt_data".to_owned(),
-                        reason: format!("{}", e),
-                    }
+                    store_error(StoreOperation::EncryptData, e)
                 })?;
 
             // Prepend nonce to ciphertext for storage
@@ -975,10 +1129,7 @@ where
             Ok([nonce.to_vec(), ciphertext].concat())
         } else {
             error!("Failed to decrypt encryption key");
-            Err(Error::Store {
-                operation: "decrypt_key".to_owned(),
-                reason: "Can't decrypt key".to_owned(),
-            })
+            Err(store_error(StoreOperation::DecryptKey, "Can't decrypt key"))
         }
     }
 
@@ -1020,7 +1171,7 @@ where
                 "Invalid ciphertext length, possible corruption"
             );
             return Err(Error::Store {
-                operation: "validate_ciphertext".to_owned(),
+                operation: StoreOperation::ValidateCiphertext,
                 reason: format!(
                     "Invalid ciphertext length: expected at least {} bytes, got {}",
                     NONCE_SIZE + 16,
@@ -1037,13 +1188,13 @@ where
                     got = key.len(),
                     "Invalid decryption key length"
                 );
-                return Err(Error::Store {
-                    operation: "validate_key_length".to_owned(),
-                    reason: format!(
+                return Err(store_error(
+                    StoreOperation::ValidateKeyLength,
+                    format!(
                         "Invalid key length: expected 32 bytes, got {}",
                         key.len()
                     ),
-                });
+                ));
             }
 
             // Extract nonce from the beginning of ciphertext
@@ -1060,22 +1211,19 @@ where
             let plaintext =
                 cipher.decrypt(nonce, ciphertext_data).map_err(|e| {
                     warn!(error = %e, "Decryption failed, possible tampering or corruption");
-                    Error::Store {
-                        operation: "decrypt_data".to_owned(),
-                        reason: format!(
+                    store_error(
+                        StoreOperation::DecryptData,
+                        format!(
                             "Decryption failed (possible tampering): {}",
                             e
                         ),
-                    }
+                    )
                 })?;
 
             Ok(plaintext)
         } else {
             error!("Failed to decrypt decryption key");
-            Err(Error::Store {
-                operation: "decrypt_key".to_owned(),
-                reason: "Can't decrypt key".to_owned(),
-            })
+            Err(store_error(StoreOperation::DecryptKey, "Can't decrypt key"))
         }
     }
 }
@@ -1084,12 +1232,25 @@ where
 #[derive(Debug, Clone)]
 pub enum StoreCommand<P, E> {
     Persist(E),
+    PersistFullEvent {
+        event: E,
+        snapshot_every: Option<u64>,
+    },
+    PersistFull {
+        event: E,
+        actor: P,
+        snapshot_every: Option<u64>,
+    },
     PersistLight(E, P),
     Snapshot(P),
+    Compact,
     LastEvent,
     LastEventNumber,
     LastEventsFrom(u64),
-    GetEvents { from: u64, to: u64 },
+    GetEvents {
+        from: u64,
+        to: u64,
+    },
     Recover,
     Purge,
 }
@@ -1112,12 +1273,13 @@ where
 {
     None,
     Persisted,
+    SnapshotRequired,
     Snapshotted,
+    Compacted,
     State(Option<P>),
     LastEvent(Option<P::Event>),
     LastEventNumber(u64),
     Events(Vec<P::Event>),
-    Error(Error),
 }
 
 /// Implements `Response` for store response.
@@ -1162,10 +1324,16 @@ where
     /// pattern where the parent actor was responsible for triggering snapshots.
     async fn pre_stop(
         &mut self,
-        _ctx: &mut ActorContext<Self>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         if let Err(e) = self.snapshot_if_needed() {
             error!(error = %e, "Failed to snapshot state during Store shutdown");
+            let _ = ctx
+                .emit_error(actor_store_error(
+                    StoreOperation::EmitPreStopError,
+                    e,
+                ))
+                .await;
         }
         Ok(())
     }
@@ -1186,80 +1354,121 @@ where
         // Match the command.
         match msg {
             // Persist an event.
-            StoreCommand::Persist(event) => match self.persist(&event) {
-                Ok(_) => {
-                    debug!("Persisted event: {:?}", event);
+            StoreCommand::Persist(event) => {
+                self.persist(&event).map_err(|e| {
+                    actor_store_error(StoreOperation::Persist, e)
+                })?;
+                debug!("Persisted event: {:?}", event);
+                Ok(StoreResponse::Persisted)
+            }
+            StoreCommand::PersistFullEvent {
+                event,
+                snapshot_every,
+            } => {
+                self.persist(&event).map_err(|e| {
+                    actor_store_error(StoreOperation::PersistFull, e)
+                })?;
+
+                if snapshot_every.is_some_and(|every| {
+                    self.pending_events_since_snapshot() >= every
+                }) {
+                    debug!(
+                        "Persisted full event and snapshot is now required"
+                    );
+                    Ok(StoreResponse::SnapshotRequired)
+                } else {
+                    debug!("Persisted full event: {:?}", event);
                     Ok(StoreResponse::Persisted)
                 }
-                Err(e) => Ok(StoreResponse::Error(e)),
-            },
+            }
+            StoreCommand::PersistFull {
+                event,
+                actor,
+                snapshot_every,
+            } => {
+                self.persist(&event).map_err(|e| {
+                    actor_store_error(StoreOperation::PersistFull, e)
+                })?;
+
+                if snapshot_every.is_some_and(|every| {
+                    self.pending_events_since_snapshot() >= every
+                }) {
+                    self.snapshot(&actor).map_err(|e| {
+                        actor_store_error(StoreOperation::Snapshot, e)
+                    })?;
+                }
+
+                debug!("Persisted full event: {:?}", event);
+                Ok(StoreResponse::Persisted)
+            }
             // Light persistence of an event.
             StoreCommand::PersistLight(event, actor) => {
-                match self.persist_state(&event, &actor) {
-                    Ok(_) => {
-                        debug!("Light persistence of event: {:?}", event);
-                        Ok(StoreResponse::Persisted)
-                    }
-                    Err(e) => Ok(StoreResponse::Error(e)),
-                }
+                self.persist_state(&event, &actor).map_err(|e| {
+                    actor_store_error(StoreOperation::PersistLight, e)
+                })?;
+                debug!("Light persistence of event: {:?}", event);
+                Ok(StoreResponse::Persisted)
             }
             // Snapshot the state.
-            StoreCommand::Snapshot(actor) => match self.snapshot(&actor) {
-                Ok(_) => {
-                    debug!("Snapshotted state: {:?}", actor);
-                    Ok(StoreResponse::Snapshotted)
-                }
-                Err(e) => Ok(StoreResponse::Error(e)),
-            },
+            StoreCommand::Snapshot(actor) => {
+                self.snapshot(&actor).map_err(|e| {
+                    actor_store_error(StoreOperation::Snapshot, e)
+                })?;
+                debug!("Snapshotted state: {:?}", actor);
+                Ok(StoreResponse::Snapshotted)
+            }
+            StoreCommand::Compact => {
+                self.compact_to_snapshot().map_err(|e| {
+                    actor_store_error(StoreOperation::Compact, e)
+                })?;
+                debug!("Compacted events covered by the latest snapshot");
+                Ok(StoreResponse::Compacted)
+            }
             // Recover the state.
-            StoreCommand::Recover => match self.recover() {
-                Ok(state) => {
-                    debug!("Recovered state: {:?}", state);
-                    Ok(StoreResponse::State(state))
-                }
-                Err(e) => Ok(StoreResponse::Error(e)),
-            },
+            StoreCommand::Recover => {
+                let state = self.recover().map_err(|e| {
+                    actor_store_error(StoreOperation::Recover, e)
+                })?;
+                debug!("Recovered state: {:?}", state);
+                Ok(StoreResponse::State(state))
+            }
             StoreCommand::GetEvents { from, to } => {
                 let events = self.events(from, to).map_err(|e| {
-                    ActorError::StoreOperation {
-                        operation: "get_events_range".to_owned(),
-                        reason: format!("Unable to get events range: {}", e),
-                    }
+                    actor_store_error(
+                        StoreOperation::GetEventsRange,
+                        format!("Unable to get events range: {}", e),
+                    )
                 })?;
                 Ok(StoreResponse::Events(events))
             }
             // Get the last event.
-            StoreCommand::LastEvent => match self.last_event() {
-                Ok(event) => {
-                    debug!("Last event: {:?}", event);
-                    Ok(StoreResponse::LastEvent(event))
-                }
-                Err(e) => Ok(StoreResponse::Error(e)),
-            },
+            StoreCommand::LastEvent => {
+                let event = self.last_event().map_err(|e| {
+                    actor_store_error(StoreOperation::LastEvent, e)
+                })?;
+                debug!("Last event: {:?}", event);
+                Ok(StoreResponse::LastEvent(event))
+            }
             // Purge the store.
-            StoreCommand::Purge => match self.purge() {
-                Ok(_) => {
-                    debug!("Purged store");
-                    Ok(StoreResponse::None)
-                }
-                Err(e) => Ok(StoreResponse::Error(e)),
-            },
+            StoreCommand::Purge => {
+                self.purge()
+                    .map_err(|e| actor_store_error(StoreOperation::Purge, e))?;
+                debug!("Purged store");
+                Ok(StoreResponse::None)
+            }
             // Get the last event number.
             StoreCommand::LastEventNumber => {
                 Ok(StoreResponse::LastEventNumber(self.event_counter))
             }
             // Get the last events from a number of counter.
             StoreCommand::LastEventsFrom(from) => {
-                let events =
-                    self.events(from, self.event_counter).map_err(|e| {
-                        ActorError::StoreOperation {
-                            operation: "get_latest_events".to_owned(),
-                            reason: format!(
-                                "Unable to get the latest events: {}",
-                                e
-                            ),
-                        }
-                    })?;
+                let to = self.event_counter.saturating_sub(1);
+                let events = self.events(from, to).map_err(|e| {
+                    actor_store_error(
+                        StoreOperation::GetLatestEvents,
+                        format!("Unable to get the latest events: {}", e),
+                    )
+                })?;
                 Ok(StoreResponse::Events(events))
             }
         }
@@ -1624,7 +1833,7 @@ mod tests {
             panic!("Events not found");
         }
         let response = store
-            .ask(StoreCommand::GetEvents { from: 0, to: 2 })
+            .ask(StoreCommand::GetEvents { from: 0, to: 1 })
             .await
             .unwrap();
         if let StoreResponse::Events(events) = response {

@@ -66,7 +66,7 @@ fn test_rocksdb_iteration() {
     let mut collection = manager.create_collection("iter", "prefix").unwrap();
 
     // Test empty iteration
-    let items: Vec<_> = collection.iter(false).collect();
+    let items: Vec<_> = collection.iter(false).unwrap().collect();
     assert_eq!(items.len(), 0);
 
     // Add items
@@ -75,15 +75,15 @@ fn test_rocksdb_iteration() {
     Collection::put(&mut collection, "c", b"3").unwrap();
 
     // Test forward iteration
-    let items: Vec<_> = collection.iter(false).collect();
+    let items: Vec<_> = collection.iter(false).unwrap().collect();
     assert_eq!(items.len(), 3);
 
     // Test reverse iteration
-    let items: Vec<_> = collection.iter(true).collect();
+    let items: Vec<_> = collection.iter(true).unwrap().collect();
     assert_eq!(items.len(), 3);
 
     // Test last
-    let last = collection.last();
+    let last = collection.last().unwrap();
     assert!(last.is_some());
 }
 
@@ -100,13 +100,13 @@ fn test_rocksdb_purge() {
     Collection::put(&mut collection, "key2", b"value2").unwrap();
 
     // Verify items exist
-    let items: Vec<_> = collection.iter(false).collect();
+    let items: Vec<_> = collection.iter(false).unwrap().collect();
     assert_eq!(items.len(), 2);
 
     // Purge
     Collection::purge(&mut collection).unwrap();
 
     // Verify empty
-    let items: Vec<_> = collection.iter(false).collect();
+    let items: Vec<_> = collection.iter(false).unwrap().collect();
     assert_eq!(items.len(), 0);
 }
