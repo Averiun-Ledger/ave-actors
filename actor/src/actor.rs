@@ -8,7 +8,7 @@
 use crate::{
     ActorPath, Error,
     handler::HandleHelper,
-    runner::{InnerAction, InnerSender, StopSender},
+    runner::{InnerAction, InnerSender, StopHandle, StopSender},
     supervision::SupervisionStrategy,
     system::SystemRef,
 };
@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::Span;
 
-use std::{collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug, time::Duration};
 
 /// The `ActorContext` is the context of the actor.
 /// It is passed to the actor when it is started, and can be used to interact with the actor
@@ -38,7 +38,7 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     /// Inner sender.
     inner_sender: InnerSender<A>,
     /// Child action senders.
-    child_senders: HashMap<ActorPath, StopSender>,
+    child_senders: HashMap<ActorPath, StopHandle>,
 
     span: tracing::Span,
 }
@@ -160,8 +160,9 @@ where
     ///
     /// - Drains all tracked child stop senders from the registry.
     /// - For each child, creates a oneshot channel for confirmation.
-    /// - Sends the stop signal and waits for confirmation.
-    /// - If sending fails, continues with the next child.
+    /// - Sends the stop signal and waits for confirmation using the child
+    ///   actor's configured `stop_timeout()`, if any.
+    /// - If sending fails or a timeout expires, continues with the next child.
     ///
     pub(crate) async fn stop_childs(&mut self) {
         let child_count = self.child_senders.len();
@@ -171,17 +172,27 @@ where
 
         // Send all stop signals first so all children begin shutdown concurrently.
         let mut receivers = Vec::with_capacity(child_count);
-        for (_, sender) in std::mem::take(&mut self.child_senders) {
+        for (path, handle) in std::mem::take(&mut self.child_senders) {
             let (stop_sender, stop_receiver) = oneshot::channel();
-            if sender.send(Some(stop_sender)).await.is_ok() {
-                receivers.push(stop_receiver);
+            if handle.sender().send(Some(stop_sender)).await.is_ok() {
+                receivers.push((path, handle.timeout(), stop_receiver));
             }
         }
 
         // Wait for all confirmations. Children shut down in parallel so the
         // total wait is max(child_shutdown_time) rather than the sum.
-        for receiver in receivers {
-            let _ = receiver.await;
+        for (path, timeout, receiver) in receivers {
+            if let Some(timeout) = timeout {
+                if tokio::time::timeout(timeout, receiver).await.is_err() {
+                    tracing::warn!(
+                        child = %path,
+                        timeout_ms = timeout.as_millis(),
+                        "Timed out waiting for child actor shutdown acknowledgement"
+                    );
+                }
+            } else {
+                let _ = receiver.await;
+            }
         }
     }
 
@@ -213,6 +224,9 @@ where
 
     /// Emits an event to subscribers.
     ///
+    /// This is an explicit operation: the runtime will not derive or publish
+    /// events automatically from handler responses.
+    ///
     /// # Arguments
     ///
     /// * `event` - The event to emit.
@@ -238,6 +252,10 @@ where
     }
 
     /// Emits an error.
+    ///
+    /// Child actors forward the error to their parent through
+    /// [`Handler::on_child_error()`]. Root actors publish it as
+    /// [`SystemEvent::ActorError`](crate::SystemEvent::ActorError).
     ///
     /// # Arguments
     ///
@@ -335,7 +353,10 @@ where
         match result {
             Ok((actor_ref, stop_sender)) => {
                 let child_path = path.clone();
-                self.child_senders.insert(path, stop_sender.clone());
+                self.child_senders.insert(
+                    path,
+                    StopHandle::new(stop_sender.clone(), C::stop_timeout()),
+                );
                 let inner_sender = self.inner_sender.clone();
                 tokio::spawn(async move {
                     stop_sender.closed().await;
@@ -360,7 +381,7 @@ where
         let should_remove = self
             .child_senders
             .get(child_path)
-            .map(|sender| sender.is_closed())
+            .map(StopHandle::is_closed)
             .unwrap_or(false);
         if should_remove {
             self.child_senders.remove(child_path);
@@ -393,7 +414,7 @@ where
     /// Returns Some(Error) if an error is set, None otherwise.
     ///
     pub(crate) fn error(&self) -> Option<Error> {
-        self.error.clone().or(None)
+        self.error.clone()
     }
 
     /// Sets the error state of the actor.
@@ -491,6 +512,18 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
         std::time::Duration::from_secs(5)
     }
 
+    /// Maximum time to wait for `pre_start()` to complete before actor creation
+    /// fails. `None` disables the startup timeout.
+    fn startup_timeout() -> Option<Duration> {
+        None
+    }
+
+    /// Maximum time a parent or the system should wait for this actor to
+    /// acknowledge a stop request. `None` disables the stop timeout.
+    fn stop_timeout() -> Option<Duration> {
+        None
+    }
+
     /// Defines the supervision strategy to use for this actor. By default it is
     /// `Stop` which simply stops the actor if an error occurs at startup or when an
     /// error or fault is issued from a handler.
@@ -572,7 +605,11 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
         Ok(())
     }
 
-    /// Create event from response.
+    /// Optional helper for actors that want to map a handler response into an
+    /// event before persisting or publishing it.
+    ///
+    /// This method is not invoked automatically by the runtime. Call it from
+    /// your own actor logic when that mapping is useful.
     fn from_response(_response: Self::Response) -> Result<Self::Event, Error> {
         Err(Error::Functional {
             description: "Not implemented".to_string(),
@@ -580,10 +617,14 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
     }
 }
 
-/// Events that this actor will emit after processing a message. The events emitted by a message
-/// handler will be used to apply the event sourcing pattern.
+/// Events managed by the actor.
 ///
-/// Note: If you need persistence, the event type must also implement `BorshSerialize` and `BorshDeserialize`.
+/// Events are application-defined values that the actor may persist, pass to
+/// `on_event()`, and/or publish through [`ActorContext::publish_event()`].
+/// None of those steps happen automatically; the handler decides when they run.
+///
+/// Note: If you need persistence, the event type must also implement
+/// `BorshSerialize` and `BorshDeserialize`.
 pub trait Event:
     Serialize + DeserializeOwned + Debug + Clone + Send + Sync + 'static
 {
@@ -602,6 +643,10 @@ pub trait Message: Clone + Send + Sync + 'static {
 
 /// Defines the response of a message.
 pub trait Response: Send + Sync + 'static {}
+
+impl Response for () {}
+impl Event for () {}
+impl Message for () {}
 
 /// This is the trait that allows an actor to handle the messages that they receive and,
 /// if necessary, respond to them.
@@ -629,9 +674,11 @@ pub trait Handler<A: Actor + Handler<A>>: Send + Sync {
         ctx: &mut ActorContext<A>,
     ) -> Result<A::Response, Error>;
 
-    /// Internal event.
-    /// Override this method to define what should happen when an internal event is emitted by the
-    /// actor.
+    /// Handles an actor-defined event inside the actor itself.
+    ///
+    /// This hook is not called automatically by the runtime. Invoke it
+    /// explicitly from your actor logic when you want to apply/persist an event
+    /// before publishing it or otherwise reacting to it.
     /// By default it does nothing.
     ///
     /// # Arguments
@@ -666,8 +713,6 @@ pub trait Handler<A: Actor + Handler<A>>: Send + Sync {
         _ctx: &mut ActorContext<A>,
     ) {
         tracing::error!(error = %error, "Child actor error");
-        // Default implementation from child actor errors.
-        //self.on_child_fault(error, ctx).await;
     }
 
     /// Called when a fault occurs in a child actor.
@@ -776,6 +821,21 @@ where
         self.sender.ask(self.path(), message).await
     }
 
+    /// Asks a message to the actor with a timeout.
+    /// If the actor does not respond within the given duration,
+    /// returns `Error::Timeout`.
+    pub async fn ask_timeout(
+        &self,
+        message: A::Message,
+        timeout: std::time::Duration,
+    ) -> Result<A::Response, Error> {
+        tokio::time::timeout(timeout, self.sender.ask(self.path(), message))
+            .await
+            .map_err(|_| Error::Timeout {
+                ms: timeout.as_millis(),
+            })?
+    }
+
     /// Stops the actor.
     /// This will stop the actor and remove it from the actor system.
     /// The actor will not be able to receive any more messages.
@@ -827,6 +887,11 @@ where
     ///
     pub fn is_closed(&self) -> bool {
         self.sender.is_closed()
+    }
+
+    /// Completes when the actor has fully terminated (mailbox receiver dropped).
+    pub async fn closed(&self) {
+        self.sender.close().await;
     }
 
     /// Subscribes to the actor event bus.
@@ -940,7 +1005,11 @@ mod test {
     async fn test_actor() {
         build_tracing_subscriber();
         let (event_sender, _event_receiver) = mpsc::channel(100);
-        let system = SystemRef::new(event_sender, CancellationToken::new(), CancellationToken::new());
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
         let actor = TestActor { counter: 0 };
         let actor_ref = system.create_root_actor("test", actor).await.unwrap();
 

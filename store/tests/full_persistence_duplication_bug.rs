@@ -71,7 +71,6 @@ impl Actor for VectorActorFull {
         self.start_store("vector_test_full", None, ctx, manager, None)
             .await
     }
-
 }
 
 #[async_trait]
@@ -116,7 +115,8 @@ impl PersistentActor for VectorActorFull {
 #[tokio::test]
 async fn test_full_persistence_duplication_on_restart() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor_ref = system

@@ -7,16 +7,23 @@
 use crate::{
     Actor, ActorPath, ActorRef, Error, Event, Handler,
     actor::ChildErrorSender,
-    runner::{ActorRunner, StopSender},
+    runner::{ActorRunner, StopHandle, StopSender},
     sink::Sink,
 };
 
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use tracing::{Instrument, Span, debug, error, warn};
 
-use std::{any::Any, collections::HashMap, sync::Arc};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 /// The reason why the actor system stopped.
 ///
@@ -90,10 +97,18 @@ impl ActorSystem {
 }
 
 /// System-level events for coordinating actor system lifecycle.
-/// These events are used internally to manage system-wide operations.
+/// `StopSystem` is used internally by the runner. Other variants are also
+/// broadcast so callers can observe system-level activity.
 ///
 #[derive(Debug, Clone)]
 pub enum SystemEvent {
+    /// Non-fatal error emitted by a root actor that has no parent to receive it.
+    ActorError {
+        /// Path of the actor that emitted the error.
+        path: ActorPath,
+        /// Error emitted by that actor.
+        error: Error,
+    },
     /// Signals that the actor system should stop.
     /// Carries the reason so the runner can report it to the caller.
     StopSystem(ShutdownReason),
@@ -116,18 +131,24 @@ pub struct SystemRef {
     /// Uses type erasure (Any) to store heterogeneous actor types.
     actors:
         Arc<RwLock<HashMap<ActorPath, Box<dyn Any + Send + Sync + 'static>>>>,
+    /// Direct-children index to avoid scanning the full actor registry on lookups.
+    child_index: Arc<RwLock<HashMap<ActorPath, HashSet<ActorPath>>>>,
 
     /// Registry of helper objects that can be shared across actors.
     /// Helpers can be any type (database connections, configurations, etc.).
     helpers: Arc<RwLock<HashMap<String, Box<dyn Any + Send + Sync + 'static>>>>,
 
     /// Stop senders for root-level actors to enable coordinated shutdown.
-    root_senders: Arc<RwLock<Vec<StopSender>>>,
+    root_senders: Arc<RwLock<HashMap<ActorPath, StopHandle>>>,
+    /// Broadcast bus for observable system-level events such as root actor errors.
+    system_event_sender: broadcast::Sender<SystemEvent>,
 
     /// Cancelled by an external signal (SIGTERM, operator). Exit code 0.
     graceful_token: CancellationToken,
     /// Cancelled by an actor on unrecoverable failure. Exit code 1.
     crash_token: CancellationToken,
+    /// Set as soon as shutdown begins; blocks creation of new actors.
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl SystemRef {
@@ -151,13 +172,19 @@ impl SystemRef {
     /// - Stops all root actors in order, waiting for each to confirm.
     /// - Sends a StopSystem event to the runner to complete shutdown.
     ///
-    pub fn new(
+    pub(crate) fn new(
         event_sender: mpsc::Sender<SystemEvent>,
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
     ) -> Self {
-        let root_senders = Arc::new(RwLock::new(Vec::<StopSender>::new()));
+        let root_senders =
+            Arc::new(RwLock::new(HashMap::<ActorPath, StopHandle>::new()));
+        let child_index = Arc::new(RwLock::new(HashMap::new()));
+        let (system_event_sender, _) = broadcast::channel::<SystemEvent>(256);
+        let shutting_down = Arc::new(AtomicBool::new(false));
         let root_sender_clone = root_senders.clone();
+        let system_event_sender_clone = system_event_sender.clone();
+        let shutting_down_clone = shutting_down.clone();
         let graceful_clone = graceful_token.clone();
         let crash_clone = crash_token.clone();
 
@@ -166,29 +193,98 @@ impl SystemRef {
                 _ = graceful_clone.cancelled() => ShutdownReason::Graceful,
                 _ = crash_clone.cancelled()   => ShutdownReason::Crash,
             };
+            shutting_down_clone.store(true, Ordering::SeqCst);
             debug!(reason = ?reason, "Stopping actor system");
-            let mut root_senders = root_sender_clone.write().await;
-            while let Some(sender) = root_senders.pop() {
+            let root_senders = {
+                let mut root_senders = root_sender_clone.write().await;
+                // Move the senders out while holding the lock, then release it
+                // before awaiting on stop notifications.
+                std::mem::take(&mut *root_senders)
+            };
+
+            // Send all stop signals first so all root actors begin shutdown concurrently.
+            let mut receivers = Vec::with_capacity(root_senders.len());
+            for (path, handle) in root_senders {
                 let (stop_sender, stop_receiver) = oneshot::channel();
-                if sender.send(Some(stop_sender)).await.is_err() {
-                    warn!("Failed to send stop signal to root actor");
-                    continue;
+                if handle.sender().send(Some(stop_sender)).await.is_ok() {
+                    receivers.push((path, handle.timeout(), stop_receiver));
                 } else {
-                    let _ = stop_receiver.await;
-                };
+                    warn!(path = %path, "Failed to send stop signal to root actor");
+                }
             }
 
-            if let Err(e) = event_sender.send(SystemEvent::StopSystem(reason)).await {
+            // Wait for all confirmations in parallel.
+            for (path, timeout, receiver) in receivers {
+                if let Some(timeout) = timeout {
+                    if tokio::time::timeout(timeout, receiver).await.is_err() {
+                        warn!(
+                            path = %path,
+                            timeout_ms = timeout.as_millis(),
+                            "Timed out waiting for root actor shutdown acknowledgement"
+                        );
+                    }
+                } else {
+                    let _ = receiver.await;
+                }
+            }
+
+            if let Err(e) = event_sender
+                .send(SystemEvent::StopSystem(reason.clone()))
+                .await
+            {
                 error!(error = %e, "Failed to send StopSystem event");
             }
+            let _ =
+                system_event_sender_clone.send(SystemEvent::StopSystem(reason));
         });
 
         Self {
             actors: Arc::new(RwLock::new(HashMap::new())),
+            child_index,
             helpers: Arc::new(RwLock::new(HashMap::new())),
             graceful_token,
             crash_token,
             root_senders,
+            system_event_sender,
+            shutting_down,
+        }
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
+            || self.graceful_token.is_cancelled()
+            || self.crash_token.is_cancelled()
+    }
+
+    /// Subscribes to system-level observable events.
+    ///
+    /// This is useful for monitoring root actor errors and shutdown events.
+    pub fn subscribe_system_events(&self) -> broadcast::Receiver<SystemEvent> {
+        self.system_event_sender.subscribe()
+    }
+
+    pub(crate) fn publish_system_event(&self, event: SystemEvent) {
+        let _ = self.system_event_sender.send(event);
+    }
+
+    async fn index_actor(&self, path: &ActorPath) {
+        let parent = path.parent();
+        self.child_index
+            .write()
+            .await
+            .entry(parent)
+            .or_default()
+            .insert(path.clone());
+    }
+
+    async fn deindex_actor(&self, path: &ActorPath) {
+        let parent = path.parent();
+        let mut child_index = self.child_index.write().await;
+        if let Some(children) = child_index.get_mut(&parent) {
+            children.remove(path);
+            if children.is_empty() {
+                child_index.remove(&parent);
+            }
         }
     }
 
@@ -229,8 +325,14 @@ impl SystemRef {
     where
         A: Actor + Handler<A>,
     {
+        if self.is_shutting_down() {
+            debug!(path = %path, "Rejecting actor creation during shutdown");
+            return Err(Error::SystemStopped);
+        }
+
         // Create the actor runner and init it.
         let system = self.clone();
+        let is_root = parent_error_sender.is_none();
         let (mut runner, actor_ref, stop_sender) =
             ActorRunner::create(path.clone(), actor, parent_error_sender);
 
@@ -244,11 +346,27 @@ impl SystemRef {
             }
             actors.insert(path.clone(), Box::new(actor_ref.clone()));
         }
+        self.index_actor(&path).await;
+
+        if is_root {
+            let mut root_senders = self.root_senders.write().await;
+            if self.is_shutting_down() {
+                drop(root_senders);
+                self.remove_actor(&path).await;
+                debug!(path = %path, "Rejecting root actor creation after shutdown started");
+                return Err(Error::SystemStopped);
+            }
+            root_senders.insert(
+                path.clone(),
+                StopHandle::new(stop_sender.clone(), A::stop_timeout()),
+            );
+        }
+
         let (sender, receiver) = oneshot::channel::<bool>();
 
         let stop_sender_clone = stop_sender.clone();
         let span_clone = span.clone();
-        tokio::spawn(
+        let init_handle = tokio::spawn(
             async move {
                 runner
                     .init(system, stop_sender_clone, Some(sender), span_clone)
@@ -257,21 +375,46 @@ impl SystemRef {
             .instrument(span),
         );
 
-        match receiver.await {
-            Ok(true) => {
+        let startup_result = match A::startup_timeout() {
+            Some(timeout) => tokio::time::timeout(timeout, receiver)
+                .await
+                .map_err(|_| timeout),
+            None => Ok(receiver.await),
+        };
+
+        match startup_result {
+            Ok(Ok(true)) => {
                 debug!(path = %path, "Actor initialized successfully");
                 Ok((actor_ref, stop_sender))
             }
-            Ok(false) => {
+            Ok(Ok(false)) => {
                 error!(path = %path, "Actor runner failed to initialize");
+                self.remove_actor(&path).await;
+                if is_root {
+                    self.root_senders.write().await.remove(&path);
+                }
                 Err(Error::FunctionalCritical {
                     description: format!("Runner can not init {}", path),
                 })
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 error!(path = %path, error = %e, "Failed to receive initialization signal");
+                self.remove_actor(&path).await;
+                if is_root {
+                    self.root_senders.write().await.remove(&path);
+                }
                 Err(Error::FunctionalCritical {
                     description: e.to_string(),
+                })
+            }
+            Err(timeout) => {
+                init_handle.abort();
+                self.remove_actor(&path).await;
+                if is_root {
+                    self.root_senders.write().await.remove(&path);
+                }
+                Err(Error::Timeout {
+                    ms: timeout.as_millis(),
                 })
             }
         }
@@ -308,10 +451,25 @@ impl SystemRef {
         let path = ActorPath::from("/user") / name;
         let id = &path.key();
 
-        let (actor_ref, stop_sender, ..) = self
-            .create_actor_path::<A>(path, actor, None, A::get_span(id, None))
+        let (actor_ref, ..) = self
+            .create_actor_path::<A>(
+                path.clone(),
+                actor,
+                None,
+                A::get_span(id, None),
+            )
             .await?;
-        self.root_senders.write().await.push(stop_sender);
+
+        // When this root actor fully terminates on its own, remove its stop
+        // sender entry so shutdown only sees live roots.
+        let root_senders = self.root_senders.clone();
+        let watch = actor_ref.clone();
+        let watch_path = path.clone();
+        tokio::spawn(async move {
+            watch.closed().await;
+            root_senders.write().await.remove(&watch_path);
+        });
+
         Ok(actor_ref)
     }
 
@@ -324,29 +482,26 @@ impl SystemRef {
     ///
     pub(crate) async fn remove_actor(&self, path: &ActorPath) {
         let mut actors = self.actors.write().await;
-        actors.remove(path);
+        let removed = actors.remove(path).is_some();
+        drop(actors);
+        if removed {
+            self.deindex_actor(path).await;
+        }
     }
 
-    /// Initiates graceful shutdown of the entire actor system.
-    /// This cancels the system's cancellation token, which triggers
-    /// the shutdown sequence for all root actors.
+    /// Initiates graceful shutdown for the whole system.
     ///
-    /// # Behavior
-    ///
-    /// - Cancels the system token.
-    /// - Triggers the shutdown task spawned in `new()`.
-    /// - Root actors are stopped in reverse order of creation.
-    /// - System runner receives StopSystem event when complete.
-    ///
-    /// Initiates graceful shutdown. Use this for external signals (SIGTERM, operator).
-    /// [`SystemRunner::run()`] will return [`ShutdownReason::Graceful`] (exit code 0).
+    /// This cancels the graceful token, stops root actors and eventually makes
+    /// [`SystemRunner::run()`] return [`ShutdownReason::Graceful`].
     pub fn stop_system(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
         self.graceful_token.cancel();
     }
 
     /// Initiates a crash shutdown. Actors call this on unrecoverable failure.
     /// [`SystemRunner::run()`] will return [`ShutdownReason::Crash`] (exit code 1).
     pub fn crash_system(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
         self.crash_token.cancel();
     }
 
@@ -363,11 +518,12 @@ impl SystemRef {
     /// Returns a vector of ActorPath for all direct children.
     ///
     pub async fn children(&self, path: &ActorPath) -> Vec<ActorPath> {
-        self.actors
+        self.child_index
             .read()
             .await
-            .keys()
-            .filter(|actor| actor.is_child_of(path))
+            .get(path)
+            .into_iter()
+            .flat_map(|children| children.iter())
             .cloned()
             .collect()
     }
@@ -457,16 +613,6 @@ impl SystemRunner {
         Self { event_receiver }
     }
 
-    /// Runs the system event loop.
-    /// This method blocks and processes system events until a StopSystem
-    /// event is received. Must be spawned in a separate task.
-    ///
-    /// # Behavior
-    ///
-    /// - Waits for system events on the event channel.
-    /// - Processes StopSystem event by logging and exiting the loop.
-    /// - Returns when the system is stopped.
-    ///
     /// Runs the system event loop until the system stops.
     ///
     /// Returns the [`ShutdownReason`] so the caller can choose the exit code:
@@ -477,13 +623,18 @@ impl SystemRunner {
     /// ```
     pub async fn run(&mut self) -> ShutdownReason {
         debug!("Running actor system");
-        tokio::select! {
-            Some(event) = self.event_receiver.recv() => {
-                match event {
-                    SystemEvent::StopSystem(reason) => {
-                        debug!(reason = ?reason, "Actor system stopped");
-                        reason
-                    }
+        loop {
+            match self.event_receiver.recv().await {
+                Some(SystemEvent::StopSystem(reason)) => {
+                    debug!(reason = ?reason, "Actor system stopped");
+                    return reason;
+                }
+                Some(SystemEvent::ActorError { path, error }) => {
+                    warn!(path = %path, error = %error, "Ignoring observable ActorError on control channel");
+                }
+                None => {
+                    warn!("System event channel closed unexpectedly");
+                    return ShutdownReason::Graceful;
                 }
             }
         }
@@ -531,7 +682,10 @@ mod tests {
     #[tokio::test]
     async fn test_helpers() {
         build_tracing_subscriber();
-        let (system, _) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+        let (system, _) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
         let helper = TestHelper { value: 42 };
         system.add_helper("test", helper).await;
         let helper: Option<TestHelper> = system.get_helper("test").await;

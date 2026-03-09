@@ -93,7 +93,8 @@ impl PersistentActor for TestActor {
 #[tokio::test]
 async fn test_last_event_number_after_persist() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let memory_manager = MemoryManager::default();

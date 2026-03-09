@@ -28,6 +28,10 @@ pub enum Error {
         path: ActorPath,
     },
 
+    /// Actor creation was attempted while the system was stopping or already stopped.
+    #[error("actor system is stopping or stopped")]
+    SystemStopped,
+
     // ===== Message Passing Errors =====
     /// Failed to send a message to an actor.
     ///
@@ -98,6 +102,13 @@ pub enum Error {
     /// non-critical messages from its mailbox.
     #[error("actor stopped before processing message")]
     ActorStopped,
+
+    /// The ask request timed out before the actor responded.
+    #[error("ask timed out after {ms}ms")]
+    Timeout {
+        /// Duration waited in milliseconds.
+        ms: u128,
+    },
 
     // ===== Functional Errors =====
     /// A recoverable functional error.

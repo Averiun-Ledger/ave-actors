@@ -230,7 +230,10 @@ async fn test_stress_concurrent_stop_requests() {
     for join in joins {
         let result = join.await.unwrap();
         assert!(
-            matches!(result, Ok(()) | Err(Error::Send { .. }) | Err(Error::ActorStopped)),
+            matches!(
+                result,
+                Ok(()) | Err(Error::Send { .. }) | Err(Error::ActorStopped)
+            ),
             "unexpected concurrent ask_stop result: {result:?}"
         );
     }
@@ -239,7 +242,10 @@ async fn test_stress_concurrent_stop_requests() {
 
     let path = ActorPath::from("/user/stop-stress");
     assert!(system.get_actor::<StressActor>(&path).await.is_err());
-    assert_eq!(actor_ref.ask(StressMessage::Ping).await, Err(Error::ActorStopped));
+    assert_eq!(
+        actor_ref.ask(StressMessage::Ping).await,
+        Err(Error::ActorStopped)
+    );
 
     system.stop_system();
     let shutdown = tokio::time::timeout(Duration::from_secs(5), runner_handle)
@@ -250,7 +256,7 @@ async fn test_stress_concurrent_stop_requests() {
 }
 
 #[tokio::test]
-async fn test_stress_concurrent_fail_terminates_after_startup_retries() {
+async fn test_stress_concurrent_fail_restarts_and_recovers() {
     build_tracing_subscriber();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -283,25 +289,29 @@ async fn test_stress_concurrent_fail_terminates_after_startup_retries() {
     }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let path = ActorPath::from("/user/fail-stress");
     loop {
-        if system
-            .get_actor::<StressActor>(&ActorPath::from("/user/fail-stress"))
-            .await
-            .is_err()
+        if system.get_actor::<StressActor>(&path).await.is_ok()
+            && actor_ref.ask(StressMessage::Ping).await
+                == Ok(StressResponse::Ack)
         {
             break;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "actor did not terminate after fail burst"
+            "actor did not recover after fail burst"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    assert!(hooks.pre_restart_calls.load(Ordering::SeqCst) >= 2);
+    assert!(hooks.pre_restart_calls.load(Ordering::SeqCst) >= 3);
     assert!(hooks.fail_messages.load(Ordering::SeqCst) > 0);
-    assert_eq!(actor_ref.ask(StressMessage::Ping).await, Err(Error::ActorStopped));
+    assert!(system.get_actor::<StressActor>(&path).await.is_ok());
 
-    runner_handle.abort();
-    let _ = runner_handle.await;
+    system.stop_system();
+    let shutdown = tokio::time::timeout(Duration::from_secs(5), runner_handle)
+        .await
+        .expect("runner should finish within timeout")
+        .expect("runner task should not panic");
+    assert_eq!(shutdown, ShutdownReason::Graceful);
 }

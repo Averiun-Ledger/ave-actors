@@ -69,7 +69,6 @@ impl Actor for TestActor {
         self.start_store("test_first_stop", None, ctx, manager, None)
             .await
     }
-
 }
 
 #[async_trait]
@@ -115,7 +114,8 @@ impl PersistentActor for TestActor {
 #[tokio::test]
 async fn test_full_persistence_first_stop_no_previous_snapshot() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     println!(
@@ -190,7 +190,8 @@ async fn test_investigate_stop_store_snapshot_creation() {
     build_tracing_subscriber();
     use ave_actors_store::store::{Store, StoreCommand, StoreResponse};
 
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let memory_manager = MemoryManager::default();

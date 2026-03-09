@@ -383,7 +383,6 @@ where
 
         Ok(())
     }
-
 }
 
 /// Store actor that manages persistent storage for a PersistentActor.
@@ -1401,7 +1400,6 @@ mod tests {
 
             Ok(())
         }
-
     }
 
     #[async_trait]
@@ -1438,7 +1436,6 @@ mod tests {
             }
             Ok(())
         }
-
     }
 
     #[async_trait]
@@ -1554,8 +1551,10 @@ mod tests {
     #[tokio::test]
     async fn test_store_actor() {
         build_tracing_subscriber();
-        let (system, mut runner) =
-            ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
         // Init runner.
         tokio::spawn(async move {
             runner.run().await;
@@ -1640,7 +1639,10 @@ mod tests {
     #[tokio::test]
     async fn test_persistent_light_actor() {
         build_tracing_subscriber();
-        let (system, ..) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+        let (system, ..) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
 
         system.add_helper("db", MemoryManager::default()).await;
 
@@ -1677,8 +1679,10 @@ mod tests {
     #[tokio::test]
     async fn test_persistent_actor() {
         build_tracing_subscriber();
-        let (system, mut runner) =
-            ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
         // Init runner.
         tokio::spawn(async move {
             runner.run().await;

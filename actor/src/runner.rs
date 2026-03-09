@@ -2,18 +2,17 @@
 //!
 
 use crate::{
-    ActorPath,
-    Error,
+    ActorPath, Error,
     actor::{
         Actor, ActorContext, ActorLifecycle, ActorRef, ChildAction, ChildError,
         ChildErrorReceiver, ChildErrorSender, Handler,
     },
-    //error::{error_box, ErrorBoxReceiver, ErrorHelper, SystemError},
     handler::{BoxedMessageHandler, HandleHelper, MailboxReceiver, mailbox},
     supervision::{RetryStrategy, SupervisionStrategy},
-    system::SystemRef,
+    system::{SystemEvent, SystemRef},
 };
 
+use std::time::Duration;
 use tokio::{
     select,
     sync::{
@@ -30,6 +29,31 @@ pub type InnerReceiver<A> = mpsc::Receiver<InnerAction<A>>;
 pub type StopReceiver = mpsc::Receiver<Option<oneshot::Sender<()>>>;
 pub type StopSender = mpsc::Sender<Option<oneshot::Sender<()>>>;
 
+/// Stop channel plus optional acknowledgement timeout for this actor.
+#[derive(Clone)]
+pub struct StopHandle {
+    sender: StopSender,
+    timeout: Option<Duration>,
+}
+
+impl StopHandle {
+    pub const fn new(sender: StopSender, timeout: Option<Duration>) -> Self {
+        Self { sender, timeout }
+    }
+
+    pub fn sender(&self) -> StopSender {
+        self.sender.clone()
+    }
+
+    pub const fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+}
+
 /// Actor runner.
 pub struct ActorRunner<A: Actor> {
     path: ActorPath,
@@ -40,13 +64,13 @@ pub struct ActorRunner<A: Actor> {
 
     event_sender: EventSender<A::Event>,
 
-    // si es root me para alguien y sino mi padre.
+    // Root actors are stopped by operators/system shutdown; children by their parent.
     stop_receiver: StopReceiver,
-    // Sender para darselo a mi hijo, por eso lo guardo.
+    // Shared with children so they can report errors/faults back to this actor.
     error_sender: ChildErrorSender,
-    // Sender para enviarle mensaje a mi padre en caso de que tenga padre.
+    // Used to escalate faults to the parent when this actor is a child.
     parent_sender: Option<ChildErrorSender>,
-    // Escucho los errores de mis hijos.
+    // Receives error/fault notifications from child actors.
     error_receiver: ChildErrorReceiver,
 
     inner_sender: InnerSender<A>,
@@ -71,7 +95,6 @@ where
         let (inner_sender, inner_receiver) = mpsc::channel(1024);
         let helper = HandleHelper::new(sender);
 
-        //let error_helper = ErrorHelper::new(error_sender);
         let actor_ref = ActorRef::new(
             path.clone(),
             helper,
@@ -149,7 +172,8 @@ where
                 // State: RESTARTED
                 ActorLifecycle::Restarted => {
                     // Apply supervision strategy.
-                    self.apply_supervision_strategy(&mut ctx, &mut retries).await;
+                    self.apply_supervision_strategy(&mut ctx, &mut retries)
+                        .await;
                 }
                 // State: STOPPED
                 ActorLifecycle::Stopped => {
@@ -175,8 +199,10 @@ where
                             ),
                         });
 
-                        let (action_sender, action_receiver) = oneshot::channel();
-                        if let Some(parent_sender) = self.parent_sender.as_mut() {
+                        let (action_sender, action_receiver) =
+                            oneshot::channel();
+                        if let Some(parent_sender) = self.parent_sender.as_mut()
+                        {
                             if let Err(err) = parent_sender
                                 .send(ChildError::Fault {
                                     error,
@@ -189,15 +215,23 @@ where
                             } else {
                                 match action_receiver.await {
                                     Ok(ChildAction::Stop) => {
-                                        self.lifecycle = ActorLifecycle::Terminated;
+                                        self.lifecycle =
+                                            ActorLifecycle::Terminated;
                                     }
-                                    Ok(ChildAction::Restart | ChildAction::Delegate) => {
-                                        debug!("Parent requested actor restart");
-                                        self.lifecycle = ActorLifecycle::Restarted;
+                                    Ok(
+                                        ChildAction::Restart
+                                        | ChildAction::Delegate,
+                                    ) => {
+                                        debug!(
+                                            "Parent requested actor restart"
+                                        );
+                                        self.lifecycle =
+                                            ActorLifecycle::Restarted;
                                     }
                                     Err(err) => {
                                         error!(error = %err, "Failed to receive parent action");
-                                        self.lifecycle = ActorLifecycle::Terminated;
+                                        self.lifecycle =
+                                            ActorLifecycle::Terminated;
                                     }
                                 }
                             }
@@ -219,27 +253,22 @@ where
         self.receiver.close();
     }
 
-    /// Main loop of the actor.
-    /// It runs the actor until the actor is stopped.
-    /// The actor runs as long as active references exist. If all references to the actor are
-    /// removed or emit `self.token.cancel(), the execution ends.
-    ///
-    /// # Arguments
-    ///
-    /// * `ctx` - The actor context.
-    ///
+    /// Runs the actor event loop until a stop signal wins the select.
     pub(crate) async fn run(
         &mut self,
         ctx: &mut ActorContext<A>,
     ) -> Option<oneshot::Sender<()>> {
+        self.stop_signal = false;
         let mut stop_ack: Option<oneshot::Sender<()>> = None;
         loop {
             select! {
                 biased;
 
                 stop = self.stop_receiver.recv() => {
+                    let restarting = self.should_restart_after_stop(ctx);
+
                     // 1. Drain mailbox: process critical, discard non-critical.
-                    self.drain_mailbox(ctx).await;
+                    self.drain_mailbox(ctx, !restarting).await;
 
                     // 2. Stop children.
                     ctx.stop_childs().await;
@@ -247,10 +276,13 @@ where
                     // 3. Pre-stop hook.
                     if let Err(e) = self.actor.pre_stop(ctx).await {
                         error!(error = %e, "pre_stop failed");
-                        let _ = ctx.emit_fail(e).await;
                     }
 
-                    ctx.remove_actor().await;
+                    // Keep the actor registered while it restarts so lookups by path
+                    // and pre-existing ActorRef handles remain valid.
+                    if !restarting {
+                        ctx.remove_actor().await;
+                    }
 
                     if let Some(Some(stop_sender)) = stop {
                         stop_ack = Some(stop_sender);
@@ -305,15 +337,34 @@ where
         stop_ack
     }
 
-    /// Drains pending mailbox messages on shutdown.
-    /// Critical messages are processed (with a timeout); non-critical messages
-    /// are discarded and their ask callers receive `Error::ActorStopped`.
+    /// Returns true when the current stop path is part of a restart rather than
+    /// a terminal shutdown.
+    fn should_restart_after_stop(&self, ctx: &ActorContext<A>) -> bool {
+        if self.lifecycle == ActorLifecycle::Restarted {
+            return true;
+        }
+
+        self.parent_sender.is_none()
+            && ctx.error().is_some()
+            && matches!(
+                self.supervision_strategy,
+                SupervisionStrategy::Retry(_)
+            )
+    }
+
+    /// Drains pending mailbox messages on stop.
     ///
-    /// The receiver is closed before draining so that any concurrent senders
-    /// get an immediate error and no messages can sneak in between the drain
-    /// and the channel being dropped at the end of `init()`.
-    async fn drain_mailbox(&mut self, ctx: &mut ActorContext<A>) {
-        self.receiver.close();
+    /// Terminal shutdown closes the receiver first so new sends fail fast. During
+    /// restart the receiver stays open, allowing fresh messages to be processed
+    /// once the actor is running again.
+    async fn drain_mailbox(
+        &mut self,
+        ctx: &mut ActorContext<A>,
+        close_receiver: bool,
+    ) {
+        if close_receiver {
+            self.receiver.close();
+        }
 
         let mut critical: Vec<BoxedMessageHandler<A>> = Vec::new();
 
@@ -338,9 +389,12 @@ where
                 continue;
             }
 
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let remaining =
+                deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                warn!("Drain timeout exceeded, dropping remaining critical messages");
+                warn!(
+                    "Drain timeout exceeded, dropping remaining critical messages"
+                );
                 timed_out = true;
                 msg.respond_stopped();
                 continue;
@@ -370,11 +424,19 @@ where
                 }
             }
             InnerAction::Error(error) => {
-                if let Some(parent_helper) = self.parent_sender.as_mut()
-                    && let Err(err) =
+                if let Some(parent_helper) = self.parent_sender.as_mut() {
+                    if let Err(err) =
                         parent_helper.send(ChildError::Error { error }).await
-                {
-                    error!(error = %err, "Failed to send error to parent");
+                    {
+                        error!(error = %err, "Failed to send error to parent");
+                    }
+                } else {
+                    ctx.system().publish_system_event(
+                        SystemEvent::ActorError {
+                            path: self.path.clone(),
+                            error,
+                        },
+                    );
                 }
             }
             InnerAction::Fail(error) => {
@@ -429,6 +491,7 @@ where
         match strategy {
             SupervisionStrategy::Stop => {
                 error!("Actor failed, supervision strategy is Stop");
+                ctx.remove_actor().await;
                 self.lifecycle = ActorLifecycle::Stopped;
                 self.supervision_strategy = SupervisionStrategy::Stop;
             }
@@ -450,9 +513,11 @@ where
                     let error = ctx.error();
                     match ctx.restart(&mut self.actor, error.as_ref()).await {
                         Ok(_) => {
+                            ctx.clean_error();
                             self.lifecycle = ActorLifecycle::Started;
                             *retries = 0;
-                            self.supervision_strategy = A::supervision_strategy();
+                            self.supervision_strategy =
+                                A::supervision_strategy();
                         }
                         Err(err) => {
                             ctx.set_error(err);
@@ -465,6 +530,7 @@ where
                         retries = *retries,
                         "Max retries exceeded, stopping actor"
                     );
+                    ctx.remove_actor().await;
                     self.lifecycle = ActorLifecycle::Stopped;
                     self.supervision_strategy = A::supervision_strategy();
                 }
@@ -606,7 +672,11 @@ mod tests {
         build_tracing_subscriber();
         let (event_sender, _) = mpsc::channel(100);
 
-        let system = SystemRef::new(event_sender, CancellationToken::new(), CancellationToken::new());
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
 
         let actor = TestActor { failed: false };
         let (mut runner, actor_ref, stop_sender) =
@@ -783,14 +853,19 @@ mod tests {
     async fn test_send_to_stopped_actor_returns_actor_stopped() {
         build_tracing_subscriber();
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
-        let system = SystemRef::new(tx, CancellationToken::new(), CancellationToken::new());
+        let system = SystemRef::new(
+            tx,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
 
         let actor = DrainActor {
             started: Arc::new(Notify::new()),
             release: Arc::new(Notify::new()),
             processed: Arc::new(Mutex::new(vec![])),
         };
-        let actor_ref = system.create_root_actor("stopped", actor).await.unwrap();
+        let actor_ref =
+            system.create_root_actor("stopped", actor).await.unwrap();
 
         // ask_stop waits for the actor to confirm shutdown, so the channel is
         // already closed when this returns.
@@ -819,7 +894,11 @@ mod tests {
     async fn test_drain_critical_processed_normal_stopped() {
         build_tracing_subscriber();
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
-        let system = SystemRef::new(tx, CancellationToken::new(), CancellationToken::new());
+        let system = SystemRef::new(
+            tx,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
 
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -859,7 +938,10 @@ mod tests {
         let critical_result = critical_join.await.unwrap();
 
         assert_eq!(normal_result, Err(Error::ActorStopped));
-        assert!(critical_result.is_ok(), "critical message should be processed: {critical_result:?}");
+        assert!(
+            critical_result.is_ok(),
+            "critical message should be processed: {critical_result:?}"
+        );
 
         let done = processed.lock().await;
         assert_eq!(*done, vec!["critical"]);
@@ -872,7 +954,11 @@ mod tests {
     async fn test_drain_timeout_drops_slow_critical() {
         build_tracing_subscriber();
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
-        let system = SystemRef::new(tx, CancellationToken::new(), CancellationToken::new());
+        let system = SystemRef::new(
+            tx,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
 
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -881,7 +967,10 @@ mod tests {
             started: started.clone(),
             release: release.clone(),
         };
-        let actor_ref = system.create_root_actor("slow_timeout", actor).await.unwrap();
+        let actor_ref = system
+            .create_root_actor("slow_timeout", actor)
+            .await
+            .unwrap();
 
         // Block the actor so we can queue the slow critical before stop runs
         actor_ref.tell(SlowMsg::Block).await.unwrap();

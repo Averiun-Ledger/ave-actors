@@ -205,7 +205,8 @@ impl Handler<ParentActor> for ParentActor {
 #[tokio::test]
 async fn test_create_root_actor_non_persistent_direct() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor = MyNonPersistentActor {
@@ -222,7 +223,8 @@ async fn test_create_root_actor_non_persistent_direct() {
 #[tokio::test]
 async fn test_create_root_actor_persistent_initial() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let result = system
@@ -260,7 +262,8 @@ async fn test_create_root_actor_persistent_initial() {
 #[tokio::test]
 async fn test_create_child_non_persistent_direct() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let parent_ref = system
@@ -283,7 +286,8 @@ async fn test_create_child_non_persistent_direct() {
 #[tokio::test]
 async fn test_create_child_persistent_initial() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let _parent_ref = system
@@ -315,7 +319,8 @@ async fn test_create_child_persistent_initial() {
 #[tokio::test]
 async fn test_all_valid_combinations() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     // ✅ Pattern 1: Non-persistent + Direct instance

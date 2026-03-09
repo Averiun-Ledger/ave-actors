@@ -228,7 +228,8 @@ impl Handler<ChildActor> for ChildActor {
 #[tokio::test]
 async fn test_actor() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     // Init runner.
     tokio::spawn(async move {
         runner.run().await;
@@ -267,7 +268,8 @@ async fn test_actor() {
 #[tokio::test]
 async fn test_actor_error() {
     build_tracing_subscriber();
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     // Init runner.
     tokio::spawn(async move {
         runner.run().await;
@@ -294,7 +296,8 @@ async fn test_actor_fault() {
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
 
-    let (system, mut runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     // Init runner.
     tokio::spawn(async move {
         runner.run().await;

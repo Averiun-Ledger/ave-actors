@@ -210,9 +210,10 @@ impl CustomIntervalStrategy {
     /// Returns a new CustomIntervalStrategy instance.
     ///
     pub fn new(durations: VecDeque<Duration>) -> Self {
+        let max_retries = durations.len();
         Self {
-            durations: durations.clone(),
-            max_retries: durations.len(),
+            durations,
+            max_retries,
         }
     }
 }
