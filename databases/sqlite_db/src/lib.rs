@@ -1,9 +1,5 @@
-//! # SQLite database module.
-//!
-//! This module contains the SQLite database backend implementation.
-//!
+#![doc = include_str!("../README.md")]
 
-//pub mod sqlite;
 #[cfg(feature = "sqlite")]
 mod db;
 

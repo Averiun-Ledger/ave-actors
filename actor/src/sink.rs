@@ -1,4 +1,4 @@
-//! Event sink and subscriber pattern for processing actor events.
+//! Event sink and subscriber pattern for forwarding actor broadcast events to user-defined callbacks.
 
 use crate::Event;
 
@@ -8,6 +8,10 @@ use tokio::sync::broadcast::{Receiver as EventReceiver, error::RecvError};
 use tracing::{debug, warn};
 
 /// Receives actor events from a broadcast channel and forwards them to a [`Subscriber`].
+///
+/// Create a `Sink` with [`Sink::new`] and run it in a background task via
+/// [`SystemRef::run_sink`]. The sink loop exits automatically when the actor's
+/// event channel closes.
 pub struct Sink<E: Event> {
     /// The subscriber that will be notified of events.
     subscriber: Box<dyn Subscriber<E>>,
@@ -16,7 +20,7 @@ pub struct Sink<E: Event> {
 }
 
 impl<E: Event> Sink<E> {
-    /// Creates a sink from a broadcast receiver and a subscriber.
+    /// Creates a sink that will forward events from `event_receiver` to `subscriber`.
     pub fn new(
         event_receiver: EventReceiver<E>,
         subscriber: impl Subscriber<E>,
@@ -27,7 +31,10 @@ impl<E: Event> Sink<E> {
         }
     }
 
-    /// Runs the event loop until the channel closes. Skips lagged events.
+    /// Runs the event forwarding loop until the channel closes.
+    ///
+    /// Calls [`Subscriber::notify`] for each event. If the receiver lags behind
+    /// (slow consumer), skipped events are logged as warnings and the loop continues.
     /// Use [`SystemRef::run_sink`] to spawn this in a background task.
     pub async fn run(&mut self) {
         loop {
@@ -50,7 +57,11 @@ impl<E: Event> Sink<E> {
     }
 }
 
-/// Callback invoked by a [`Sink`] for each received event.
+/// Callback interface invoked by a [`Sink`] for each received event.
+///
+/// Implement this trait to react to actor events asynchronously. The `notify`
+/// method is called once per event; it must be `Send + Sync + 'static` because
+/// it runs inside a spawned Tokio task.
 #[async_trait]
 pub trait Subscriber<E: Event>: Send + Sync + 'static {
     /// Called for each event received from the actor's broadcast channel.

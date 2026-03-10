@@ -110,14 +110,14 @@ impl RocksDbManager {
             }
         };
 
-        // Crear descriptores para cada column family
+        // Build descriptors for each existing column family.
         let cf_opts = options.clone();
         let cf_descriptors: Vec<_> = cfs
             .iter()
             .map(|cf| ColumnFamilyDescriptor::new(cf, cf_opts.clone()))
             .collect();
 
-        // Abrir la base de datos con las column families existentes
+        // Open the database with all existing column families.
         debug!(path = %path.display(), "Opening RocksDB database");
         let db = DB::open_cf_descriptors(&options, path, cf_descriptors)
             .map_err(|e| {
@@ -420,7 +420,7 @@ impl State for RocksDbStore {
         if let Some(handle) = self.store.cf_handle(&self.name) {
             let wopts = write_options(self.strong_durability);
             // Delete only the exact state key to avoid touching other prefixes,
-            // even if someone reused/anidated prefixes.
+            // even if someone reused or nested prefixes.
             self.store
                 .delete_cf_opt(&handle, self.prefix.clone(), &wopts)
                 .map_err(|e| {
@@ -465,9 +465,7 @@ impl Collection for RocksDbStore {
                 })?;
             match result {
                 Some(value) => Ok(value),
-                _ => Err(Error::EntryNotFound {
-                    key: full_key,
-                }),
+                _ => Err(Error::EntryNotFound { key: full_key }),
             }
         } else {
             error!(cf = %self.name, "Column family not found for collection get");
@@ -548,9 +546,9 @@ impl Collection for RocksDbStore {
             let start = format!("{}.", self.prefix).into_bytes();
             let mut end = start.clone();
             end.push(0xFF);
-            // Contract: todas las claves de colección deben seguir "{prefix}.{key}"
-            // y no debe haber claves en esta CF que no empiecen por "{prefix}.";
-            // este rango asume ese layout para borrar solo los eventos de este actor.
+            // Contract: collection keys in this column family follow
+            // "{prefix}.{key}", and unrelated keys are not mixed into the same
+            // range. This lets the backend delete only this actor's entries.
             debug!(cf = %self.name, "Purging collection with range delete");
             self.store
                 .delete_range_cf_opt(&handle, start, end, &wopts)
@@ -574,7 +572,10 @@ impl Collection for RocksDbStore {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>, Error> {
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>,
+        Error,
+    > {
         let Some(_handle) = self.store.cf_handle(&self.name) else {
             error!(cf = %self.name, "Column family not found for collection iter");
             return Err(Error::Store {
@@ -648,7 +649,8 @@ impl Iterator for RocksDbIterator<'_> {
                 Err(e) => {
                     error!(error = %e, "RocksDB iteration error");
                     return Some(Err(Error::Get {
-                        key: String::from_utf8_lossy(&self.prefix_dot).into_owned(),
+                        key: String::from_utf8_lossy(&self.prefix_dot)
+                            .into_owned(),
                         reason: format!("{}", e),
                     }));
                 }

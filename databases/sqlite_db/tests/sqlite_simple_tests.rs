@@ -173,10 +173,13 @@ fn test_sqlite_identifier_validation() {
     let db_path = temp_dir.path().join("identifier_validation");
     let manager = SqliteManager::new(&db_path, false, None).unwrap();
 
-    manager.create_collection("valid_name_42", "prefix").unwrap();
+    manager
+        .create_collection("valid_name_42", "prefix")
+        .unwrap();
     manager.create_state("_valid_state", "prefix").unwrap();
 
-    let invalid_collection = manager.create_collection("users; DROP TABLE x", "prefix");
+    let invalid_collection =
+        manager.create_collection("users; DROP TABLE x", "prefix");
     assert!(matches!(
         invalid_collection,
         Err(Error::CreateStore { reason }) if reason.contains("invalid SQLite identifier")

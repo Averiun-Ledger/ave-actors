@@ -1,5 +1,4 @@
-//! Memory store implementation.
-//!
+//! In-memory [`DbManager`] backend, intended for tests and ephemeral usage.
 
 use crate::{
     database::{Collection, DbManager, State},
@@ -15,6 +14,11 @@ type MemoryData = Arc<
     RwLock<HashMap<(String, String), Arc<RwLock<BTreeMap<String, Vec<u8>>>>>>,
 >;
 
+/// In-memory database manager backed by a shared `Arc<RwLock<...>>`.
+///
+/// All collections and state stores created by the same `MemoryManager` instance
+/// share the underlying `HashMap`, so data survives across handle clones just
+/// as it would with a real database.
 #[derive(Default, Clone)]
 pub struct MemoryManager {
     data: MemoryData,
@@ -70,8 +74,11 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
     }
 }
 
-/// A store implementation that stores data in memory.
+/// In-memory implementation of both [`Collection`] and [`State`].
 ///
+/// Data is stored in a `BTreeMap` behind an `Arc<RwLock<...>>` so it can be
+/// shared across clones. All keys in collection mode are prefixed with
+/// `"<prefix>."` to avoid collisions with state-mode entries.
 #[derive(Default, Clone)]
 pub struct MemoryStore {
     name: String,
@@ -132,11 +139,13 @@ impl State for MemoryStore {
     }
 
     fn purge(&mut self) -> Result<(), Error> {
-        let mut lock = self.data.write().map_err(|e| Error::Store {
-            operation: StoreOperation::LockData,
-            reason: format!("{}", e),
-        })?;
-        let _ = lock.remove(&self.prefix);
+        self.data
+            .write()
+            .map_err(|e| Error::Store {
+                operation: StoreOperation::LockData,
+                reason: format!("{}", e),
+            })?
+            .remove(&self.prefix);
         Ok(())
     }
 }
@@ -159,11 +168,7 @@ impl Collection for MemoryStore {
         })?;
 
         lock.get(&key).map_or_else(
-            || {
-                Err(Error::EntryNotFound {
-                    key: key.clone(),
-                })
-            },
+            || Err(Error::EntryNotFound { key: key.clone() }),
             |value| Ok(value.clone()),
         )
     }
@@ -189,9 +194,7 @@ impl Collection for MemoryStore {
         })?;
         match lock.remove(&key) {
             Some(_) => Ok(()),
-            None => Err(Error::EntryNotFound {
-                key,
-            }),
+            None => Err(Error::EntryNotFound { key }),
         }
     }
 
@@ -217,7 +220,10 @@ impl Collection for MemoryStore {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>, Error> {
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>,
+        Error,
+    > {
         let lock = self.data.read().map_err(|e| Error::Store {
             operation: StoreOperation::LockData,
             reason: format!("{}", e),

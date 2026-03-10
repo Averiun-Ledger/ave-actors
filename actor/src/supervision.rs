@@ -2,25 +2,32 @@
 
 use std::{collections::VecDeque, fmt::Debug, time::Duration};
 
-/// Controls how many times and how often a failing actor is restarted.
+/// Defines how many times and how quickly a failing actor is restarted.
+///
+/// Implement this to create a custom backoff policy. The actor system calls
+/// `max_retries` to determine the attempt budget and `next_backoff` before
+/// each retry to get the delay (or `None` for immediate retry).
 pub trait RetryStrategy: Debug + Send + Sync {
-    /// Maximum number of restart attempts before permanently failing the actor.
+    /// Returns the maximum number of restart attempts before the actor is permanently stopped.
     fn max_retries(&self) -> usize;
 
-    /// Delay before the next restart attempt, or `None` to retry immediately.
+    /// Returns the delay before the next restart attempt, or `None` to retry immediately.
     fn next_backoff(&mut self) -> Option<Duration>;
 }
 
-/// What to do when an actor fails at startup.
+/// Determines what happens when an actor fails during startup.
+///
+/// Pass this when creating an actor to control whether the system stops
+/// on first failure or retries with a configurable back-off strategy.
 #[derive(Debug, Clone)]
 pub enum SupervisionStrategy {
-    /// Stop the actor if an error occurs at startup
+    /// Stop the actor permanently on the first startup error.
     Stop,
-    /// Retry start the actor if an error occurs at startup
+    /// Retry startup using the given [`Strategy`].
     Retry(Strategy),
 }
 
-/// Concrete retry strategy implementations.
+/// Concrete retry strategy implementations. Choose `NoInterval`, `FixedInterval`, or `CustomIntervalStrategy`.
 #[derive(Debug, Clone)]
 pub enum Strategy {
     /// Retry immediately with no delay between attempts.
@@ -55,7 +62,7 @@ impl Default for Strategy {
     }
 }
 
-/// Retry strategy with no delay between attempts.
+/// Retries startup immediately with no delay between attempts, up to `max_retries` times.
 #[derive(Debug, Default, Clone)]
 pub struct NoIntervalStrategy {
     /// Maximum number of retry attempts.
@@ -63,7 +70,7 @@ pub struct NoIntervalStrategy {
 }
 
 impl NoIntervalStrategy {
-    /// Creates a strategy with up to `max_retries` immediate attempts.
+    /// Creates the strategy with up to `max_retries` immediate restart attempts.
     pub const fn new(max_retries: usize) -> Self {
         Self { max_retries }
     }
@@ -79,7 +86,7 @@ impl RetryStrategy for NoIntervalStrategy {
     }
 }
 
-/// Retry strategy with a fixed delay between attempts.
+/// Retries startup after a fixed delay between each attempt, up to `max_retries` times.
 #[derive(Debug, Default, Clone)]
 pub struct FixedIntervalStrategy {
     /// Maximum number of retries before permanently failing an actor.
@@ -89,7 +96,7 @@ pub struct FixedIntervalStrategy {
 }
 
 impl FixedIntervalStrategy {
-    /// Creates a strategy: up to `max_retries` attempts with `duration` delay each.
+    /// Creates the strategy with up to `max_retries` attempts and `duration` wait between each.
     pub const fn new(max_retries: usize, duration: Duration) -> Self {
         Self {
             max_retries,
@@ -108,10 +115,10 @@ impl RetryStrategy for FixedIntervalStrategy {
     }
 }
 
-/// Retry strategy with a custom per-attempt delay sequence.
+/// Retries startup with a per-attempt delay sequence defined by a `VecDeque<Duration>`.
 ///
-/// Provide a `VecDeque<Duration>` to set the delay before each attempt.
-/// The number of durations becomes the max retry count.
+/// The number of durations provided sets the retry budget: each call to
+/// `next_backoff` pops one duration from the front until the queue is empty.
 #[derive(Debug, Default, Clone)]
 pub struct CustomIntervalStrategy {
     /// Queue of delay durations for each retry attempt.
@@ -122,7 +129,7 @@ pub struct CustomIntervalStrategy {
 }
 
 impl CustomIntervalStrategy {
-    /// Creates a strategy from `durations`. `max_retries` is set to `durations.len()`.
+    /// Creates the strategy from `durations`; `max_retries` is set to `durations.len()`.
     pub fn new(durations: VecDeque<Duration>) -> Self {
         let max_retries = durations.len();
         Self {

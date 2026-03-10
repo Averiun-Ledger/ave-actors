@@ -1,269 +1,122 @@
-//! Store manager
+//! Storage backend traits: [`DbManager`], [`Collection`], and [`State`].
 
 use crate::error::Error;
 
-/// A trait representing a database manager that creates collections and state storage.
+/// Key-value pair yielded by a [`Collection`] iterator.
+pub type CollectionEntry = (String, Vec<u8>);
+
+/// Result item yielded by a [`Collection`] iterator.
+pub type CollectionEntryResult = Result<CollectionEntry, Error>;
+
+/// Boxed iterator returned by [`Collection::iter`].
+pub type CollectionIter<'a> =
+    Box<dyn Iterator<Item = CollectionEntryResult> + 'a>;
+
+/// Factory for creating [`Collection`] and [`State`] storage backends.
 ///
-/// Implementations of this trait provide the factory methods for creating
-/// persistent storage backends used by actors for event sourcing and state snapshots.
-///
-/// # Type Parameters
-///
-/// * `C` - The collection type that stores key-value pairs (events).
-/// * `S` - The state type that stores single values (snapshots).
-///
+/// Implement this trait to plug in a custom database (SQLite, RocksDB, etc.).
+/// The type parameters `C` and `S` are the concrete collection and state types
+/// your backend produces.
 pub trait DbManager<C, S>: Sync + Send + Clone
 where
     C: Collection + 'static,
     S: State + 'static,
 {
-    /// Creates a new collection for storing key-value pairs (typically events).
-    /// Collections are used for event sourcing where multiple events
-    /// are stored with unique keys (usually sequence numbers).
+    /// Creates a new ordered key-value collection, typically used to store events.
     ///
-    /// # Arguments
-    ///
-    /// * `name` - The name of the collection (e.g., table name, column family).
-    /// * `prefix` - A prefix for filtering/namespacing values within the collection.
-    ///
-    /// # Returns
-    ///
-    /// Returns a collection instance if successful.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the collection could not be created.
-    ///
+    /// `name` identifies the table or column family; `prefix` scopes all keys so
+    /// multiple actors can share the same physical table without key collisions.
+    /// Returns an error if the backend cannot allocate the collection.
     fn create_collection(&self, name: &str, prefix: &str) -> Result<C, Error>;
 
-    /// Creates a new state storage for storing single values (typically snapshots).
-    /// State storage is used for persisting actor state snapshots,
-    /// where only the latest value matters.
+    /// Creates a single-value state store, typically used to store actor snapshots.
     ///
-    /// # Arguments
-    ///
-    /// * `name` - The name of the state storage (e.g., table name, column family).
-    /// * `prefix` - A prefix for filtering/namespacing the state value.
-    ///
-    /// # Returns
-    ///
-    /// Returns a state storage instance if successful.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the state storage could not be created.
-    ///
+    /// `name` identifies the table or column family; `prefix` scopes the stored
+    /// value within it. Returns an error if the backend cannot allocate the storage.
     fn create_state(&self, name: &str, prefix: &str) -> Result<S, Error>;
 
-    /// Optional manual cleanup hook for database managers.
+    /// Optional cleanup hook called when the database manager should shut down.
     ///
-    /// This is not wired automatically into the actor runtime lifecycle.
-    /// Backends that need explicit flushing or closing may expose it to tests
-    /// or embedding code. The default implementation is a no-op.
-    ///
-    /// # Returns
-    ///
-    /// Returns Ok(()) if cleanup was successful.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if cleanup failed.
-    ///
+    /// Backends that need to flush WAL buffers or close connections should override
+    /// this. The default implementation is a no-op and always returns `Ok(())`.
     fn stop(&mut self) -> Result<(), Error> {
         Ok(())
     }
 }
 
-/// Trait for storing a single state value (typically actor snapshots).
+/// Single-value storage used to persist actor state snapshots.
 ///
-/// State storage maintains only the most recent value, unlike Collections
-/// which store multiple key-value pairs. This is used for persisting
-/// actor state snapshots in event sourcing patterns.
-///
+/// Unlike [`Collection`], a `State` holds only the most recent value.
+/// Implementations must be `Send + Sync + 'static` to be used across async tasks.
 pub trait State: Sync + Send + 'static {
-    /// Retrieves the name of this state storage.
-    ///
-    /// # Returns
-    ///
-    /// The name identifier of this state storage.
-    ///
+    /// Returns the name identifier of this state storage unit.
     fn name(&self) -> &str;
 
-    /// Retrieves the current state value.
+    /// Returns the currently stored bytes.
     ///
-    /// # Returns
-    ///
-    /// The serialized state data as bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns Error::EntryNotFound if no state has been stored yet.
-    ///
+    /// Returns [`Error::EntryNotFound`] if no value has been stored yet.
     fn get(&self) -> Result<Vec<u8>, Error>;
 
-    /// Stores or updates the state value.
-    ///
-    /// # Arguments
-    ///
-    /// * `data` - The serialized state data to store.
-    ///
-    /// # Returns
-    ///
-    /// Ok(()) if the state was successfully stored.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the storage operation failed.
-    ///
+    /// Stores `data` as the current value, replacing any previous one.
     fn put(&mut self, data: &[u8]) -> Result<(), Error>;
 
-    /// Deletes the current state value.
+    /// Deletes the current value.
     ///
-    /// # Returns
-    ///
-    /// Ok(()) if the state was successfully deleted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the delete operation failed.
-    ///
+    /// Returns [`Error::EntryNotFound`] if there is nothing to delete.
     fn del(&mut self) -> Result<(), Error>;
 
-    /// Removes all data from the state storage.
-    /// This is equivalent to del() but provides semantic clarity
-    /// for complete cleanup operations.
-    ///
-    /// # Returns
-    ///
-    /// Ok(()) if the purge was successful.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the purge operation failed.
-    ///
+    /// Removes all data from this state store. Succeeds silently if the store is already empty.
     fn purge(&mut self) -> Result<(), Error>;
 }
 
-/// A trait representing a collection of key-value pairs in a database.
+/// Ordered key-value storage used to persist event sequences.
 ///
+/// Keys are typically zero-padded sequence numbers (e.g. `"00000000000000000042"`),
+/// which makes the last-entry and range queries efficient. Implementations must
+/// be `Send + Sync + 'static`.
 pub trait Collection: Sync + Send + 'static {
-    /// Retrieve the name of the collection.
-    ///
-    /// # Returns
-    ///     
-    /// The name of the collection.
-    ///
+    /// Returns the name identifier of this collection.
     fn name(&self) -> &str;
 
-    /// Retrieves the value associated with the given key.
+    /// Returns the value stored under `key`.
     ///
-    /// # Arguments
-    ///
-    /// - key: The key to retrieve the value for.
-    ///
-    /// # Returns
-    ///
-    /// The value associated with the given key.
-    ///
-    /// # Errors
-    ///
-    /// - If the operation failed.
-    ///
+    /// Returns [`Error::EntryNotFound`] if the key does not exist.
     fn get(&self, key: &str) -> Result<Vec<u8>, Error>;
 
-    /// Associates the given value with the given key.
-    ///
-    /// # Arguments
-    ///
-    /// - key: The key to associate the value with.
-    /// - data: The value to associate with the key.
-    ///
-    /// # Returns
-    ///
-    /// An error if the operation failed.
-    ///
-    /// # Errors
-    ///
-    /// - If the operation failed.
-    ///
+    /// Associates `data` with `key`, inserting or replacing any previous value.
     fn put(&mut self, key: &str, data: &[u8]) -> Result<(), Error>;
 
-    /// Removes the value associated with the given key.
+    /// Removes the entry for `key`.
     ///
-    /// # Arguments
-    ///
-    /// - key: The key to remove the value for.
-    ///
-    /// # Returns
-    ///
-    /// An error if the operation failed.
-    ///
+    /// Returns [`Error::EntryNotFound`] if the key does not exist.
     fn del(&mut self, key: &str) -> Result<(), Error>;
 
-    /// Returns the last value in the collection.
-    ///
-    /// # Returns
-    ///
-    /// The last key / value in the collection, if any.
-    ///
-    /// # Errors
-    ///
-    /// - If the operation failed.
-    ///
+    /// Returns the last key-value pair in insertion/sort order, or `None` if the collection is empty.
     fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error>;
 
-    /// Removes all values from the collection.
-    ///
-    /// # Returns
-    ///
-    /// An error if the operation failed.
-    ///
+    /// Removes all entries from the collection.
     fn purge(&mut self) -> Result<(), Error>;
 
-    /// Returns an iterator over the key-value pairs in the collection.
+    /// Returns an iterator over all key-value pairs.
     ///
-    /// # Arguments
-    ///
-    /// - reverse: Whether to iterate in reverse order.
-    ///
-    /// # Returns
-    ///
-    /// An iterator over the key-value pairs in the collection.
-    /// Implementations should return an error if iteration cannot be
-    /// initialized (for example, lock acquisition fails). Once created,
-    /// the iterator may still yield `Err(...)` if a backend hits a read or
-    /// decode failure mid-stream.
-    ///
-    fn iter<'a>(
-        &'a self,
-        reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>, Error>;
+    /// Pass `reverse = true` to iterate in descending key order.
+    /// Returns an error if the backend cannot acquire the necessary locks to start
+    /// iteration; individual items in the iterator may also yield errors.
+    fn iter<'a>(&'a self, reverse: bool) -> Result<CollectionIter<'a>, Error>;
 
-    /// Returns a vector of values in the collection that are in the given range.
+    /// Returns at most `quantity.abs()` values, optionally starting after `from`.
     ///
-    /// # Arguments
-    ///
-    /// - from: The key to start the range from. If None, the range starts from the beginning.
-    /// - quantity: The number of values to return. If negative, the range is reversed.
-    /// - prefix: The prefix to filter the values by.
-    ///
-    /// # Returns
-    ///
-    /// A vector of values in the collection that are in the given range.
-    ///
-    /// # Errors
-    ///
-    /// - If the range is invalid.
-    /// - If the range is out of bounds.
-    ///
+    /// If `from` is `Some(key)`, iteration begins at the entry immediately after `key`.
+    /// A positive `quantity` iterates forward; negative iterates in reverse.
+    /// Returns [`Error::EntryNotFound`] if `from` is provided but does not exist.
     fn get_by_range(
         &self,
         from: Option<String>,
         quantity: isize,
     ) -> Result<Vec<Vec<u8>>, Error> {
         fn convert<'a>(
-            iter: impl Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a,
-        ) -> Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a> {
+            iter: impl Iterator<Item = CollectionEntryResult> + 'a,
+        ) -> CollectionIter<'a> {
             Box::new(iter)
         }
         let (mut iter, quantity) = match from {
@@ -277,9 +130,7 @@ pub trait Collection: Sync + Send + 'static {
                 let mut iter = iter.peekable();
                 loop {
                     let Some(next_item) = iter.peek() else {
-                        return Err(Error::EntryNotFound {
-                            key,
-                        });
+                        return Err(Error::EntryNotFound { key });
                     };
                     let (current_key, _) = match next_item {
                         Ok((current_key, event)) => (current_key, event),

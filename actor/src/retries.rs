@@ -133,7 +133,7 @@ where
         }
     }
 
-    async fn finish_retry_cycle(&mut self, ctx: &mut ActorContext<Self>) {
+    async fn finish_retry_cycle(&mut self, ctx: &ActorContext<Self>) {
         self.is_end = true;
         if let Some(handle) = self.pending_retry.take() {
             handle.abort();
@@ -152,7 +152,7 @@ where
         self.schedule_completion(ctx).await;
     }
 
-    async fn schedule_completion(&mut self, ctx: &mut ActorContext<Self>) {
+    async fn schedule_completion(&mut self, ctx: &ActorContext<Self>) {
         self.completion_pending = true;
         if let Ok(actor) = ctx.reference().await {
             self.pending_retry = Some(tokio::spawn(async move {
@@ -166,7 +166,7 @@ where
 
     async fn handle_retry_attempt(
         &mut self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), Error> {
         if self.is_end {
             return Ok(());
@@ -325,10 +325,7 @@ mod tests {
 
     use super::*;
 
-    use crate::{
-        ActorRef, ActorSystem, Error, FixedIntervalStrategy,
-        
-    };
+    use crate::{ActorRef, ActorSystem, Error, FixedIntervalStrategy};
 
     use std::sync::{
         Arc,
@@ -605,7 +602,6 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_retry_actor() {
-        
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -666,7 +662,6 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_retry_actor_stops_when_target_unavailable() {
-        
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -704,7 +699,6 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_retry_actor_notifies_parent_when_retries_finish() {
-        
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -740,7 +734,6 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_retry_actor_ignores_duplicate_retry_start() {
-        
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),

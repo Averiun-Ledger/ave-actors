@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, EncryptedKey,
     Error as ActorError, Event, Handler, Message, Response,
-    
 };
 use ave_actors_store::{
     Error as StoreError, StoreOperation,
@@ -13,10 +12,10 @@ use ave_actors_store::{
         StoreCommand, StoreResponse,
     },
 };
-use test_log::test;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+use test_log::test;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
@@ -118,7 +117,10 @@ impl Collection for FailingCompactionCollection {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>, StoreError> {
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>,
+        StoreError,
+    > {
         self.inner.iter(reverse)
     }
 }
@@ -184,7 +186,10 @@ impl Collection for LoggingCollection {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>, StoreError> {
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>,
+        StoreError,
+    > {
         Collection::iter(&self.inner, reverse)
     }
 }
@@ -270,12 +275,11 @@ impl Collection for RangeCollection {
     }
 
     fn del(&mut self, key: &str) -> Result<(), StoreError> {
-        self.data
-            .remove(key)
-            .map(|_| ())
-            .ok_or_else(|| StoreError::EntryNotFound {
+        self.data.remove(key).map(|_| ()).ok_or_else(|| {
+            StoreError::EntryNotFound {
                 key: key.to_owned(),
-            })
+            }
+        })
     }
 
     fn purge(&mut self) -> Result<(), StoreError> {
@@ -286,7 +290,10 @@ impl Collection for RangeCollection {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>, StoreError> {
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>,
+        StoreError,
+    > {
         if self.fail_iter {
             return Err(StoreError::Store {
                 operation: StoreOperation::Test,
@@ -571,7 +578,6 @@ impl Handler<CompactingActor> for CompactingActor {
 
 #[test(tokio::test)]
 async fn test_persistent_actor_rolls_back_state_when_store_persist_fails() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -590,7 +596,6 @@ async fn test_persistent_actor_rolls_back_state_when_store_persist_fails() {
 
 #[test(tokio::test)]
 async fn test_light_persistence_rolls_back_written_event_when_snapshot_fails() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -626,7 +631,6 @@ async fn test_light_persistence_rolls_back_written_event_when_snapshot_fails() {
 
 #[test(tokio::test)]
 async fn test_recover_fails_when_event_log_has_gap() {
-    
     let manager = MemoryManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -698,7 +702,6 @@ fn test_memory_store_keeps_prefixes_isolated() {
 
 #[test(tokio::test)]
 async fn test_full_persistence_compacts_events_after_snapshot_when_enabled() {
-    
     let manager = MemoryManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -754,7 +757,6 @@ async fn test_full_persistence_compacts_events_after_snapshot_when_enabled() {
 
 #[test(tokio::test)]
 async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
-    
     let manager = MemoryManager::default();
 
     let (system, mut runner) =
@@ -859,7 +861,6 @@ async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
 
 #[test(tokio::test)]
 async fn test_compaction_watermark_is_persisted_across_restart() {
-    
     let manager = LoggingCompactionManager::default();
 
     let (system, mut runner) =
@@ -923,13 +924,15 @@ async fn test_compaction_watermark_is_persisted_across_restart() {
     let deleted_keys = manager.deleted_keys.lock().unwrap().clone();
     assert_eq!(
         deleted_keys,
-        vec!["00000000000000000000".to_owned(), "00000000000000000001".to_owned()]
+        vec![
+            "00000000000000000000".to_owned(),
+            "00000000000000000001".to_owned()
+        ]
     );
 }
 
 #[test(tokio::test)]
 async fn test_repeated_compaction_only_deletes_newly_covered_events() {
-    
     let manager = LoggingCompactionManager::default();
 
     let (system, mut runner) =
@@ -1058,7 +1061,6 @@ fn test_store_new_propagates_collection_last_error() {
 
 #[test(tokio::test)]
 async fn test_recover_falls_back_when_metadata_state_is_missing() {
-    
     let manager = MemoryManager::default();
 
     let (system, mut runner) =
@@ -1120,7 +1122,6 @@ async fn test_recover_falls_back_when_metadata_state_is_missing() {
 
 #[test(tokio::test)]
 async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
-    
     let manager = MemoryManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -1171,7 +1172,6 @@ async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
 
 #[test(tokio::test)]
 async fn test_snapshot_compaction_failure_is_best_effort() {
-    
     let manager = FailingCompactionManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -1217,7 +1217,6 @@ async fn test_snapshot_compaction_failure_is_best_effort() {
 
 #[test(tokio::test)]
 async fn test_persist_full_event_requests_snapshot_only_when_due() {
-    
     let manager = MemoryManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());

@@ -19,9 +19,26 @@ This crate is part of the [ave-actors](https://github.com/Averiun-Ledger/ave-act
 
 ---
 
+## Main API
+
+| API | Receives | Returns | Purpose |
+|---|---|---|---|
+| `ActorSystem::create` | graceful and crash `CancellationToken`s | `(SystemRef, SystemRunner)` | Creates the actor runtime and control loop |
+| `SystemRef::create_root_actor` | root actor name and an `IntoActor` value | `Result<ActorRef<A>, Error>` | Spawns a top-level actor at `/user/<name>` |
+| `ActorContext::create_child` | child name and an `IntoActor` value | `Result<ActorRef<C>, Error>` | Spawns a child actor under the current actor path |
+| `ActorRef::tell` | one message | `Result<(), Error>` | Sends fire-and-forget work |
+| `ActorRef::ask` | one message | `Result<Response, Error>` | Sends a request and waits for a reply |
+| `ActorRef::ask_timeout` | one message and a `Duration` | `Result<Response, Error>` | Same as `ask`, but fails with `Error::Timeout` |
+| `ActorRef::ask_stop` | nothing | `Result<(), Error>` | Requests graceful shutdown and waits for confirmation |
+| `ActorRef::tell_stop` | nothing | `()` | Requests shutdown without waiting |
+| `ActorRef::subscribe` | nothing | `broadcast::Receiver<Event>` | Subscribes to future actor events |
+| `SystemRef::run_sink` | `Sink<E>` | `()` | Spawns an event subscriber task |
+
+---
+
 ## Quick start
 
-```rust
+```rust,ignore
 use ave_actors_actor::{Actor, ActorContext, ActorPath, ActorRef, Handler, Message, Response, Event};
 use ave_actors_actor::{ActorSystem, NotPersistentActor};
 use async_trait::async_trait;
@@ -90,7 +107,7 @@ async fn main() {
 
 ## Lifecycle
 
-```
+```text
 pre_start → [message loop] → pre_stop → post_stop
                 ↑ (on failure + Retry strategy)
             pre_restart
@@ -98,7 +115,7 @@ pre_start → [message loop] → pre_stop → post_stop
 
 Override any hook in the `Actor` trait:
 
-```rust
+```rust,ignore
 async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), Error> { .. }
 async fn pre_restart(&mut self, ctx: &mut ActorContext<Self>, err: Option<&Error>) -> Result<(), Error> { .. }
 async fn pre_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), Error> { .. }
@@ -111,7 +128,7 @@ async fn post_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), Error>
 
 Root actors can restart automatically on failure:
 
-```rust
+```rust,ignore
 use ave_actors_actor::{SupervisionStrategy, Strategy, FixedIntervalStrategy};
 use std::time::Duration;
 
@@ -128,7 +145,7 @@ Child faults are escalated to the parent via `Handler::on_child_fault`, which re
 
 ## Message passing
 
-```rust
+```rust,ignore
 // Fire-and-forget
 actor_ref.tell(MyMsg).await?;
 
@@ -148,7 +165,7 @@ actor_ref.ask_stop().await?;
 
 Actors broadcast typed events to subscribers:
 
-```rust
+```rust,ignore
 // Inside the actor:
 ctx.publish_event(MyEvent::SomethingHappened).await;
 
@@ -169,7 +186,7 @@ system.run_sink(Sink::new(actor_ref.subscribe(), my_subscriber)).await;
 
 Paths are hierarchical strings following a `/user/<name>` convention.
 
-```rust
+```rust,ignore
 let path = ActorPath::from("/user/parent");
 let child_path = path / "child"; // "/user/parent/child"
 

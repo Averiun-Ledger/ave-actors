@@ -2,15 +2,15 @@ use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, Error, Event,
     FixedIntervalStrategy, Handler, Message, NotPersistentActor, Response,
-    ShutdownReason, Strategy, SupervisionStrategy, 
+    ShutdownReason, Strategy, SupervisionStrategy,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-use test_log::test;
 use std::time::Duration;
+use test_log::test;
 use tokio::sync::Barrier;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
@@ -149,7 +149,6 @@ impl Handler<StressActor> for StressActor {
 
 #[test(tokio::test)]
 async fn test_stress_concurrent_create_same_root_path() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     let runner_handle = tokio::spawn(async move { runner.run().await });
@@ -204,7 +203,6 @@ async fn test_stress_concurrent_create_same_root_path() {
 
 #[test(tokio::test)]
 async fn test_stress_concurrent_stop_requests() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     let runner_handle = tokio::spawn(async move { runner.run().await });
@@ -258,7 +256,6 @@ async fn test_stress_concurrent_stop_requests() {
 
 #[test(tokio::test)]
 async fn test_stress_concurrent_fail_restarts_and_recovers() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     let runner_handle = tokio::spawn(async move { runner.run().await });

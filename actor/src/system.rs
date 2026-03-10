@@ -21,32 +21,17 @@ use std::{
     },
 };
 
-/// The reason why the actor system stopped.
-///
-/// Returned by [`SystemRunner::run()`] so the caller can decide the appropriate
-/// exit code or recovery action.
-///
-/// # Example
-///
-/// ```ignore
-/// let reason = runner.run().await;
-/// std::process::exit(reason.exit_code());
-/// ```
+/// The reason why the actor system stopped, returned by [`SystemRunner::run`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShutdownReason {
-    /// System was stopped gracefully (e.g., SIGTERM or explicit operator request).
-    /// Exit with code 0 — no automatic restart needed.
+    /// System stopped gracefully (e.g., SIGTERM); exit with code 0.
     Graceful,
-    /// System crashed due to an internal actor failure.
-    /// Exit with a non-zero code so the supervisor (e.g., Docker) restarts the process.
+    /// System stopped due to an unrecoverable actor failure; exit with a non-zero code.
     Crash,
 }
 
 impl ShutdownReason {
-    /// Returns the appropriate process exit code for this shutdown reason.
-    ///
-    /// - `0` for graceful shutdown.
-    /// - `1` for crash (supervisor should restart).
+    /// Returns `0` for a graceful shutdown or `1` for a crash.
     pub const fn exit_code(&self) -> i32 {
         match self {
             Self::Graceful => 0,
@@ -55,15 +40,14 @@ impl ShutdownReason {
     }
 }
 
-/// Factory for creating an actor system instance.
+/// Entry point for building an actor system instance.
 pub struct ActorSystem {}
 
-/// Default implementation for `ActorSystem`.
 impl ActorSystem {
-    /// Creates the actor system, returning a `(SystemRef, SystemRunner)` pair.
+    /// Creates the actor system and returns a `(SystemRef, SystemRunner)` pair.
     ///
-    /// - `graceful_token` — cancel on SIGTERM; [`SystemRunner::run`] returns [`ShutdownReason::Graceful`].
-    /// - `crash_token` — cancel on unrecoverable failure; returns [`ShutdownReason::Crash`].
+    /// Cancel `graceful_token` for a graceful shutdown (exit code 0) or `crash_token` for a crash
+    /// shutdown (exit code 1); the reason is reflected in [`SystemRunner::run`]'s return value.
     pub fn create(
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
@@ -75,10 +59,7 @@ impl ActorSystem {
     }
 }
 
-/// System-level events for coordinating actor system lifecycle.
-/// `StopSystem` is used internally by the runner. Other variants are also
-/// broadcast so callers can observe system-level activity.
-///
+/// System-level events broadcast on the observable system event channel.
 #[derive(Debug, Clone)]
 pub enum SystemEvent {
     /// Non-fatal error emitted by a root actor that has no parent to receive it.
@@ -95,8 +76,8 @@ pub enum SystemEvent {
 
 /// Cloneable, thread-safe handle to the actor system.
 ///
-/// Use this to create actors, retrieve existing ones, store shared resources
-/// (helpers), and initiate shutdown.
+/// Use this to create root actors, spawn event sinks, and shut down the system.
+/// Cloning is cheap — all clones share the same underlying system state.
 #[derive(Clone)]
 pub struct SystemRef {
     /// Registry of all actors in the system, indexed by their paths.
@@ -208,9 +189,7 @@ impl SystemRef {
             || self.crash_token.is_cancelled()
     }
 
-    /// Subscribes to system-level observable events.
-    ///
-    /// This is useful for monitoring root actor errors and shutdown events.
+    /// Returns a broadcast receiver for system-level events such as root actor errors and shutdown.
     pub fn subscribe_system_events(&self) -> broadcast::Receiver<SystemEvent> {
         self.system_event_sender.subscribe()
     }
@@ -240,7 +219,7 @@ impl SystemRef {
         }
     }
 
-    /// Returns the `ActorRef` for the actor at `path`, or `Error::NotFound`.
+    /// Returns the `ActorRef` for the actor at `path`, or `Error::NotFound` if no actor is registered there.
     pub async fn get_actor<A>(
         &self,
         path: &ActorPath,
@@ -360,7 +339,14 @@ impl SystemRef {
         }
     }
 
-    /// Creates a root actor at `/user/{name}`. Returns `Error::Exists` if that path is taken.
+    /// Spawns a top-level actor under `/user/{name}` and returns an `ActorRef` to it.
+    ///
+    /// `actor_init` can be the actor itself for [`NotPersistentActor`](crate::NotPersistentActor)
+    /// types, or any other value implementing [`IntoActor`](crate::IntoActor), such as
+    /// `InitializedActor<A>` from `ave-actors-store`.
+    ///
+    /// Returns `Error::Exists` if a root actor with the same name already exists, or
+    /// `Error::SystemStopped` if the system is shutting down.
     pub async fn create_root_actor<A, I>(
         &self,
         name: &str,
@@ -405,23 +391,19 @@ impl SystemRef {
         }
     }
 
-    /// Initiates graceful shutdown for the whole system.
-    ///
-    /// This cancels the graceful token, stops root actors and eventually makes
-    /// [`SystemRunner::run()`] return [`ShutdownReason::Graceful`].
+    /// Initiates graceful shutdown, stopping all root actors and causing [`SystemRunner::run`] to return [`ShutdownReason::Graceful`].
     pub fn stop_system(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         self.graceful_token.cancel();
     }
 
-    /// Initiates a crash shutdown. Actors call this on unrecoverable failure.
-    /// [`SystemRunner::run()`] will return [`ShutdownReason::Crash`] (exit code 1).
+    /// Initiates a crash shutdown, causing [`SystemRunner::run`] to return [`ShutdownReason::Crash`] with exit code 1.
     pub fn crash_system(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         self.crash_token.cancel();
     }
 
-    /// Returns the paths of all direct children of the actor at `path`.
+    /// Returns the paths of all currently registered direct children of the actor at `path`.
     pub async fn children(&self, path: &ActorPath) -> Vec<ActorPath> {
         self.child_index
             .read()
@@ -433,7 +415,7 @@ impl SystemRef {
             .collect()
     }
 
-    /// Stores a shared resource under `name` (e.g. a DB pool or config object).
+    /// Stores a shared resource (e.g. a database pool or config object) under `name` for retrieval by any actor.
     pub async fn add_helper<H>(&self, name: &str, helper: H)
     where
         H: Any + Send + Sync + Clone + 'static,
@@ -442,7 +424,7 @@ impl SystemRef {
         helpers.insert(name.to_owned(), Box::new(helper));
     }
 
-    /// Returns the helper stored under `name`, or `None` if not found or type mismatch.
+    /// Returns the helper stored under `name`, or `None` if not found or if the type does not match.
     pub async fn get_helper<H>(&self, name: &str) -> Option<H>
     where
         H: Any + Send + Sync + Clone + 'static,
@@ -454,7 +436,7 @@ impl SystemRef {
             .cloned()
     }
 
-    /// Spawns a [`Sink`] in a background task to process actor events.
+    /// Spawns a [`Sink`] in a background Tokio task so it processes actor events asynchronously.
     pub async fn run_sink<E>(&self, mut sink: Sink<E>)
     where
         E: Event,
@@ -465,7 +447,7 @@ impl SystemRef {
     }
 }
 
-/// Drives the system event loop. Call [`SystemRunner::run`] to block until shutdown.
+/// Drives the actor system event loop; block on [`SystemRunner::run`] to keep the system alive until shutdown.
 pub struct SystemRunner {
     /// Receiver for system-wide events.
     event_receiver: mpsc::Receiver<SystemEvent>,
@@ -478,14 +460,7 @@ impl SystemRunner {
         Self { event_receiver }
     }
 
-    /// Runs the system event loop until the system stops.
-    ///
-    /// Returns the [`ShutdownReason`] so the caller can choose the exit code:
-    ///
-    /// ```ignore
-    /// let reason = runner.run().await;
-    /// std::process::exit(reason.exit_code());
-    /// ```
+    /// Runs the system event loop until shutdown, returning the [`ShutdownReason`] for use as a process exit code.
     pub async fn run(&mut self) -> ShutdownReason {
         debug!("Running actor system");
         loop {
@@ -506,8 +481,6 @@ impl SystemRunner {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
 
@@ -516,7 +489,6 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_helpers() {
-        
         let (system, _) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),

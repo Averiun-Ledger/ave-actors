@@ -19,14 +19,14 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Event, Handler, Message,
-    NotPersistentActor, Response, 
+    NotPersistentActor, Response,
 };
 use ave_actors_store::store::{FullPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
+use test_log::test;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
-use test_log::test;
 
 // ============================================================================
 // Test Actors
@@ -205,7 +205,6 @@ impl Handler<ParentActor> for ParentActor {
 /// ✅ SUCCESS: Non-persistent actor with direct instance
 #[test(tokio::test)]
 async fn test_create_root_actor_non_persistent_direct() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -223,7 +222,6 @@ async fn test_create_root_actor_non_persistent_direct() {
 /// ✅ SUCCESS: Persistent actor with initial() wrapper
 #[test(tokio::test)]
 async fn test_create_root_actor_persistent_initial() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -262,7 +260,6 @@ async fn test_create_root_actor_persistent_initial() {
 /// ✅ SUCCESS: Non-persistent child with direct instance
 #[test(tokio::test)]
 async fn test_create_child_non_persistent_direct() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -286,7 +283,6 @@ async fn test_create_child_non_persistent_direct() {
 /// ✅ SUCCESS: Persistent child with initial() wrapper
 #[test(tokio::test)]
 async fn test_create_child_persistent_initial() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -319,7 +315,6 @@ async fn test_create_child_persistent_initial() {
 
 #[test(tokio::test)]
 async fn test_all_valid_combinations() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });

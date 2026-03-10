@@ -3,12 +3,12 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
-    Event, Handler, Message, Response, 
+    Event, Handler, Message, Response,
 };
 use serde::{Deserialize, Serialize};
+use test_log::test;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
-use test_log::test;
 
 // Defines parent actor
 #[derive(Debug, Clone)]
@@ -227,7 +227,6 @@ impl Handler<ChildActor> for ChildActor {
 
 #[test(tokio::test)]
 async fn test_actor() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     // Init runner.
@@ -267,7 +266,6 @@ async fn test_actor() {
 
 #[test(tokio::test)]
 async fn test_actor_error() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     // Init runner.

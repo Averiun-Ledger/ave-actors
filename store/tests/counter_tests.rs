@@ -15,7 +15,7 @@ use test_log::test;
 
 use ave_actors_actor::{
     Actor, ActorContext, ActorSystem, EncryptedKey, Error as ActorError, Event,
-    Handler, Message, Response, 
+    Handler, Message, Response,
 };
 
 use async_trait::async_trait;
@@ -113,7 +113,6 @@ impl Handler<CounterTestActor> for CounterTestActor {
 /// Test that event_counter starts at 0 for a new store
 #[test(tokio::test)]
 async fn test_event_counter_starts_at_zero() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -142,7 +141,6 @@ async fn test_event_counter_starts_at_zero() {
 #[test(tokio::test)]
 
 async fn test_event_counter_after_first_event() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -195,7 +193,6 @@ async fn test_event_counter_after_first_event() {
 #[test(tokio::test)]
 
 async fn test_event_counter_multiple_events() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -248,7 +245,6 @@ async fn test_event_counter_multiple_events() {
 /// Test GetEvents returns empty for a range that does not overlap persisted events
 #[test(tokio::test)]
 async fn test_get_events_out_of_range_returns_empty() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -283,7 +279,6 @@ async fn test_get_events_out_of_range_returns_empty() {
 /// Test GetEvents clamps partially overlapping ranges instead of failing
 #[test(tokio::test)]
 async fn test_get_events_partial_overlap_returns_existing_suffix() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -324,7 +319,6 @@ async fn test_get_events_partial_overlap_returns_existing_suffix() {
 #[test(tokio::test)]
 
 async fn test_state_counter_after_snapshot() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -375,7 +369,6 @@ async fn test_state_counter_after_snapshot() {
 #[test(tokio::test)]
 
 async fn test_recovery_with_events_after_snapshot() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -435,7 +428,6 @@ async fn test_recovery_with_events_after_snapshot() {
 #[test(tokio::test)]
 
 async fn test_recovery_without_snapshot() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -477,7 +469,6 @@ async fn test_recovery_without_snapshot() {
 #[test(tokio::test)]
 
 async fn test_snapshot_at_zero() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -525,7 +516,6 @@ async fn test_snapshot_at_zero() {
 #[test(tokio::test)]
 
 async fn test_last_events_from_positions() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -602,7 +592,6 @@ async fn test_last_events_from_positions() {
 #[test(tokio::test)]
 
 async fn test_multiple_snapshots_and_recoveries() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -679,7 +668,6 @@ async fn test_multiple_snapshots_and_recoveries() {
 #[test(tokio::test)]
 
 async fn test_event_counter_with_encryption() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });

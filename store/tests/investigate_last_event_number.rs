@@ -9,7 +9,7 @@ use ave_actors_store::{
 
 use ave_actors_actor::{
     Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler,
-    Message, Response, 
+    Message, Response,
 };
 use test_log::test;
 
@@ -93,7 +93,6 @@ impl PersistentActor for TestActor {
 
 #[test(tokio::test)]
 async fn test_last_event_number_after_persist() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });

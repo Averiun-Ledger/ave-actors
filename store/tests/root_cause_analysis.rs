@@ -7,13 +7,13 @@ use ave_actors_store::{
     },
 };
 
+use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler,
-    Message, Response, 
+    Message, Response,
 };
-use test_log::test;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use test_log::test;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
@@ -94,7 +94,6 @@ impl PersistentActor for TestActor {
 
 #[test(tokio::test)]
 async fn test_root_cause_persist_state_doesnt_increment_counter() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });

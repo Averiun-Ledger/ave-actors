@@ -1,6 +1,4 @@
-//! # Errors module
-//!
-//! This module defines error types for the store system using `thiserror`.
+//! Error types for the store system.
 
 use std::fmt;
 use thiserror::Error;
@@ -101,46 +99,30 @@ impl fmt::Display for StoreOperation {
 /// Error type for the store system.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum Error {
-    /// Failed to create or initialize the store.
+    /// The store could not be created or initialized.
     ///
-    /// This error occurs when the underlying database cannot be created,
-    /// opened, or initialized properly.
+    /// Returned when the underlying database cannot be opened or allocated.
     #[error("failed to create store: {reason}")]
-    CreateStore {
-        /// The reason why store creation failed.
-        reason: String,
-    },
+    CreateStore { reason: String },
 
-    /// Failed to retrieve data from the store.
+    /// Failed to retrieve data for `key` from the store.
     ///
-    /// This error indicates a problem occurred while attempting to read
-    /// data from the store, but the data might exist.
+    /// Indicates an I/O or backend error while reading; the key may exist but
+    /// is not readable. Use [`EntryNotFound`](Error::EntryNotFound) when a key is simply absent.
     #[error("failed to get data for key '{key}': {reason}")]
-    Get {
-        /// The key that was being accessed.
-        key: String,
-        /// The reason why the get operation failed.
-        reason: String,
-    },
+    Get { key: String, reason: String },
 
-    /// Requested entry was not found in the store.
-    ///
-    /// This error indicates that the requested key does not exist in the store.
+    /// The requested `key` does not exist in the store.
     #[error("entry not found: {key}")]
-    EntryNotFound {
-        /// The key that was not found.
-        key: String,
-    },
+    EntryNotFound { key: String },
 
-    /// A generic store operation failed.
+    /// A store operation failed.
     ///
-    /// This error covers various store operations that don't fit into
-    /// more specific error categories.
+    /// `operation` identifies which operation failed (e.g. `persist`, `snapshot`);
+    /// `reason` contains the underlying error message.
     #[error("store operation failed: {operation} - {reason}")]
     Store {
-        /// The operation that was being performed.
         operation: StoreOperation,
-        /// The reason why the operation failed.
         reason: String,
     },
 }

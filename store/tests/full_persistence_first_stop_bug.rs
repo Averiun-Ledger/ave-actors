@@ -4,17 +4,17 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
-    Handler, Message, Response, 
+    Handler, Message, Response,
 };
 use ave_actors_store::memory::MemoryManager;
 use ave_actors_store::store::{FullPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
+use test_log::test;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
-use test_log::test;
 
 static SHARED_MANAGER_FIRST_STOP: OnceLock<Arc<TokioMutex<MemoryManager>>> =
     OnceLock::new();
@@ -114,7 +114,6 @@ impl PersistentActor for TestActor {
 
 #[test(tokio::test)]
 async fn test_full_persistence_first_stop_no_previous_snapshot() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -188,7 +187,6 @@ async fn test_full_persistence_first_stop_no_previous_snapshot() {
 
 #[test(tokio::test)]
 async fn test_investigate_stop_store_snapshot_creation() {
-    
     use ave_actors_store::store::{Store, StoreCommand, StoreResponse};
 
     let (system, mut runner) =

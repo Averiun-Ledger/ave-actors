@@ -5,10 +5,11 @@ use zeroize::Zeroizing;
 
 use crate::error::Error;
 
-/// 32-byte cryptographic key stored encrypted in memory (ASCON AEAD via `memsecurity`).
+/// A 32-byte cryptographic key stored encrypted in memory using ASCON AEAD (`memsecurity`).
 ///
-/// Cloning is cheap — all clones share the same `Arc<EncryptedMem>`.
-/// Decrypted bytes are returned in a [`Zeroizing`] container that wipes on drop.
+/// Cloning is cheap — all clones share the same `Arc<EncryptedMem>`. Decrypted
+/// bytes are returned in a [`Zeroizing`] container that wipes memory on drop,
+/// minimizing the window where the raw key is exposed.
 #[derive(Clone)]
 pub struct EncryptedKey {
     key: Arc<EncryptedMem>,
@@ -16,6 +17,9 @@ pub struct EncryptedKey {
 
 impl EncryptedKey {
     /// Encrypts `key` and stores it in secure memory.
+    ///
+    /// Returns an error if the underlying ASCON encryption fails, which typically
+    /// indicates an out-of-memory or platform security error.
     pub fn new(key: &[u8; 32]) -> Result<Self, Error> {
         let mut encrypted_mem = EncryptedMem::new();
 
@@ -33,8 +37,11 @@ impl EncryptedKey {
         })
     }
 
-    /// Decrypts and returns the key in a [`Zeroizing`] container (bytes wiped on drop).
-    /// Returns an error on decryption failure, which indicates memory corruption.
+    /// Decrypts and returns the key in a [`Zeroizing`] container.
+    ///
+    /// The returned bytes are automatically wiped from memory when the container
+    /// is dropped. Returns an error if decryption fails, which indicates memory
+    /// corruption or tampering.
     pub fn key(&self) -> Result<Zeroizing<[u8; 32]>, Error> {
         let decrypted = self.key.decrypt().map_err(|_| {
             tracing::error!(

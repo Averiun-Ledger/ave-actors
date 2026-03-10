@@ -5,14 +5,17 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt::{Error, Formatter};
 
-/// Hierarchical address for an actor in the system (e.g. `/user/parent/child`).
+/// A slash-separated path that uniquely identifies an actor in the system (e.g. `/user/orders/order-42`).
+///
+/// Paths are built by appending segments with the `/` operator. The first
+/// segment is conventionally the root scope (`user`, `system`, etc.).
 #[derive(
     Clone, Hash, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize,
 )]
 pub struct ActorPath(Vec<String>);
 
 impl ActorPath {
-    /// Returns a path containing only the first segment.
+    /// Returns a path containing only the first segment (the root scope).
     pub fn root(&self) -> Self {
         if self.0.len() == 1 {
             self.clone()
@@ -23,7 +26,7 @@ impl ActorPath {
         }
     }
 
-    /// Returns this path without its last segment.
+    /// Returns this path with its last segment removed, or an empty path if already at root.
     pub fn parent(&self) -> Self {
         if self.0.len() > 1 {
             let mut tokens = self.0.clone();
@@ -34,17 +37,17 @@ impl ActorPath {
         }
     }
 
-    /// Returns the last segment of this path (the actor's local name).
+    /// Returns the last segment of the path (the actor's local id).
     pub fn key(&self) -> String {
         self.0.last().cloned().unwrap_or_else(|| "".to_string())
     }
 
-    /// Returns the number of segments in this path.
+    /// Returns the number of segments in this path (its depth).
     pub const fn level(&self) -> usize {
         self.0.len()
     }
 
-    /// Returns this path truncated to `level` segments. Returns `self` if `level >= self.level()`.
+    /// Returns this path truncated to `level` segments, or `self` unchanged if `level` is out of range.
     pub fn at_level(&self, level: usize) -> Self {
         if level < 1 || level >= self.level() {
             self.clone()
@@ -59,37 +62,38 @@ impl ActorPath {
         }
     }
 
-    /// Returns `true` if this path has no segments.
+    /// Returns `true` if this path has no segments (e.g. parsed from `"/"`).
     pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Returns `true` if this path is a proper prefix of `other`.
+    /// Returns `true` if this path is a proper prefix of `other`, meaning this actor is an ancestor of `other`.
     pub fn is_ancestor_of(&self, other: &Self) -> bool {
         self.0.len() < other.0.len() && other.0.starts_with(&self.0)
     }
 
-    /// Returns `true` if `other` is a proper prefix of this path.
+    /// Returns `true` if `other` is a proper prefix of this path, meaning this actor is a descendant of `other`.
     pub fn is_descendant_of(&self, other: &Self) -> bool {
         other.0.len() < self.0.len() && self.0.starts_with(&other.0)
     }
 
-    /// Returns `true` if this path is the direct parent of `other`.
+    /// Returns `true` if this path is the direct parent of `other` (one level above it).
     pub fn is_parent_of(&self, other: &Self) -> bool {
         *self == other.parent()
     }
 
-    /// Returns `true` if `other` is the direct parent of this path.
+    /// Returns `true` if `other` is the direct parent of this path (this path is one level below `other`).
     pub fn is_child_of(&self, other: &Self) -> bool {
         self.parent() == *other
     }
 
-    /// Returns `true` if this path has exactly one segment (direct child of root).
+    /// Returns `true` if this path has exactly one segment, i.e. it is a direct child of the root scope.
     pub const fn is_top_level(&self) -> bool {
         self.0.len() == 1
     }
 }
 
+/// Creates a path from a `/`-separated string such as `"/user/parent/child"`.
 impl From<&str> for ActorPath {
     fn from(str: &str) -> Self {
         let tokens: Vec<String> = str
@@ -101,6 +105,7 @@ impl From<&str> for ActorPath {
     }
 }
 
+/// Creates a path from a string. Equivalent to [`ActorPath::from`] with a `&str`.
 impl From<String> for ActorPath {
     fn from(string: String) -> Self {
         Self::from(string.as_str())
@@ -113,7 +118,7 @@ impl From<&String> for ActorPath {
     }
 }
 
-/// Appends a path segment: `parent_path / "child"`.
+/// Appends `segment` as a new path component: `parent_path / "child-id"`.
 impl std::ops::Div<&str> for ActorPath {
     type Output = Self;
 

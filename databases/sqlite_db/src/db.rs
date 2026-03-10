@@ -19,8 +19,7 @@ use std::{
 };
 use std::{fs, path::Path};
 
-type EntryIterator =
-    Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>>>;
+type EntryIterator = Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>>>;
 const ITER_CHUNK_SIZE: usize = 1_000;
 
 /// SQLite database manager for persistent actor storage.
@@ -82,10 +81,7 @@ impl SqliteManager {
         let read_conn = self.open_managed_connection()?;
         let write_conn = self.open_managed_connection()?;
         Ok(SqliteCollection::new(
-            read_conn,
-            write_conn,
-            identifier,
-            prefix,
+            read_conn, write_conn, identifier, prefix,
         ))
     }
 
@@ -304,11 +300,7 @@ impl SqliteCollection {
         format!("{}.{}", self.prefix, key)
     }
 
-    fn map_get_error(
-        &self,
-        error: SqliteError,
-        key: String,
-    ) -> Error {
+    fn map_get_error(&self, error: SqliteError, key: String) -> Error {
         match error {
             SqliteError::QueryReturnedNoRows => Error::EntryNotFound { key },
             other => Error::Get {
@@ -319,21 +311,22 @@ impl SqliteCollection {
     }
 }
 
-/// Iterador paginado sobre una colección SQLite usando keyset pagination.
+/// Chunked iterator over a SQLite collection using keyset pagination.
 ///
-/// Funciona correctamente cuando los sn están zero-padded (orden lexicográfico
-/// == numérico). Fetcha `ITER_CHUNK_SIZE` filas por chunk, soltando el lock
-/// entre chunks para que las escrituras concurrentes no queden bloqueadas.
+/// This works correctly when `sn` values are zero-padded, so lexicographic
+/// order matches numeric order. It fetches `ITER_CHUNK_SIZE` rows per chunk and
+/// releases the lock between chunks so concurrent writers are not blocked for
+/// the entire scan.
 struct SqliteChunkedIterator {
     conn: Arc<Mutex<Connection>>,
     table: String,
     prefix: String,
     reverse: bool,
-    /// Filas ya cargadas del chunk actual, pendientes de entregar.
+    /// Rows already fetched for the current chunk and not yet yielded.
     buffer: VecDeque<(String, Vec<u8>)>,
-    /// Último sn visto; se usa como cursor para el siguiente chunk.
+    /// Last `sn` seen, reused as the cursor for the next chunk.
     last_key: Option<String>,
-    /// True cuando la última query devolvió 0 filas — no hay más datos.
+    /// Set when the last query returned 0 rows and there is no more data.
     exhausted: bool,
 }
 
@@ -423,12 +416,14 @@ impl Iterator for SqliteChunkedIterator {
     type Item = Result<(String, Vec<u8>), Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.buffer.is_empty() && !self.exhausted {
-            if let Err(error) = self.fetch_chunk() {
-                self.exhausted = true;
-                return Some(Err(error));
-            }
+        if self.buffer.is_empty()
+            && !self.exhausted
+            && let Err(error) = self.fetch_chunk()
+        {
+            self.exhausted = true;
+            return Some(Err(error));
         }
+
         self.buffer.pop_front().map(Ok)
     }
 }
@@ -619,7 +614,10 @@ impl Collection for SqliteCollection {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>, Error> {
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>,
+        Error,
+    > {
         Ok(self.make_iter(reverse))
     }
 
@@ -628,7 +626,14 @@ impl Collection for SqliteCollection {
     }
 }
 
-/// Open a SQLite database connection.
+/// Opens a tuned SQLite connection for this backend.
+///
+/// `path` must point to the database file, not just the parent directory.
+/// `durability = true` uses `PRAGMA synchronous=FULL`; otherwise the connection
+/// uses `NORMAL` for lower latency. `spec` controls cache and WAL sizing.
+///
+/// Returns an open [`rusqlite::Connection`] ready to be used by the backend.
+/// Returns [`Error::Store`] if the database cannot be opened or configured.
 pub fn open<P: AsRef<Path>>(
     path: P,
     durability: bool,

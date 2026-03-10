@@ -3,14 +3,14 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler,
-    Message, Response, Sink, Subscriber, 
+    Message, Response, Sink, Subscriber,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use test_log::test;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
-use test_log::test;
 
 // Test structures for sink and handler testing
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,7 +123,6 @@ impl Subscriber<SinkTestEvent> for CollectingSubscriber {
 
 #[test(tokio::test)]
 async fn test_sink_basic_functionality() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -171,7 +170,6 @@ async fn test_sink_basic_functionality() {
 
 #[test(tokio::test)]
 async fn test_sink_with_failing_subscriber() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -206,7 +204,6 @@ async fn test_sink_with_failing_subscriber() {
 
 #[test(tokio::test)]
 async fn test_sink_with_closed_receiver() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -289,7 +286,6 @@ impl Handler<FailingHandlerActor> for FailingHandlerActor {
 
 #[test(tokio::test)]
 async fn test_handler_error_scenarios() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -318,7 +314,6 @@ async fn test_handler_error_scenarios() {
 
 #[test(tokio::test)]
 async fn test_message_serialization_edge_cases() {
-    
     // Test with complex message structures
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ComplexMessage {
@@ -394,7 +389,6 @@ async fn test_message_serialization_edge_cases() {
 // Test mailbox behavior and message ordering
 #[test(tokio::test)]
 async fn test_message_ordering_and_mailbox() {
-    
     #[derive(Debug, Clone)]
     pub struct OrderingActor {
         pub received_order: Vec<u32>,
@@ -469,7 +463,6 @@ async fn test_message_ordering_and_mailbox() {
 // Test for handler with context operations
 #[test(tokio::test)]
 async fn test_handler_context_operations() {
-    
     #[derive(Debug, Clone)]
     pub struct ContextActor {
         pub path_checked: bool,

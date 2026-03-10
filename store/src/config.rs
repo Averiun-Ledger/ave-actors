@@ -110,6 +110,9 @@ pub fn resolve_spec(spec: Option<MachineSpec>) -> ResolvedSpec {
     }
 }
 
+/// Reads total physical RAM from `/proc/meminfo` on Linux and returns it in megabytes.
+///
+/// Returns `None` on non-Linux platforms or if the file cannot be parsed.
 pub fn detect_total_memory_mb() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -130,6 +133,9 @@ pub fn detect_total_memory_mb() -> Option<u64> {
     }
 }
 
+/// Returns the number of logical CPU cores available to the process.
+///
+/// Falls back to `1` if the value cannot be determined.
 pub fn detect_cpu_cores() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())

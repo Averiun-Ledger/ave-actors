@@ -15,17 +15,17 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
-    Handler, Message, Response, 
+    Handler, Message, Response,
 };
 use ave_actors_store::memory::MemoryManager;
 use ave_actors_store::store::{LightPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
+use test_log::test;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
-use test_log::test;
 
 // Shared manager for testing
 static SHARED_MANAGER: OnceLock<Arc<TokioMutex<MemoryManager>>> =
@@ -130,7 +130,6 @@ impl PersistentActor for VectorActor {
 
 #[test(tokio::test)]
 async fn test_light_persistence_duplicates_data_on_restart() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });

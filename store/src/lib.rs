@@ -1,7 +1,4 @@
-//! Store module.
-//!
-//! This module contains the store implementation.
-//!
+#![doc = include_str!("../README.md")]
 
 pub mod config;
 pub mod database;

@@ -3,17 +3,17 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
-    Handler, Message, Response, 
+    Handler, Message, Response,
 };
 use ave_actors_store::memory::MemoryManager;
 use ave_actors_store::store::{FullPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
+use test_log::test;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
-use test_log::test;
 
 static SHARED_MGR: OnceLock<Arc<TokioMutex<MemoryManager>>> = OnceLock::new();
 
@@ -120,7 +120,6 @@ impl PersistentActor for SingleEventActor {
 
 #[test(tokio::test)]
 async fn test_single_event_no_recovery() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -177,7 +176,6 @@ async fn test_single_event_no_recovery() {
 
 #[test(tokio::test)]
 async fn test_debug_event_counter_after_first_event() {
-    
     use ave_actors_store::store::{Store, StoreCommand, StoreResponse};
 
     let (system, mut runner) =

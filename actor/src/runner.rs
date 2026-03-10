@@ -557,16 +557,15 @@ mod tests {
 
     use super::*;
 
-    use test_log::test;
     use crate::{
         Error,
         actor::{Actor, ActorContext, Event, Handler, Message},
-        
         supervision::{FixedIntervalStrategy, Strategy, SupervisionStrategy},
         system::SystemRef,
     };
     use async_trait::async_trait;
     use serde::{Deserialize, Serialize};
+    use test_log::test;
 
     use borsh::{BorshDeserialize, BorshSerialize};
     use tokio_util::sync::CancellationToken;
@@ -670,7 +669,6 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_actor_root_failed() {
-        
         let (event_sender, _) = mpsc::channel(100);
 
         let system = SystemRef::new(
@@ -852,7 +850,6 @@ mod tests {
     /// tell/ask to a fully stopped actor must return Error::ActorStopped.
     #[test(tokio::test)]
     async fn test_send_to_stopped_actor_returns_actor_stopped() {
-        
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
         let system = SystemRef::new(
             tx,
@@ -893,7 +890,6 @@ mod tests {
     ///     drain runs → Normal discarded, Critical processed.
     #[test(tokio::test)]
     async fn test_drain_critical_processed_normal_stopped() {
-        
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
         let system = SystemRef::new(
             tx,
@@ -953,7 +949,6 @@ mod tests {
     /// Error::ActorStopped.
     #[test(tokio::test)]
     async fn test_drain_timeout_drops_slow_critical() {
-        
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
         let system = SystemRef::new(
             tx,

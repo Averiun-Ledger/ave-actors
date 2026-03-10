@@ -4,13 +4,13 @@ use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, ChildAction,
     CustomIntervalStrategy, Error, Event, FixedIntervalStrategy, Handler,
     Message, NoIntervalStrategy, Response, RetryActor, RetryMessage,
-    RetryStrategy, Strategy, SupervisionStrategy, 
+    RetryStrategy, Strategy, SupervisionStrategy,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, time::Duration};
+use test_log::test;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
-use test_log::test;
 
 // Test actors for edge cases
 #[derive(Debug, Clone)]
@@ -256,8 +256,6 @@ impl Handler<FailingActor> for FailingActor {
 // Test supervision strategies
 #[test(tokio::test)]
 async fn test_actor_with_retry_supervision() {
-    
-
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -283,7 +281,6 @@ async fn test_actor_with_retry_supervision() {
 
 #[test(tokio::test)]
 async fn test_actor_with_stop_supervision() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -297,7 +294,6 @@ async fn test_actor_with_stop_supervision() {
 
 #[test(tokio::test)]
 async fn test_custom_interval_strategy() {
-    
     let mut strategy = Strategy::CustomIntervalStrategy(
         CustomIntervalStrategy::new(VecDeque::from([
             Duration::from_millis(10),
@@ -315,7 +311,6 @@ async fn test_custom_interval_strategy() {
 
 #[test(tokio::test)]
 async fn test_no_interval_strategy() {
-    
     let mut strategy = Strategy::NoInterval(NoIntervalStrategy::new(5));
     assert_eq!(strategy.max_retries(), 5);
     assert_eq!(strategy.next_backoff(), None);
@@ -323,7 +318,6 @@ async fn test_no_interval_strategy() {
 
 #[test(tokio::test)]
 async fn test_actor_ref_operations() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -356,7 +350,6 @@ async fn test_actor_ref_operations() {
 
 #[test(tokio::test)]
 async fn test_event_subscription() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -383,7 +376,6 @@ async fn test_event_subscription() {
 
 #[test(tokio::test)]
 async fn test_child_actor_management() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -417,7 +409,6 @@ async fn test_child_actor_management() {
 
 #[test(tokio::test)]
 async fn test_error_and_fault_handling() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -465,7 +456,6 @@ async fn test_error_and_fault_handling() {
 
 #[test(tokio::test)]
 async fn test_system_helpers() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -489,7 +479,6 @@ async fn test_system_helpers() {
 
 #[test(tokio::test)]
 async fn test_system_children_listing() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -518,7 +507,6 @@ async fn test_system_children_listing() {
 
 #[test(tokio::test)]
 async fn test_retry_actor_functionality() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -555,7 +543,6 @@ async fn test_retry_actor_functionality() {
 
 #[test(tokio::test)]
 async fn test_system_stop() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     let runner_handle = tokio::spawn(async move { runner.run().await });

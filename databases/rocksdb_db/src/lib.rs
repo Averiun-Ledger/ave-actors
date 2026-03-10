@@ -1,7 +1,5 @@
-//! RocksDB database module.
-//!
-//! This module contains the RocksDB database implementation.
-//!
+#![doc = include_str!("../README.md")]
+
 #[cfg(feature = "rocksdb")]
 pub mod db;
 

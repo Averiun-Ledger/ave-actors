@@ -3,17 +3,17 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
-    Handler, Message, Response, 
+    Handler, Message, Response,
 };
 use ave_actors_store::memory::MemoryManager;
 use ave_actors_store::store::{FullPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
+use test_log::test;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
-use test_log::test;
 
 // Shared manager for testing
 static SHARED_MANAGER_FULL_RECOVERY: OnceLock<Arc<TokioMutex<MemoryManager>>> =
@@ -115,7 +115,6 @@ impl PersistentActor for CounterActor {
 
 #[test(tokio::test)]
 async fn test_full_persistence_doesnt_recover_state() {
-    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
