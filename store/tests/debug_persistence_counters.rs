@@ -6,10 +6,11 @@ use ave_actors_store::{
         LightPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
     },
 };
+use test_log::test;
 
 use ave_actors_actor::{
     Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler,
-    Message, Response, build_tracing_subscriber,
+    Message, Response, 
 };
 
 use async_trait::async_trait;
@@ -105,10 +106,10 @@ impl PersistentActor for DebugActor {
     }
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 
 async fn test_debug_light_persistence_counters() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });

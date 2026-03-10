@@ -1,7 +1,10 @@
 //! Simple edge case tests for RocksDB database to increase coverage
 
 use ave_actors_rocksdb::RocksDbManager;
-use ave_actors_store::database::{Collection, DbManager, State};
+use ave_actors_store::{
+    Error,
+    database::{Collection, DbManager, State},
+};
 use tempfile::tempdir;
 
 #[test]
@@ -29,9 +32,13 @@ fn test_rocksdb_manager_edge_cases() {
     let result = Collection::get(&collection, "key");
     assert!(result.is_err());
 
-    // Test delete non-existent (may or may not fail depending on implementation)
-    let _result = Collection::del(&mut collection, "non-existent");
-    // Some implementations might return Ok() for non-existent deletes
+    let result = Collection::del(&mut collection, "non-existent");
+    assert_eq!(
+        result,
+        Err(Error::EntryNotFound {
+            key: "prefix.non-existent".to_owned(),
+        })
+    );
 }
 
 #[test]
@@ -55,6 +62,14 @@ fn test_rocksdb_state_operations() {
     State::del(&mut state).unwrap();
     let result = State::get(&state);
     assert!(result.is_err());
+
+    let result = State::del(&mut state);
+    assert_eq!(
+        result,
+        Err(Error::EntryNotFound {
+            key: "prefix".to_owned(),
+        })
+    );
 }
 
 #[test]
@@ -66,7 +81,11 @@ fn test_rocksdb_iteration() {
     let mut collection = manager.create_collection("iter", "prefix").unwrap();
 
     // Test empty iteration
-    let items: Vec<_> = collection.iter(false).unwrap().collect();
+    let items: Vec<_> = collection
+        .iter(false)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(items.len(), 0);
 
     // Add items
@@ -75,11 +94,19 @@ fn test_rocksdb_iteration() {
     Collection::put(&mut collection, "c", b"3").unwrap();
 
     // Test forward iteration
-    let items: Vec<_> = collection.iter(false).unwrap().collect();
+    let items: Vec<_> = collection
+        .iter(false)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(items.len(), 3);
 
     // Test reverse iteration
-    let items: Vec<_> = collection.iter(true).unwrap().collect();
+    let items: Vec<_> = collection
+        .iter(true)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(items.len(), 3);
 
     // Test last
@@ -100,13 +127,21 @@ fn test_rocksdb_purge() {
     Collection::put(&mut collection, "key2", b"value2").unwrap();
 
     // Verify items exist
-    let items: Vec<_> = collection.iter(false).unwrap().collect();
+    let items: Vec<_> = collection
+        .iter(false)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(items.len(), 2);
 
     // Purge
     Collection::purge(&mut collection).unwrap();
 
     // Verify empty
-    let items: Vec<_> = collection.iter(false).unwrap().collect();
+    let items: Vec<_> = collection
+        .iter(false)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(items.len(), 0);
 }

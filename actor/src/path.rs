@@ -1,27 +1,18 @@
-//! # Actor path
-//!
-//! The `path` module provides the `ActorPath` type. The `ActorPath` type is a path to an actor in the actor system.
-//!
+//! Hierarchical path addressing for actors (e.g. `/user/parent/child`).
 
 use serde::{Deserialize, Serialize};
 
 use std::cmp::Ordering;
 use std::fmt::{Error, Formatter};
 
-/// Actor path. This is a path to an actor in the actor system.
-///
+/// Hierarchical address for an actor in the system (e.g. `/user/parent/child`).
 #[derive(
     Clone, Hash, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize,
 )]
 pub struct ActorPath(Vec<String>);
 
 impl ActorPath {
-    /// Returns the root of the path.
-    ///
-    /// # Returns
-    ///
-    /// Returns the root of the path.
-    ///
+    /// Returns a path containing only the first segment.
     pub fn root(&self) -> Self {
         if self.0.len() == 1 {
             self.clone()
@@ -32,12 +23,7 @@ impl ActorPath {
         }
     }
 
-    /// Returns the parent of the path.
-    ///
-    /// # Returns
-    ///
-    /// Returns the parent of the path.
-    ///
+    /// Returns this path without its last segment.
     pub fn parent(&self) -> Self {
         if self.0.len() > 1 {
             let mut tokens = self.0.clone();
@@ -48,36 +34,17 @@ impl ActorPath {
         }
     }
 
-    /// Returns the key of the path.
-    ///
-    /// # Returns
-    ///
-    /// Returns the key of the path.
-    ///
+    /// Returns the last segment of this path (the actor's local name).
     pub fn key(&self) -> String {
         self.0.last().cloned().unwrap_or_else(|| "".to_string())
     }
 
-    /// Returns the levels size of the path.
-    ///
-    /// # Returns
-    ///
-    /// Returns the levels size of the path.
-    ///
+    /// Returns the number of segments in this path.
     pub const fn level(&self) -> usize {
         self.0.len()
     }
 
-    /// Returns the path at a specific level.
-    ///
-    /// # Arguments
-    ///
-    /// * `level` - The level to return the path at.
-    ///
-    /// # Returns
-    ///
-    /// Returns the path at a specific level.
-    ///
+    /// Returns this path truncated to `level` segments. Returns `self` if `level >= self.level()`.
     pub fn at_level(&self, level: usize) -> Self {
         if level < 1 || level >= self.level() {
             self.clone()
@@ -92,78 +59,32 @@ impl ActorPath {
         }
     }
 
-    /// Returns if the path is empty.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the path is empty.
-    ///
+    /// Returns `true` if this path has no segments.
     pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Returns if the path is an ancestor of another path.
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The other path to check.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the path is an ancestor of the other path.
-    ///
+    /// Returns `true` if this path is a proper prefix of `other`.
     pub fn is_ancestor_of(&self, other: &Self) -> bool {
         self.0.len() < other.0.len() && other.0.starts_with(&self.0)
     }
 
-    /// Returns if the path is a descendant of another path.
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The other path to check.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the path is a descendant of the other path.
-    ///
+    /// Returns `true` if `other` is a proper prefix of this path.
     pub fn is_descendant_of(&self, other: &Self) -> bool {
         other.0.len() < self.0.len() && self.0.starts_with(&other.0)
     }
 
-    /// Returns if the path is a parent of another path.
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The other path to check.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the path is a parent of the other path.
-    ///
+    /// Returns `true` if this path is the direct parent of `other`.
     pub fn is_parent_of(&self, other: &Self) -> bool {
         *self == other.parent()
     }
 
-    /// Returns if the path is a child of another path.
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The other path to check.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the path is a child of the other path.
-    ///
+    /// Returns `true` if `other` is the direct parent of this path.
     pub fn is_child_of(&self, other: &Self) -> bool {
         self.parent() == *other
     }
 
-    /// Returns if the path is top level.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the path is top level.
-    ///
+    /// Returns `true` if this path has exactly one segment (direct child of root).
     pub const fn is_top_level(&self) -> bool {
         self.0.len() == 1
     }
@@ -192,7 +113,7 @@ impl From<&String> for ActorPath {
     }
 }
 
-/// Implements the division operator for the ActorPath.
+/// Appends a path segment: `parent_path / "child"`.
 impl std::ops::Div<&str> for ActorPath {
     type Output = Self;
 

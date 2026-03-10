@@ -230,12 +230,14 @@ pub trait Collection: Sync + Send + 'static {
     ///
     /// An iterator over the key-value pairs in the collection.
     /// Implementations should return an error if iteration cannot be
-    /// initialized (for example, lock acquisition fails).
+    /// initialized (for example, lock acquisition fails). Once created,
+    /// the iterator may still yield `Err(...)` if a backend hits a read or
+    /// decode failure mid-stream.
     ///
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>, Error>;
+    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>, Error>;
 
     /// Returns a vector of values in the collection that are in the given range.
     ///
@@ -260,8 +262,8 @@ pub trait Collection: Sync + Send + 'static {
         quantity: isize,
     ) -> Result<Vec<Vec<u8>>, Error> {
         fn convert<'a>(
-            iter: impl Iterator<Item = (String, Vec<u8>)> + 'a,
-        ) -> Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a> {
+            iter: impl Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a,
+        ) -> Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a> {
             Box::new(iter)
         }
         let (mut iter, quantity) = match from {
@@ -274,10 +276,14 @@ pub trait Collection: Sync + Send + 'static {
                 };
                 let mut iter = iter.peekable();
                 loop {
-                    let Some((current_key, _)) = iter.peek() else {
+                    let Some(next_item) = iter.peek() else {
                         return Err(Error::EntryNotFound {
                             key,
                         });
+                    };
+                    let (current_key, _) = match next_item {
+                        Ok((current_key, event)) => (current_key, event),
+                        Err(error) => return Err(error.clone()),
                     };
                     if current_key == &key {
                         break;
@@ -298,9 +304,10 @@ pub trait Collection: Sync + Send + 'static {
         let mut result = Vec::new();
         let mut counter = 0;
         while counter < quantity {
-            let Some((_, event)) = iter.next() else {
+            let Some(item) = iter.next() else {
                 break;
             };
+            let (_, event) = item?;
             result.push(event);
             counter += 1;
         }
@@ -364,7 +371,7 @@ macro_rules! test_store_trait {
                 assert_eq!(
                     Collection::get(&store, "key"),
                     Err(Error::EntryNotFound {
-                        key: "Query returned no rows".to_owned()
+                        key: "test.key".to_owned()
                     })
                 );
                 assert!(manager.stop().is_ok())
@@ -380,7 +387,7 @@ macro_rules! test_store_trait {
                 assert_eq!(
                     State::get(&store),
                     Err(Error::EntryNotFound {
-                        key: "Query returned no rows".to_owned()
+                        key: "test".to_owned()
                     })
                 );
                 assert!(manager.stop().is_ok())
@@ -394,20 +401,19 @@ macro_rules! test_store_trait {
                 Collection::put(&mut store, "key1", b"value1").unwrap();
                 Collection::put(&mut store, "key2", b"value2").unwrap();
                 Collection::put(&mut store, "key3", b"value3").unwrap();
-                let mut iter = store.iter(false).unwrap();
+                let items: Vec<_> = store
+                    .iter(false)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
                 assert_eq!(
-                    iter.next(),
-                    Some(("key1".to_string(), b"value1".to_vec()))
+                    items,
+                    vec![
+                        ("key1".to_string(), b"value1".to_vec()),
+                        ("key2".to_string(), b"value2".to_vec()),
+                        ("key3".to_string(), b"value3".to_vec()),
+                    ]
                 );
-                assert_eq!(
-                    iter.next(),
-                    Some(("key2".to_string(), b"value2".to_vec()))
-                );
-                assert_eq!(
-                    iter.next(),
-                    Some(("key3".to_string(), b"value3".to_vec()))
-                );
-                assert_eq!(iter.next(), None);
                 assert!(manager.stop().is_ok())
             }
 
@@ -419,20 +425,19 @@ macro_rules! test_store_trait {
                 Collection::put(&mut store, "key1", b"value1").unwrap();
                 Collection::put(&mut store, "key2", b"value2").unwrap();
                 Collection::put(&mut store, "key3", b"value3").unwrap();
-                let mut iter = store.iter(true).unwrap();
+                let items: Vec<_> = store
+                    .iter(true)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
                 assert_eq!(
-                    iter.next(),
-                    Some(("key3".to_string(), b"value3".to_vec()))
+                    items,
+                    vec![
+                        ("key3".to_string(), b"value3".to_vec()),
+                        ("key2".to_string(), b"value2".to_vec()),
+                        ("key1".to_string(), b"value1".to_vec()),
+                    ]
                 );
-                assert_eq!(
-                    iter.next(),
-                    Some(("key2".to_string(), b"value2".to_vec()))
-                );
-                assert_eq!(
-                    iter.next(),
-                    Some(("key1".to_string(), b"value1".to_vec()))
-                );
-                assert_eq!(iter.next(), None);
                 assert!(manager.stop().is_ok())
             }
 
@@ -498,19 +503,19 @@ macro_rules! test_store_trait {
                 assert_eq!(
                     Collection::get(&store, "key1"),
                     Err(Error::EntryNotFound {
-                        key: "Query returned no rows".to_owned()
+                        key: "test.key1".to_owned()
                     })
                 );
                 assert_eq!(
                     Collection::get(&store, "key2"),
                     Err(Error::EntryNotFound {
-                        key: "Query returned no rows".to_owned()
+                        key: "test.key2".to_owned()
                     })
                 );
                 assert_eq!(
                     Collection::get(&store, "key3"),
                     Err(Error::EntryNotFound {
-                        key: "Query returned no rows".to_owned()
+                        key: "test.key3".to_owned()
                     })
                 );
                 assert!(manager.stop().is_ok())
@@ -527,7 +532,7 @@ macro_rules! test_store_trait {
                 assert_eq!(
                     State::get(&store),
                     Err(Error::EntryNotFound {
-                        key: "Query returned no rows".to_owned()
+                        key: "test".to_owned()
                     })
                 );
 
@@ -537,7 +542,7 @@ macro_rules! test_store_trait {
                 assert_eq!(
                     State::get(&store),
                     Err(Error::EntryNotFound {
-                        key: "Query returned no rows".to_owned()
+                        key: "test".to_owned()
                     })
                 );
                 assert!(manager.stop().is_ok())

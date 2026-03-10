@@ -319,6 +319,7 @@ where
 #[cfg(test)]
 mod tests {
 
+    use test_log::test;
     use tokio_util::sync::CancellationToken;
     use tracing::info_span;
 
@@ -326,7 +327,7 @@ mod tests {
 
     use crate::{
         ActorRef, ActorSystem, Error, FixedIntervalStrategy,
-        build_tracing_subscriber,
+        
     };
 
     use std::sync::{
@@ -602,9 +603,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_retry_actor() {
-        build_tracing_subscriber();
+        
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -663,9 +664,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_retry_actor_stops_when_target_unavailable() {
-        build_tracing_subscriber();
+        
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -701,9 +702,9 @@ mod tests {
         assert_eq!(deliveries.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_retry_actor_notifies_parent_when_retries_finish() {
-        build_tracing_subscriber();
+        
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -737,9 +738,9 @@ mod tests {
         .expect("parent should receive completion notification");
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_retry_actor_ignores_duplicate_retry_start() {
-        build_tracing_subscriber();
+        
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),

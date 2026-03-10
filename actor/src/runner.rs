@@ -557,10 +557,11 @@ mod tests {
 
     use super::*;
 
+    use test_log::test;
     use crate::{
         Error,
         actor::{Actor, ActorContext, Event, Handler, Message},
-        build_tracing_subscriber,
+        
         supervision::{FixedIntervalStrategy, Strategy, SupervisionStrategy},
         system::SystemRef,
     };
@@ -667,9 +668,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_actor_root_failed() {
-        build_tracing_subscriber();
+        
         let (event_sender, _) = mpsc::channel(100);
 
         let system = SystemRef::new(
@@ -849,9 +850,9 @@ mod tests {
     // --- Tests ---
 
     /// tell/ask to a fully stopped actor must return Error::ActorStopped.
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_send_to_stopped_actor_returns_actor_stopped() {
-        build_tracing_subscriber();
+        
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
         let system = SystemRef::new(
             tx,
@@ -890,9 +891,9 @@ mod tests {
     ///  3. Send the stop signal.
     ///  4. Release the block → actor finishes, biased select picks stop →
     ///     drain runs → Normal discarded, Critical processed.
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_drain_critical_processed_normal_stopped() {
-        build_tracing_subscriber();
+        
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
         let system = SystemRef::new(
             tx,
@@ -950,9 +951,9 @@ mod tests {
     /// When drain_timeout expires while processing a slow critical message, the
     /// remaining critical messages are dropped and their ask callers receive
     /// Error::ActorStopped.
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_drain_timeout_drops_slow_critical() {
-        build_tracing_subscriber();
+        
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
         let system = SystemRef::new(
             tx,

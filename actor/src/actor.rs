@@ -1,9 +1,4 @@
-//! # Actor
-//!
-//! The `actor` module provides the `Actor` trait and the `ActorRef` type. The `Actor` trait is the
-//! main trait that actors must implement. The `ActorRef` type is a reference to an actor that can
-//! be used to send messages to him.
-//!
+//! Core actor traits, types, and lifecycle hooks.
 
 use crate::{
     ActorPath, Error,
@@ -22,9 +17,7 @@ use tracing::Span;
 
 use std::{collections::HashMap, fmt::Debug, time::Duration};
 
-/// The `ActorContext` is the context of the actor.
-/// It is passed to the actor when it is started, and can be used to interact with the actor
-/// system.
+/// Execution context passed to actors during lifecycle hooks and message handling.
 pub struct ActorContext<A: Actor + Handler<A>> {
     stop: StopSender,
     /// The path of the actor.
@@ -47,20 +40,6 @@ impl<A> ActorContext<A>
 where
     A: Actor + Handler<A>,
 {
-    /// Creates a new actor context.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The path of the actor.
-    /// * `system` - The actor system.
-    /// * `error_sender` - The error sender helper.
-    /// * `token` - The cancellation token.
-    /// * `event_sender` - The event sender.
-    ///
-    /// # Returns
-    ///
-    /// Returns a new actor context.
-    ///
     pub(crate) fn new(
         stop: StopSender,
         path: ActorPath,
@@ -81,19 +60,7 @@ where
         }
     }
 
-    /// Restarts the actor by calling its pre_restart method.
-    /// This method is invoked internally by the supervision system
-    /// when it decides to restart an actor after a failure.
-    ///
-    /// # Arguments
-    ///
-    /// * `actor` - Mutable reference to the actor to be restarted.
-    /// * `error` - Optional error that caused the restart.
-    ///
-    /// # Returns
-    ///
-    /// Returns Ok(()) if the restart was successful, or an Error if it failed.
-    ///
+    /// Invokes `pre_restart` on the actor; called by the supervision system after a failure.
     pub(crate) async fn restart(
         &mut self,
         actor: &mut A,
@@ -109,61 +76,30 @@ where
         }
         result
     }
-    /// Returns the actor reference.
-    ///
-    /// # Returns
-    ///
-    /// Returns the actor reference. `None` if the actor is removed.
-    ///
+    /// Returns an `ActorRef` to self, or `Error::NotFound` if already removed from the system.
     pub async fn reference(&self) -> Result<ActorRef<A>, Error> {
         self.system.get_actor(&self.path).await
     }
 
-    /// Returns the path of the actor.
-    ///
-    /// # Returns
-    ///
-    /// Returns the path of the actor.
-    ///
+    /// Returns this actor's path.
     pub const fn path(&self) -> &ActorPath {
         &self.path
     }
 
-    /// Returns the actor system.
-    ///
-    /// # Returns
-    ///
-    /// Returns the actor system.
-    ///
+    /// Returns a reference to the actor system.
     pub const fn system(&self) -> &SystemRef {
         &self.system
     }
 
-    /// Returns the actor parent or None if the actor is root actor.
-    ///
-    /// # Returns
-    ///
-    /// Returns the actor parent or None if the actor is root actor.
-    ///
+    /// Returns the parent actor's ref, or an error if this is a root actor.
     pub async fn get_parent<P: Actor + Handler<P>>(
         &self,
     ) -> Result<ActorRef<P>, Error> {
         self.system.get_actor(&self.path.parent()).await
     }
 
-    /// Stops all child actors in an orderly manner.
-    /// This method iterates over all child senders and sends them
-    /// a stop signal, waiting for confirmation from each one.
-    /// It is used internally during the parent actor's lifecycle.
-    ///
-    /// # Behavior
-    ///
-    /// - Drains all tracked child stop senders from the registry.
-    /// - For each child, creates a oneshot channel for confirmation.
-    /// - Sends the stop signal and waits for confirmation using the child
-    ///   actor's configured `stop_timeout()`, if any.
-    /// - If sending fails or a timeout expires, continues with the next child.
-    ///
+    /// Sends stop signals to all children concurrently and waits for confirmations.
+    /// Respects each child's `stop_timeout()`. Failures and timeouts are ignored.
     pub(crate) async fn stop_childs(&mut self) {
         let child_count = self.child_senders.len();
         if child_count > 0 {
@@ -196,49 +132,17 @@ where
         }
     }
 
-    /// Removes this actor from the actor system.
-    /// This method is invoked internally to clean up the actor's registration
-    /// in the ActorSystem, allowing it to be removed from the hierarchy.
-    ///
-    /// # Behavior
-    ///
-    /// Delegates the removal to the actor system using the actor's path.
-    ///
+    /// Removes this actor from the system registry.
     pub(crate) async fn remove_actor(&self) {
         self.system.remove_actor(&self.path).await;
     }
 
-    /// Stops the actor by sending a stop signal.
-    /// This method is used internally to initiate the actor's shutdown process,
-    /// optionally notifying the caller when it completes.
-    ///
-    /// # Arguments
-    ///
-    /// * `sender` - Optional channel to receive stop confirmation.
-    ///   If Some, the actor will send a signal when finished.
-    ///   If None, the stop is fire-and-forget.
-    ///
+    /// Sends a stop signal. Pass `Some(sender)` to await shutdown confirmation.
     pub async fn stop(&self, sender: Option<oneshot::Sender<()>>) {
         let _ = self.stop.send(sender).await;
     }
 
-    /// Emits an event to subscribers.
-    ///
-    /// This is an explicit operation: the runtime will not derive or publish
-    /// events automatically from handler responses.
-    ///
-    /// # Arguments
-    ///
-    /// * `event` - The event to emit.
-    ///
-    /// # Returns
-    ///
-    /// Returns a void result.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the event could not be emitted.
-    ///
+    /// Broadcasts an event to all subscribers. Not invoked automatically by the runtime.
     pub async fn publish_event(&self, event: A::Event) -> Result<(), Error> {
         self.inner_sender
             .send(InnerAction::Event(event))
@@ -251,24 +155,8 @@ where
             })
     }
 
-    /// Emits an error.
-    ///
-    /// Child actors forward the error to their parent through
-    /// [`Handler::on_child_error()`]. Root actors publish it as
-    /// [`SystemEvent::ActorError`](crate::SystemEvent::ActorError).
-    ///
-    /// # Arguments
-    ///
-    /// * `error` - The error to emit.
-    ///
-    /// # Returns
-    ///
-    /// Void result.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the error could not be emitted.
-    ///
+    /// Emits a non-fatal error. Forwarded to the parent via [`Handler::on_child_error`];
+    /// root actors emit it as [`SystemEvent::ActorError`].
     pub async fn emit_error(&mut self, error: Error) -> Result<(), Error> {
         tracing::warn!(error = %error, "Emitting error");
         self.inner_sender
@@ -282,21 +170,7 @@ where
             })
     }
 
-    /// Emits a fail.
-    /// This is used to emit a fail in a child actor.
-    ///
-    /// # Arguments
-    ///
-    /// * `error` - The error to emit.
-    ///
-    /// # Returns
-    ///
-    /// Void result.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the fail could not be emitted.
-    ///
+    /// Emits a fatal fault, stops message processing, and escalates to the parent.
     pub async fn emit_fail(&mut self, error: Error) -> Result<(), Error> {
         tracing::error!(error = %error, "Actor failing");
         // Store error to stop message handling.
@@ -313,21 +187,7 @@ where
             })
     }
 
-    /// Create a child actor under this actor.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The name of the child actor.
-    /// * `actor` - The actor to create.
-    ///
-    /// # Returns
-    ///
-    /// Returns the actor reference of the child actor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the child actor could not be created.
-    ///
+    /// Creates and registers a child actor at `{current_path}/{name}`.
     pub async fn create_child<C, I>(
         &mut self,
         name: &str,
@@ -388,16 +248,7 @@ where
         }
     }
 
-    /// Retrieve a child actor running under this actor.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The name of the child actor.
-    ///
-    /// # Returns
-    ///
-    /// Returns the actor reference of the child actor if it exists.
-    ///
+    /// Returns the `ActorRef` for a child actor by name.
     pub async fn get_child<C>(&self, name: &str) -> Result<ActorRef<C>, Error>
     where
         C: Actor + Handler<C>,
@@ -406,39 +257,23 @@ where
         self.system.get_actor(&path).await
     }
 
-    /// Returns the error of the actor if one is set.
-    /// This method is used internally to check if the actor is in an error state.
-    ///
-    /// # Returns
-    ///
-    /// Returns Some(Error) if an error is set, None otherwise.
-    ///
+    /// Returns the current error state, if any.
     pub(crate) fn error(&self) -> Option<Error> {
         self.error.clone()
     }
 
-    /// Sets the error state of the actor.
-    /// This method is used internally to mark the actor as being in an error state,
-    /// typically before emitting a fail signal to the parent.
-    ///
-    /// # Arguments
-    ///
-    /// * `error` - The error that occurred in the actor.
-    ///
+    /// Sets the actor's error state, called before emitting a fault.
     pub(crate) fn set_error(&mut self, error: Error) {
         self.error = Some(error);
     }
 
-    /// Clears the error state of the actor.
-    /// This method is used internally to reset the actor's error state,
-    /// typically after a successful restart or recovery.
-    ///
+    /// Clears the actor's error state after a successful restart.
     pub(crate) fn clean_error(&mut self) {
         self.error = None;
     }
 }
 
-/// The `Actor` lifecycle enum
+/// The current lifecycle state of an actor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActorLifecycle {
     /// The actor is created.
@@ -472,8 +307,7 @@ pub type ChildErrorReceiver = mpsc::Receiver<ChildError>;
 /// Child error sender.
 pub type ChildErrorSender = mpsc::Sender<ChildError>;
 
-/// Child error.
-///
+/// Message sent from a child to its parent on error or fault.
 pub enum ChildError {
     /// Error in child.
     Error {
@@ -524,32 +358,12 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
         None
     }
 
-    /// Defines the supervision strategy to use for this actor. By default it is
-    /// `Stop` which simply stops the actor if an error occurs at startup or when an
-    /// error or fault is issued from a handler.
-    ///
-    /// # Returns
-    ///
-    /// Returns the supervision strategy to use for this actor.
+    /// Supervision strategy applied when the actor fails at startup. Defaults to `Stop`.
     fn supervision_strategy() -> SupervisionStrategy {
         SupervisionStrategy::Stop
     }
 
-    /// Called when the actor is started.
-    /// Override this method to perform initialization when the actor is started.
-    ///
-    /// # Arguments
-    ///
-    /// * `context` - The context of the actor.
-    ///
-    /// # Returns
-    ///
-    /// Returns a void result.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the actor could not be started.
-    ///
+    /// Called when the actor starts. Override to initialize resources.
     async fn pre_start(
         &mut self,
         _context: &mut ActorContext<Self>,
@@ -569,22 +383,7 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
         self.pre_start(ctx).await
     }
 
-    /// Called before stopping the actor.
-    /// Override this method to define what should happen before the actor is stopped.
-    /// By default it does nothing.
-    ///
-    /// # Arguments
-    ///
-    /// * `context` - The context of the actor.
-    ///
-    /// # Returns
-    ///
-    /// Returns a void result.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the actor could not be stopped.
-    ///
+    /// Called before stopping the actor. Override to release resources.
     async fn pre_stop(
         &mut self,
         _ctx: &mut ActorContext<Self>,
@@ -592,12 +391,7 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
         Ok(())
     }
 
-    /// Called when the actor is stopped.
-    ///
-    /// # Arguments
-    ///
-    /// * `context` - The context of the actor.
-    ///
+    /// Called after the actor is fully stopped.
     async fn post_stop(
         &mut self,
         _ctx: &mut ActorContext<Self>,
@@ -652,21 +446,7 @@ impl Message for () {}
 /// if necessary, respond to them.
 #[async_trait]
 pub trait Handler<A: Actor + Handler<A>>: Send + Sync {
-    /// Handles a message.
-    ///
-    /// # Arguments
-    ///
-    /// * `sender` - The `ActorPath` of the sender of the message.
-    /// * `msg` - The message to handle.
-    /// * `ctx` - The actor context.
-    ///
-    /// # Returns
-    ///
-    /// Returns the response of the message (if any).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the message could not be handled.
+    /// Processes an incoming message and returns a response.
     async fn handle_message(
         &mut self,
         sender: ActorPath,
@@ -690,23 +470,7 @@ pub trait Handler<A: Actor + Handler<A>>: Send + Sync {
         // Default implementation.
     }
 
-    /// Called when an error occurs in a child actor.
-    /// Override this method to define what should happen when an error occurs in a child actor.
-    /// By default it does nothing.
-    ///
-    /// # Arguments
-    ///
-    /// * `error` - The error that occurred.
-    /// * `ctx` - The actor context.
-    ///
-    /// # Returns
-    ///
-    /// Returns a void result.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the error could not be handled.
-    ///
+    /// Called when a child emits a non-fatal error via [`ActorContext::emit_error`].
     async fn on_child_error(
         &mut self,
         error: Error,
@@ -715,22 +479,8 @@ pub trait Handler<A: Actor + Handler<A>>: Send + Sync {
         tracing::error!(error = %error, "Child actor error");
     }
 
-    /// Called when a fault occurs in a child actor.
-    /// Override this method to define what should happen when a fault occurs in a child actor.
-    /// By default it does nothing.
-    ///
-    /// # Arguments
-    ///
-    /// * `error` - The error that occurred.
-    ///
-    /// # Returns
-    ///
-    /// Returns a void result.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the fault could not be handled.
-    ///
+    /// Called when a child emits a fatal fault via [`ActorContext::emit_fail`].
+    /// Returns the action to apply: `Stop`, `Restart`, or `Delegate` to supervision strategy.
     async fn on_child_fault(
         &mut self,
         error: Error,
@@ -742,10 +492,7 @@ pub trait Handler<A: Actor + Handler<A>>: Send + Sync {
     }
 }
 
-/// Actor reference.
-///
-/// This is a reference to an actor that can be used to send messages to him.
-///
+/// Typed handle to an actor. Use this to send messages, subscribe to events, or stop the actor.
 pub struct ActorRef<A>
 where
     A: Actor + Handler<A>,
@@ -764,17 +511,6 @@ impl<A> ActorRef<A>
 where
     A: Actor + Handler<A>,
 {
-    /// Creates a new actor reference.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The path of the actor.
-    /// * `sender` - The handle helper.
-    ///
-    /// # Returns
-    ///
-    /// Returns a new actor reference.
-    ///
     pub const fn new(
         path: ActorPath,
         sender: HandleHelper<A>,
@@ -789,34 +525,12 @@ where
         }
     }
 
-    /// Tells a message to the actor.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - The message to send.
-    ///
-    /// # Returns
-    ///
-    /// Returns a () if success.
-    ///
+    /// Sends a message without waiting for a response (fire-and-forget).
     pub async fn tell(&self, message: A::Message) -> Result<(), Error> {
         self.sender.tell(self.path(), message).await
     }
 
-    /// Asks a message to the actor.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - The message to send.
-    ///
-    /// # Returns
-    ///
-    /// Returns the response of the message.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the message could not be sent.
-    ///
+    /// Sends a message and waits for the actor's response.
     pub async fn ask(&self, message: A::Message) -> Result<A::Response, Error> {
         self.sender.ask(self.path(), message).await
     }
@@ -836,10 +550,7 @@ where
             })?
     }
 
-    /// Stops the actor.
-    /// This will stop the actor and remove it from the actor system.
-    /// The actor will not be able to receive any more messages.
-    ///
+    /// Sends a stop signal and waits for the actor to confirm shutdown.
     pub async fn ask_stop(&self) -> Result<(), Error> {
         tracing::debug!("Stopping actor");
         let (response_sender, response_receiver) = oneshot::channel();
@@ -869,22 +580,12 @@ where
         let _ = self.stop_sender.send(None).await;
     }
 
-    /// Returns the path of the actor.
-    ///
-    /// # Returns
-    ///
-    /// Returns the path of the actor.
-    ///
+    /// Returns the actor's path.
     pub fn path(&self) -> ActorPath {
         self.path.clone()
     }
 
-    /// Returns true if the sender is closed.
-    ///
-    /// # Returns
-    ///
-    /// Returns true if the sender is closed.
-    ///
+    /// Returns `true` if the actor's mailbox is closed (actor has stopped).
     pub fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }
@@ -894,20 +595,12 @@ where
         self.sender.close().await;
     }
 
-    /// Subscribes to the actor event bus.
-    /// This will return an event receiver that can be used to receive events from the actor.
-    /// The event receiver will receive events that the actor emits after processing a message.
-    ///
-    /// # Returns
-    ///
-    /// Returns an event receiver.
-    ///
+    /// Returns a new broadcast receiver subscribed to this actor's event channel.
     pub fn subscribe(&self) -> EventReceiver<<A as Actor>::Event> {
         self.event_receiver.resubscribe()
     }
 }
 
-/// Clone implementation for ActorRef.
 impl<A> Clone for ActorRef<A>
 where
     A: Actor + Handler<A>,
@@ -926,9 +619,10 @@ where
 mod test {
 
     use super::*;
+    use test_log::test;
 
     use crate::{
-        build_tracing_subscriber,
+        
         sink::{Sink, Subscriber},
     };
 
@@ -1001,9 +695,9 @@ mod test {
         }
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_actor() {
-        build_tracing_subscriber();
+        
         let (event_sender, _event_receiver) = mpsc::channel(100);
         let system = SystemRef::new(
             event_sender,

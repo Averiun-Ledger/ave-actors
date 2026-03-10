@@ -341,7 +341,7 @@ impl State for RocksDbStore {
             match result {
                 Some(value) => Ok(value),
                 _ => Err(Error::EntryNotFound {
-                    key: "Query returned no rows".to_owned(),
+                    key: self.prefix.clone(),
                 }),
             }
         } else {
@@ -379,6 +379,22 @@ impl State for RocksDbStore {
 
     fn del(&mut self) -> Result<(), Error> {
         if let Some(handle) = self.store.cf_handle(&self.name) {
+            let key = self.prefix.clone();
+            let exists = self
+                .store
+                .get_cf(&handle, &key)
+                .map_err(|e| {
+                    error!(cf = %self.name, key = %key, error = %e, "Failed to check state before delete");
+                    Error::Get {
+                        key: key.clone(),
+                        reason: format!("{:?}", e),
+                    }
+                })?
+                .is_some();
+            if !exists {
+                return Err(Error::EntryNotFound { key });
+            }
+
             let wopts = write_options(self.strong_durability);
             Ok(self
                 .store
@@ -428,7 +444,7 @@ impl State for RocksDbStore {
 impl Collection for RocksDbStore {
     fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
         let mut iter = self.iter(true)?;
-        let value = iter.next();
+        let value = iter.next().transpose()?;
         debug!("Last value: {:?}", value);
         Ok(value)
     }
@@ -450,7 +466,7 @@ impl Collection for RocksDbStore {
             match result {
                 Some(value) => Ok(value),
                 _ => Err(Error::EntryNotFound {
-                    key: "Query returned no rows".to_owned(),
+                    key: full_key,
                 }),
             }
         } else {
@@ -490,6 +506,21 @@ impl Collection for RocksDbStore {
     fn del(&mut self, key: &str) -> Result<(), Error> {
         if let Some(handle) = self.store.cf_handle(&self.name) {
             let key = format!("{}.{}", self.prefix, key);
+            let exists = self
+                .store
+                .get_cf(&handle, &key)
+                .map_err(|e| {
+                    error!(cf = %self.name, key = %key, error = %e, "Failed to check collection entry before delete");
+                    Error::Get {
+                        key: key.clone(),
+                        reason: format!("{:?}", e),
+                    }
+                })?
+                .is_some();
+            if !exists {
+                return Err(Error::EntryNotFound { key });
+            }
+
             let wopts = write_options(self.strong_durability);
             Ok(self
                 .store
@@ -543,7 +574,7 @@ impl Collection for RocksDbStore {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>, Error> {
+    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>, Error> {
         let Some(_handle) = self.store.cf_handle(&self.name) else {
             error!(cf = %self.name, "Column family not found for collection iter");
             return Err(Error::Store {
@@ -593,7 +624,7 @@ impl<'a> RocksDbIterator<'a> {
 }
 
 impl Iterator for RocksDbIterator<'_> {
-    type Item = (String, Vec<u8>);
+    type Item = Result<(String, Vec<u8>), Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         for item in self.iter.by_ref() {
@@ -603,13 +634,23 @@ impl Iterator for RocksDbIterator<'_> {
                         return None;
                     }
                     let suffix = &key[self.prefix_dot.len()..];
-                    let key_str = String::from_utf8(suffix.to_vec())
-                        .expect("Can not convert key to string.");
-                    return Some((key_str, value.to_vec()));
+                    let key_str = match String::from_utf8(suffix.to_vec()) {
+                        Ok(key_str) => key_str,
+                        Err(error) => {
+                            return Some(Err(Error::Get {
+                                key: String::from_utf8_lossy(&key).into_owned(),
+                                reason: format!("{}", error),
+                            }));
+                        }
+                    };
+                    return Some(Ok((key_str, value.to_vec())));
                 }
                 Err(e) => {
                     error!(error = %e, "RocksDB iteration error");
-                    return None;
+                    return Some(Err(Error::Get {
+                        key: String::from_utf8_lossy(&self.prefix_dot).into_owned(),
+                        reason: format!("{}", e),
+                    }));
                 }
             }
         }

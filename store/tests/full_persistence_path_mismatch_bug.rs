@@ -3,8 +3,9 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
-    Handler, Message, Response, build_tracing_subscriber,
+    Handler, Message, Response, 
 };
+use test_log::test;
 use ave_actors_store::memory::MemoryManager;
 use ave_actors_store::store::{FullPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -106,9 +107,9 @@ impl PersistentActor for PathActor {
     }
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_path_mismatch_scenario() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -150,9 +151,9 @@ async fn test_path_mismatch_scenario() {
     );
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_explicit_prefix_usage() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });

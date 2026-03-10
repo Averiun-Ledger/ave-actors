@@ -71,3 +71,4 @@ tracing ={ version = "0.1.44" }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 tracing-test = "0.2.6"
 num_cpus = "1.17.0"
+test-log = {version = "0.2.19", features = ["trace"] }

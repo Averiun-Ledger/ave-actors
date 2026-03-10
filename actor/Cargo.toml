@@ -21,10 +21,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["env-filter"], optional = true}
+
 
 [dev-dependencies]
-ave-actors-actor = {path = ".", features = ["test"] }
-
-[features]
-test = ["tracing-subscriber"]
+test-log = { workspace = true }

@@ -16,14 +16,6 @@
 //! messaging (no actor can access the state of another actor directly).
 //!
 
-#[cfg(all(feature = "test", not(test), not(debug_assertions)))]
-compile_error!(
-    "The 'test' feature should only be used during development/testing."
-);
-
-#[cfg(feature = "test")]
-pub use system::build_tracing_subscriber;
-
 mod actor;
 mod error;
 mod handler;

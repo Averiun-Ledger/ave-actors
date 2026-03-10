@@ -11,10 +11,11 @@ use ave_actors_store::{
         FullPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
     },
 };
+use test_log::test;
 
 use ave_actors_actor::{
     Actor, ActorContext, ActorSystem, EncryptedKey, Error as ActorError, Event,
-    Handler, Message, Response, build_tracing_subscriber,
+    Handler, Message, Response, 
 };
 
 use async_trait::async_trait;
@@ -110,9 +111,9 @@ impl Handler<CounterTestActor> for CounterTestActor {
 }
 
 /// Test that event_counter starts at 0 for a new store
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_event_counter_starts_at_zero() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -138,10 +139,10 @@ async fn test_event_counter_starts_at_zero() {
 }
 
 /// Test that event_counter = 1 after persisting first event
-#[tokio::test]
+#[test(tokio::test)]
 
 async fn test_event_counter_after_first_event() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -191,10 +192,10 @@ async fn test_event_counter_after_first_event() {
 }
 
 /// Test event_counter increments correctly for multiple events
-#[tokio::test]
+#[test(tokio::test)]
 
 async fn test_event_counter_multiple_events() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -244,11 +245,86 @@ async fn test_event_counter_multiple_events() {
     }
 }
 
+/// Test GetEvents returns empty for a range that does not overlap persisted events
+#[test(tokio::test)]
+async fn test_get_events_out_of_range_returns_empty() {
+    
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    let store = Store::<CounterTestActor>::new(
+        "counter_test",
+        "test_query_empty",
+        MemoryManager::default(),
+        None,
+        CounterTestActor::create_initial(()),
+    )
+    .unwrap();
+    let store_ref = system.create_root_actor("store", store).await.unwrap();
+
+    store_ref
+        .ask(StoreCommand::Persist(CounterEvent { delta: 10 }))
+        .await
+        .unwrap();
+
+    let result = store_ref
+        .ask(StoreCommand::GetEvents { from: 5, to: 8 })
+        .await
+        .unwrap();
+    match result {
+        StoreResponse::Events(events) => {
+            assert!(events.is_empty(), "Out-of-range query should be empty");
+        }
+        _ => panic!("Expected Events response"),
+    }
+}
+
+/// Test GetEvents clamps partially overlapping ranges instead of failing
+#[test(tokio::test)]
+async fn test_get_events_partial_overlap_returns_existing_suffix() {
+    
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    let store = Store::<CounterTestActor>::new(
+        "counter_test",
+        "test_query_partial",
+        MemoryManager::default(),
+        None,
+        CounterTestActor::create_initial(()),
+    )
+    .unwrap();
+    let store_ref = system.create_root_actor("store", store).await.unwrap();
+
+    store_ref
+        .ask(StoreCommand::Persist(CounterEvent { delta: 10 }))
+        .await
+        .unwrap();
+    store_ref
+        .ask(StoreCommand::Persist(CounterEvent { delta: 20 }))
+        .await
+        .unwrap();
+
+    let result = store_ref
+        .ask(StoreCommand::GetEvents { from: 1, to: 5 })
+        .await
+        .unwrap();
+    match result {
+        StoreResponse::Events(events) => {
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].delta, 20);
+        }
+        _ => panic!("Expected Events response"),
+    }
+}
+
 /// Test state_counter after snapshot
-#[tokio::test]
+#[test(tokio::test)]
 
 async fn test_state_counter_after_snapshot() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -296,10 +372,10 @@ async fn test_state_counter_after_snapshot() {
 }
 
 /// Test recovery with events after snapshot
-#[tokio::test]
+#[test(tokio::test)]
 
 async fn test_recovery_with_events_after_snapshot() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -356,10 +432,10 @@ async fn test_recovery_with_events_after_snapshot() {
 }
 
 /// Test that recovery without snapshot works correctly
-#[tokio::test]
+#[test(tokio::test)]
 
 async fn test_recovery_without_snapshot() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -398,10 +474,10 @@ async fn test_recovery_without_snapshot() {
 }
 
 /// Test edge case: snapshot at event_counter = 0
-#[tokio::test]
+#[test(tokio::test)]
 
 async fn test_snapshot_at_zero() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -446,10 +522,10 @@ async fn test_snapshot_at_zero() {
 }
 
 /// Test LastEventsFrom with different positions
-#[tokio::test]
+#[test(tokio::test)]
 
 async fn test_last_events_from_positions() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -523,10 +599,10 @@ async fn test_last_events_from_positions() {
 }
 
 /// Test complex scenario: multiple snapshots and recoveries
-#[tokio::test]
+#[test(tokio::test)]
 
 async fn test_multiple_snapshots_and_recoveries() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -600,10 +676,10 @@ async fn test_multiple_snapshots_and_recoveries() {
 }
 
 /// Test that event_counter works correctly with encryption
-#[tokio::test]
+#[test(tokio::test)]
 
 async fn test_event_counter_with_encryption() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });

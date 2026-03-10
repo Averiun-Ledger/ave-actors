@@ -848,6 +848,21 @@ where
         Ok(events)
     }
 
+    /// Retrieve events for external queries, tolerating out-of-range bounds.
+    ///
+    /// This keeps recovery strict while making StoreCommand::GetEvents behave
+    /// like a range query: if the requested interval does not intersect with
+    /// existing events, the result is empty; if it overlaps partially, only
+    /// the existing suffix is returned.
+    fn query_events(&self, from: u64, to: u64) -> Result<Vec<P::Event>, Error> {
+        if from > to || from >= self.event_counter {
+            return Ok(Vec::new());
+        }
+
+        let upper = to.min(self.event_counter.saturating_sub(1));
+        self.events(from, upper)
+    }
+
     /// Snapshot the state.
     ///
     /// # Arguments
@@ -1433,7 +1448,7 @@ where
                 Ok(StoreResponse::State(state))
             }
             StoreCommand::GetEvents { from, to } => {
-                let events = self.events(from, to).map_err(|e| {
+                let events = self.query_events(from, to).map_err(|e| {
                     actor_store_error(
                         StoreOperation::GetEventsRange,
                         format!("Unable to get events range: {}", e),
@@ -1480,12 +1495,13 @@ mod tests {
     use std::vec;
     use tokio_util::sync::CancellationToken;
     use tracing::info_span;
+    use test_log::test;
 
     use super::*;
     use crate::memory::MemoryManager;
 
     use ave_actors_actor::{
-        ActorRef, ActorSystem, Error as ActorError, build_tracing_subscriber,
+        ActorRef, ActorSystem, Error as ActorError, 
     };
 
     use async_trait::async_trait;
@@ -1757,9 +1773,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_store_actor() {
-        build_tracing_subscriber();
+        
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -1845,9 +1861,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_persistent_light_actor() {
-        build_tracing_subscriber();
+        
         let (system, ..) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -1885,9 +1901,9 @@ mod tests {
         assert_eq!(data, vec![12, 13, 14, 15]);
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_persistent_actor() {
-        build_tracing_subscriber();
+        
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -1930,9 +1946,9 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_encrypt_decrypt() {
-        build_tracing_subscriber();
+        
         let encrypt_key = EncryptedKey::new(&[0u8; 32]).unwrap();
 
         let store = Store::<TestActor>::new(

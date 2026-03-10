@@ -99,7 +99,7 @@ impl State for MemoryStore {
         lock.get(&self.prefix).map_or_else(
             || {
                 Err(Error::EntryNotFound {
-                    key: "Query returned no rows".to_owned(),
+                    key: self.prefix.clone(),
                 })
             },
             |value| Ok(value.clone()),
@@ -126,7 +126,7 @@ impl State for MemoryStore {
         match lock.remove(&self.prefix) {
             Some(_) => Ok(()),
             None => Err(Error::EntryNotFound {
-                key: "Query returned no rows".to_owned(),
+                key: self.prefix.clone(),
             }),
         }
     }
@@ -144,7 +144,7 @@ impl State for MemoryStore {
 impl Collection for MemoryStore {
     fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
         let mut iter = self.iter(true)?;
-        Ok(iter.next())
+        iter.next().transpose()
     }
 
     fn name(&self) -> &str {
@@ -161,7 +161,7 @@ impl Collection for MemoryStore {
         lock.get(&key).map_or_else(
             || {
                 Err(Error::EntryNotFound {
-                    key: "Query returned no rows".to_owned(),
+                    key: key.clone(),
                 })
             },
             |value| Ok(value.clone()),
@@ -190,7 +190,7 @@ impl Collection for MemoryStore {
         match lock.remove(&key) {
             Some(_) => Ok(()),
             None => Err(Error::EntryNotFound {
-                key: "Query returned no rows".to_owned(),
+                key,
             }),
         }
     }
@@ -217,7 +217,7 @@ impl Collection for MemoryStore {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>, Error> {
+    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>, Error> {
         let lock = self.data.read().map_err(|e| Error::Store {
             operation: StoreOperation::LockData,
             reason: format!("{}", e),
@@ -244,7 +244,7 @@ impl Collection for MemoryStore {
                 .collect()
         };
 
-        Ok(Box::new(items.into_iter()))
+        Ok(Box::new(items.into_iter().map(Ok)))
     }
 }
 

@@ -9,11 +9,11 @@ use ave_actors_store::{
         StoreCommand, StoreResponse,
     },
 };
-
+use test_log::test;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, EncryptedKey,
     Error as ActorError, Event, Handler, Message, Response,
-    build_tracing_subscriber,
+    
 };
 
 use async_trait::async_trait;
@@ -289,7 +289,7 @@ struct FailingCollection {
 impl Collection for FailingCollection {
     fn last(&self) -> Result<Option<(String, Vec<u8>)>, StoreError> {
         let mut iter = self.iter(true)?;
-        Ok(iter.next())
+        iter.next().transpose()
     }
 
     fn name(&self) -> &str {
@@ -347,9 +347,9 @@ impl Collection for FailingCollection {
     fn iter<'a>(
         &'a self,
         _reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>, StoreError> {
+    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>, StoreError> {
         Ok(Box::new(
-            self.data.iter().map(|(k, v)| (k.clone(), v.clone())),
+            self.data.iter().map(|(k, v)| Ok((k.clone(), v.clone()))),
         ))
     }
 }
@@ -448,9 +448,9 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
 
 // Tests
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_encrypted_store_operations() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -506,9 +506,9 @@ async fn test_encrypted_store_operations() {
     actor_ref.ask(EncryptedMessage::Purge).await.unwrap();
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_light_persistence() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -552,9 +552,9 @@ async fn test_light_persistence() {
     }
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_store_error_scenarios() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -619,9 +619,9 @@ async fn test_store_error_scenarios() {
     ));
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_store_commands_coverage() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -699,10 +699,10 @@ async fn test_store_commands_coverage() {
     }
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 
 async fn test_persist_actor_error_scenarios() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -794,9 +794,9 @@ async fn test_persist_actor_error_scenarios() {
     }
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_encryption_failure_scenarios() {
-    build_tracing_subscriber();
+    
     // Test with invalid key size (this would be a compile-time error, so we test valid scenario)
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());

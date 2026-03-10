@@ -1,8 +1,4 @@
-//! # Actor system
-//!
-//! The `system` module provides the `ActorSystem` type. The `ActorSystem` type is the responsible for
-//! creating and managing actors.
-//!
+//! Actor system: creates, manages, and shuts down actors.
 
 use crate::{
     Actor, ActorPath, ActorRef, Error, Event, Handler,
@@ -59,32 +55,15 @@ impl ShutdownReason {
     }
 }
 
-/// Actor system factory.
-///
-/// This is the main entry point for creating an actor system instance.
-/// The ActorSystem provides factory methods for initializing the system
-/// infrastructure including the SystemRef and SystemRunner.
-///
+/// Factory for creating an actor system instance.
 pub struct ActorSystem {}
 
 /// Default implementation for `ActorSystem`.
 impl ActorSystem {
-    /// Creates a new actor system with its reference and runner.
+    /// Creates the actor system, returning a `(SystemRef, SystemRunner)` pair.
     ///
-    /// # Arguments
-    ///
-    /// * `graceful_token` - Cancelled by an external signal (SIGTERM, operator).
-    ///   Results in [`ShutdownReason::Graceful`] and exit code 0.
-    /// * `crash_token` - Cancelled by an actor on unrecoverable failure.
-    ///   Results in [`ShutdownReason::Crash`] and exit code 1, triggering a
-    ///   supervisor restart.
-    ///
-    /// # Returns
-    ///
-    /// Returns a tuple of:
-    /// - `SystemRef` - Cloneable reference for creating and managing actors.
-    /// - `SystemRunner` - Event loop that must be driven to process system events.
-    ///
+    /// - `graceful_token` — cancel on SIGTERM; [`SystemRunner::run`] returns [`ShutdownReason::Graceful`].
+    /// - `crash_token` — cancel on unrecoverable failure; returns [`ShutdownReason::Crash`].
     pub fn create(
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
@@ -114,17 +93,10 @@ pub enum SystemEvent {
     StopSystem(ShutdownReason),
 }
 
-/// Cloneable reference to the actor system.
+/// Cloneable, thread-safe handle to the actor system.
 ///
-/// The SystemRef provides methods for creating, retrieving, and managing actors.
-/// Multiple SystemRef instances can be cloned and used concurrently across
-/// different parts of the application.
-///
-/// # Thread Safety
-///
-/// SystemRef is thread-safe and can be cloned and shared across tasks.
-/// All operations use internal locks for safe concurrent access.
-///
+/// Use this to create actors, retrieve existing ones, store shared resources
+/// (helpers), and initiate shutdown.
 #[derive(Clone)]
 pub struct SystemRef {
     /// Registry of all actors in the system, indexed by their paths.
@@ -152,26 +124,6 @@ pub struct SystemRef {
 }
 
 impl SystemRef {
-    /// Creates a new system reference with shutdown coordination.
-    /// This method sets up the actor registry and spawns a task that
-    /// listens for cancellation signals to coordinate system shutdown.
-    ///
-    /// # Arguments
-    ///
-    /// * `event_sender` - Channel for sending system events to the runner.
-    /// * `token` - Cancellation token that triggers system shutdown when cancelled.
-    ///
-    /// # Returns
-    ///
-    /// Returns a new SystemRef instance.
-    ///
-    /// # Behavior
-    ///
-    /// Spawns a background task that:
-    /// - Waits for the cancellation token to be cancelled.
-    /// - Stops all root actors in order, waiting for each to confirm.
-    /// - Sends a StopSystem event to the runner to complete shutdown.
-    ///
     pub(crate) fn new(
         event_sender: mpsc::Sender<SystemEvent>,
         graceful_token: CancellationToken,
@@ -288,17 +240,7 @@ impl SystemRef {
         }
     }
 
-    /// Retrieves an actor running in this actor system. If actor does not exist, a None
-    /// is returned instead.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The path of the actor to retrieve.
-    ///
-    /// # Returns
-    ///
-    /// Returns the actor reference.
-    ///
+    /// Returns the `ActorRef` for the actor at `path`, or `Error::NotFound`.
     pub async fn get_actor<A>(
         &self,
         path: &ActorPath,
@@ -313,8 +255,6 @@ impl SystemRef {
             .ok_or_else(|| Error::NotFound { path: path.clone() })
     }
 
-    /// Creates an actor in this actor system with the given path and actor type.
-    /// If the actor already exists, an error is returned.
     pub(crate) async fn create_actor_path<A>(
         &self,
         path: ActorPath,
@@ -420,24 +360,7 @@ impl SystemRef {
         }
     }
 
-    /// Launches a new top level actor on th is actor system at the '/user'
-    /// actor path. If another actor with the same name already exists,
-    /// an `Err(Error::Exists(ActorPath))` is returned instead.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The name of the actor to create.
-    /// * `actor` - The type with `Actor` trait to create.
-    /// * `error_helper` - The error helper actor (`None` it it is root actor).
-    ///
-    /// # Returns
-    ///
-    /// Returns the actor reference.
-    ///
-    /// # Error
-    ///
-    /// Returns an error if the actor already exists.
-    ///
+    /// Creates a root actor at `/user/{name}`. Returns `Error::Exists` if that path is taken.
     pub async fn create_root_actor<A, I>(
         &self,
         name: &str,
@@ -473,13 +396,6 @@ impl SystemRef {
         Ok(actor_ref)
     }
 
-    /// Remove an actor from this actor system.
-    /// If the actor does not exist, nothing happens.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The path of the actor to remove.
-    ///
     pub(crate) async fn remove_actor(&self, path: &ActorPath) {
         let mut actors = self.actors.write().await;
         let removed = actors.remove(path).is_some();
@@ -505,18 +421,7 @@ impl SystemRef {
         self.crash_token.cancel();
     }
 
-    /// Retrieves all direct children of the specified actor.
-    /// This scans the actor registry for actors whose parent matches
-    /// the given path.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The path of the parent actor.
-    ///
-    /// # Returns
-    ///
-    /// Returns a vector of ActorPath for all direct children.
-    ///
+    /// Returns the paths of all direct children of the actor at `path`.
     pub async fn children(&self, path: &ActorPath) -> Vec<ActorPath> {
         self.child_index
             .read()
@@ -528,16 +433,7 @@ impl SystemRef {
             .collect()
     }
 
-    /// Adds a helper object to the actor system.
-    /// Helpers are shared objects (like database pools, configurations, etc.)
-    /// that actors can retrieve by name. This enables dependency injection
-    /// for actors without tight coupling.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Unique identifier for this helper.
-    /// * `helper` - The helper object to store (must be Clone + Send + Sync).
-    ///
+    /// Stores a shared resource under `name` (e.g. a DB pool or config object).
     pub async fn add_helper<H>(&self, name: &str, helper: H)
     where
         H: Any + Send + Sync + Clone + 'static,
@@ -546,18 +442,7 @@ impl SystemRef {
         helpers.insert(name.to_owned(), Box::new(helper));
     }
 
-    /// Retrieves a helper object from the actor system.
-    /// Actors can use this to access shared resources like database
-    /// connections, configuration, or other services.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The identifier of the helper to retrieve.
-    ///
-    /// # Returns
-    ///
-    /// Returns Some(helper) if found and type matches, None otherwise.
-    ///
+    /// Returns the helper stored under `name`, or `None` if not found or type mismatch.
     pub async fn get_helper<H>(&self, name: &str) -> Option<H>
     where
         H: Any + Send + Sync + Clone + 'static,
@@ -569,14 +454,7 @@ impl SystemRef {
             .cloned()
     }
 
-    /// Spawns a sink to run in a separate task.
-    /// Sinks process events emitted by actors and run independently
-    /// in their own tasks for concurrent event processing.
-    ///
-    /// # Arguments
-    ///
-    /// * `sink` - The sink to run (contains subscriber and event receiver).
-    ///
+    /// Spawns a [`Sink`] in a background task to process actor events.
     pub async fn run_sink<E>(&self, mut sink: Sink<E>)
     where
         E: Event,
@@ -587,26 +465,13 @@ impl SystemRef {
     }
 }
 
-/// System runner that processes system-wide events.
-/// The SystemRunner must be spawned in a task and run to process
-/// system lifecycle events like shutdown notifications.
-///
+/// Drives the system event loop. Call [`SystemRunner::run`] to block until shutdown.
 pub struct SystemRunner {
     /// Receiver for system-wide events.
     event_receiver: mpsc::Receiver<SystemEvent>,
 }
 
 impl SystemRunner {
-    /// Creates a new system runner with the given event receiver.
-    ///
-    /// # Arguments
-    ///
-    /// * `event_receiver` - Channel receiver for SystemEvent messages.
-    ///
-    /// # Returns
-    ///
-    /// Returns a new SystemRunner instance.
-    ///
     pub(crate) const fn new(
         event_receiver: mpsc::Receiver<SystemEvent>,
     ) -> Self {
@@ -641,47 +506,17 @@ impl SystemRunner {
     }
 }
 
-#[cfg(feature = "test")]
-use tracing_subscriber::{
-    EnvFilter,
-    fmt::{self, format::FmtSpan},
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
-};
 
-#[cfg(feature = "test")]
-use std::sync::Once;
-
-#[cfg(feature = "test")]
-static INIT: Once = Once::new();
-
-#[cfg(feature = "test")]
-#[allow(dead_code)]
-pub fn build_tracing_subscriber() {
-    INIT.call_once(|| {
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info"));
-
-        let layer = fmt::layer()
-            .with_test_writer()
-            .with_span_events(FmtSpan::NONE);
-
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(layer)
-            .try_init()
-            .ok();
-    });
-}
 
 #[cfg(test)]
 mod tests {
 
     use super::*;
+    use test_log::test;
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_helpers() {
-        build_tracing_subscriber();
+        
         let (system, _) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),

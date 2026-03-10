@@ -3,13 +3,14 @@ use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, Error, Event,
     FixedIntervalStrategy, Handler, Message, NoIntervalStrategy,
     NotPersistentActor, Response, RetryActor, RetryMessage, ShutdownReason,
-    Strategy, SupervisionStrategy, SystemEvent, build_tracing_subscriber,
+    Strategy, SupervisionStrategy, SystemEvent, 
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use test_log::test;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -516,9 +517,9 @@ fn spawn_system() -> ActorSystemRefHandle {
     ActorSystemRefHandle { system, runner }
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_cleanup_after_pre_start_failure_allows_recreate() {
-    build_tracing_subscriber();
+    
     let handle = spawn_system();
 
     let result = handle
@@ -539,9 +540,9 @@ async fn test_cleanup_after_pre_start_failure_allows_recreate() {
     shutdown_system(handle).await;
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_startup_timeout_aborts_stuck_actor_and_releases_path() {
-    build_tracing_subscriber();
+    
     let handle = spawn_system();
     let started = Arc::new(Notify::new());
 
@@ -577,9 +578,9 @@ async fn test_startup_timeout_aborts_stuck_actor_and_releases_path() {
     shutdown_system(handle).await;
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_runtime_restart_preserves_registry_lookup() {
-    build_tracing_subscriber();
+    
     let handle = spawn_system();
     let hooks = Arc::new(RestartHooks::default());
 
@@ -618,9 +619,9 @@ async fn test_runtime_restart_preserves_registry_lookup() {
     shutdown_system(handle).await;
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_runtime_restart_resumes_mailbox_processing() {
-    build_tracing_subscriber();
+    
     let handle = spawn_system();
     let hooks = Arc::new(RestartHooks::default());
 
@@ -663,9 +664,9 @@ async fn test_runtime_restart_resumes_mailbox_processing() {
     shutdown_system(handle).await;
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_retry_actor_with_no_interval_strategy_retries_immediately() {
-    build_tracing_subscriber();
+    
     let handle = spawn_system();
     let deliveries = Arc::new(AtomicUsize::new(0));
 
@@ -702,9 +703,9 @@ async fn test_retry_actor_with_no_interval_strategy_retries_immediately() {
     shutdown_system(handle).await;
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_create_root_actor_rejected_once_shutdown_starts() {
-    build_tracing_subscriber();
+    
     let handle = spawn_system();
     let system = handle.system.clone();
 
@@ -729,9 +730,9 @@ async fn test_create_root_actor_rejected_once_shutdown_starts() {
     assert!(matches!(result, Err(Error::SystemStopped)));
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_root_emit_error_publishes_system_event_without_stopping_actor() {
-    build_tracing_subscriber();
+    
     let handle = spawn_system();
     let mut system_events = handle.system.subscribe_system_events();
 
@@ -764,9 +765,9 @@ async fn test_root_emit_error_publishes_system_event_without_stopping_actor() {
     shutdown_system(handle).await;
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_parent_stop_uses_configured_shutdown_timeout_for_blocked_child() {
-    build_tracing_subscriber();
+    
     let handle = spawn_system();
     let child_entered = Arc::new(Notify::new());
 
@@ -792,9 +793,9 @@ async fn test_parent_stop_uses_configured_shutdown_timeout_for_blocked_child() {
     shutdown_system(handle).await;
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_system_shutdown_uses_root_stop_timeout_for_blocked_root() {
-    build_tracing_subscriber();
+    
     let mut handle = spawn_system();
     let root_entered = Arc::new(Notify::new());
 

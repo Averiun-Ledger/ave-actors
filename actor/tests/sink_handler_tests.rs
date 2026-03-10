@@ -3,13 +3,14 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler,
-    Message, Response, Sink, Subscriber, build_tracing_subscriber,
+    Message, Response, Sink, Subscriber, 
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
+use test_log::test;
 
 // Test structures for sink and handler testing
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,9 +121,9 @@ impl Subscriber<SinkTestEvent> for CollectingSubscriber {
 
 // Tests for Sink functionality
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_sink_basic_functionality() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -168,9 +169,9 @@ async fn test_sink_basic_functionality() {
     assert_eq!(events[2].data, "test3");
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_sink_with_failing_subscriber() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -203,9 +204,9 @@ async fn test_sink_with_failing_subscriber() {
     assert_eq!(response.value, 1);
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_sink_with_closed_receiver() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -286,9 +287,9 @@ impl Handler<FailingHandlerActor> for FailingHandlerActor {
     }
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_handler_error_scenarios() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -315,9 +316,9 @@ async fn test_handler_error_scenarios() {
     }
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_message_serialization_edge_cases() {
-    build_tracing_subscriber();
+    
     // Test with complex message structures
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ComplexMessage {
@@ -391,9 +392,9 @@ async fn test_message_serialization_edge_cases() {
 }
 
 // Test mailbox behavior and message ordering
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_message_ordering_and_mailbox() {
-    build_tracing_subscriber();
+    
     #[derive(Debug, Clone)]
     pub struct OrderingActor {
         pub received_order: Vec<u32>,
@@ -466,9 +467,9 @@ async fn test_message_ordering_and_mailbox() {
 }
 
 // Test for handler with context operations
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_handler_context_operations() {
-    build_tracing_subscriber();
+    
     #[derive(Debug, Clone)]
     pub struct ContextActor {
         pub path_checked: bool,

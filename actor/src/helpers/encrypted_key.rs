@@ -5,38 +5,17 @@ use zeroize::Zeroizing;
 
 use crate::error::Error;
 
-/// Helper for encrypted 32-byte key storage.
+/// 32-byte cryptographic key stored encrypted in memory (ASCON AEAD via `memsecurity`).
 ///
-/// This structure stores a 32-byte cryptographic key encrypted in memory using
-/// ASCON AEAD encryption via EncryptedMem.
-///
-/// The key is wrapped in an `Arc`, making cloning cheap and safe.
-/// Cloning only clones the reference, not the encrypted data.
-///
-/// # Security Notes
-///
-/// - The key is stored encrypted in memory using memsecurity
-/// - Key bytes are automatically zeroized when accessed via `key()`
-/// - Multiple clones share the same encrypted data (via Arc)
-/// - Only accepts exactly 32-byte keys for use with XChaCha20-Poly1305
+/// Cloning is cheap — all clones share the same `Arc<EncryptedMem>`.
+/// Decrypted bytes are returned in a [`Zeroizing`] container that wipes on drop.
 #[derive(Clone)]
 pub struct EncryptedKey {
     key: Arc<EncryptedMem>,
 }
 
 impl EncryptedKey {
-    /// Create a new `EncryptedKey` from a 32-byte key.
-    ///
-    /// The key is encrypted and stored in secure memory wrapped in an Arc.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - A 32-byte array to encrypt and store
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if encryption fails (e.g., due to lack of system entropy
-    /// or memory allocation failure).
+    /// Encrypts `key` and stores it in secure memory.
     pub fn new(key: &[u8; 32]) -> Result<Self, Error> {
         let mut encrypted_mem = EncryptedMem::new();
 
@@ -54,21 +33,8 @@ impl EncryptedKey {
         })
     }
 
-    /// Get the decrypted 32-byte key in a zeroizing container.
-    ///
-    /// Returns the key bytes wrapped in `Zeroizing` which automatically
-    /// clears the memory when the value is dropped, preventing the sensitive
-    /// data from remaining in memory.
-    ///
-    /// # Security
-    ///
-    /// This is the preferred way to access the key as it ensures automatic
-    /// cleanup of sensitive data.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if decryption fails, which would indicate memory
-    /// corruption or a bug in the encryption implementation.
+    /// Decrypts and returns the key in a [`Zeroizing`] container (bytes wiped on drop).
+    /// Returns an error on decryption failure, which indicates memory corruption.
     pub fn key(&self) -> Result<Zeroizing<[u8; 32]>, Error> {
         let decrypted = self.key.decrypt().map_err(|_| {
             tracing::error!(

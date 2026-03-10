@@ -19,13 +19,14 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Event, Handler, Message,
-    NotPersistentActor, Response, build_tracing_subscriber,
+    NotPersistentActor, Response, 
 };
 use ave_actors_store::store::{FullPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
+use test_log::test;
 
 // ============================================================================
 // Test Actors
@@ -202,9 +203,9 @@ impl Handler<ParentActor> for ParentActor {
 // ============================================================================
 
 /// ✅ SUCCESS: Non-persistent actor with direct instance
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_create_root_actor_non_persistent_direct() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -220,9 +221,9 @@ async fn test_create_root_actor_non_persistent_direct() {
 }
 
 /// ✅ SUCCESS: Persistent actor with initial() wrapper
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_create_root_actor_persistent_initial() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -241,9 +242,9 @@ async fn test_create_root_actor_persistent_initial() {
 /// Uncommenting it will cause a compilation error, which is the desired behavior.
 ///
 /// ```compile_fail
-/// #[tokio::test]
+/// #[test(tokio::test)]
 /// async fn test_create_root_actor_persistent_direct_fails() {
-///     build_tracing_subscriber();
+///     
 ///     let (system, _runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
 ///
 ///     // This WILL NOT compile because MyPersistentActor doesn't implement NotPersistentActor
@@ -259,9 +260,9 @@ async fn test_create_root_actor_persistent_initial() {
 // ============================================================================
 
 /// ✅ SUCCESS: Non-persistent child with direct instance
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_create_child_non_persistent_direct() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -283,9 +284,9 @@ async fn test_create_child_non_persistent_direct() {
 }
 
 /// ✅ SUCCESS: Persistent child with initial() wrapper
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_create_child_persistent_initial() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -316,9 +317,9 @@ async fn test_create_child_persistent_initial() {
 // Summary Test - Documents all combinations
 // ============================================================================
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_all_valid_combinations() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });

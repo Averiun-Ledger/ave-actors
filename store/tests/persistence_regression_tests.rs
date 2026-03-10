@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, EncryptedKey,
     Error as ActorError, Event, Handler, Message, Response,
-    build_tracing_subscriber,
+    
 };
 use ave_actors_store::{
     Error as StoreError, StoreOperation,
@@ -13,6 +13,7 @@ use ave_actors_store::{
         StoreCommand, StoreResponse,
     },
 };
+use test_log::test;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -117,7 +118,7 @@ impl Collection for FailingCompactionCollection {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>, StoreError> {
+    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>, StoreError> {
         self.inner.iter(reverse)
     }
 }
@@ -183,7 +184,7 @@ impl Collection for LoggingCollection {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>, StoreError> {
+    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>, StoreError> {
         Collection::iter(&self.inner, reverse)
     }
 }
@@ -285,7 +286,7 @@ impl Collection for RangeCollection {
     fn iter<'a>(
         &'a self,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = (String, Vec<u8>)> + 'a>, StoreError> {
+    ) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>, StoreError> {
         if self.fail_iter {
             return Err(StoreError::Store {
                 operation: StoreOperation::Test,
@@ -305,7 +306,7 @@ impl Collection for RangeCollection {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect()
         };
-        Ok(Box::new(items.into_iter()))
+        Ok(Box::new(items.into_iter().map(Ok)))
     }
 }
 
@@ -568,9 +569,9 @@ impl Handler<CompactingActor> for CompactingActor {
     }
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_persistent_actor_rolls_back_state_when_store_persist_fails() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -587,9 +588,9 @@ async fn test_persistent_actor_rolls_back_state_when_store_persist_fails() {
     assert_eq!(value, ValueResponse::Value(0));
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_light_persistence_rolls_back_written_event_when_snapshot_fails() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -623,9 +624,9 @@ async fn test_light_persistence_rolls_back_written_event_when_snapshot_fails() {
     assert!(matches!(recovered, StoreResponse::State(None)));
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_recover_fails_when_event_log_has_gap() {
-    build_tracing_subscriber();
+    
     let manager = MemoryManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -684,16 +685,20 @@ fn test_memory_store_keeps_prefixes_isolated() {
     Collection::put(&mut coll_actor1, "0001", b"one").unwrap();
     Collection::put(&mut coll_actor10, "0001", b"ten").unwrap();
 
-    let actor1_items: Vec<_> = coll_actor1.iter(false).unwrap().collect();
+    let actor1_items: Vec<_> = coll_actor1
+        .iter(false)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(actor1_items, vec![("0001".to_owned(), b"one".to_vec())]);
 
     Collection::purge(&mut coll_actor1).unwrap();
     assert_eq!(Collection::get(&coll_actor10, "0001").unwrap(), b"ten");
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_full_persistence_compacts_events_after_snapshot_when_enabled() {
-    build_tracing_subscriber();
+    
     let manager = MemoryManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -747,9 +752,9 @@ async fn test_full_persistence_compacts_events_after_snapshot_when_enabled() {
     }
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
-    build_tracing_subscriber();
+    
     let manager = MemoryManager::default();
 
     let (system, mut runner) =
@@ -852,9 +857,9 @@ async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
     }
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_compaction_watermark_is_persisted_across_restart() {
-    build_tracing_subscriber();
+    
     let manager = LoggingCompactionManager::default();
 
     let (system, mut runner) =
@@ -922,9 +927,9 @@ async fn test_compaction_watermark_is_persisted_across_restart() {
     );
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_repeated_compaction_only_deletes_newly_covered_events() {
-    build_tracing_subscriber();
+    
     let manager = LoggingCompactionManager::default();
 
     let (system, mut runner) =
@@ -1051,9 +1056,9 @@ fn test_store_new_propagates_collection_last_error() {
     ));
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_recover_falls_back_when_metadata_state_is_missing() {
-    build_tracing_subscriber();
+    
     let manager = MemoryManager::default();
 
     let (system, mut runner) =
@@ -1113,9 +1118,9 @@ async fn test_recover_falls_back_when_metadata_state_is_missing() {
     }
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
-    build_tracing_subscriber();
+    
     let manager = MemoryManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -1164,9 +1169,9 @@ async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
     assert!(matches!(recovered, Err(ActorError::StoreOperation { .. })));
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_snapshot_compaction_failure_is_best_effort() {
-    build_tracing_subscriber();
+    
     let manager = FailingCompactionManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -1210,9 +1215,9 @@ async fn test_snapshot_compaction_failure_is_best_effort() {
     ));
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_persist_full_event_requests_snapshot_only_when_due() {
-    build_tracing_subscriber();
+    
     let manager = MemoryManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());

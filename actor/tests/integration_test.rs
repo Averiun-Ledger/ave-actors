@@ -3,12 +3,12 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
-    Event, Handler, Message, Response, build_tracing_subscriber,
+    Event, Handler, Message, Response, 
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
-use tracing_subscriber::EnvFilter;
+use test_log::test;
 
 // Defines parent actor
 #[derive(Debug, Clone)]
@@ -225,9 +225,9 @@ impl Handler<ChildActor> for ChildActor {
     }
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_actor() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     // Init runner.
@@ -265,9 +265,9 @@ async fn test_actor() {
     assert_eq!(response, ChildResponse::State(8));
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_actor_error() {
-    build_tracing_subscriber();
+    
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     // Init runner.
@@ -289,13 +289,8 @@ async fn test_actor_error() {
     //system.stop_actor(&parent_ref.path()).await;
 }
 
-#[tokio::test]
+#[test(tokio::test)]
 async fn test_actor_fault() {
-    build_tracing_subscriber();
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
-
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     // Init runner.
