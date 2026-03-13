@@ -1,6 +1,6 @@
 [package]
 name = "ave-actors-sqlite"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -13,7 +13,6 @@ rust-version.workspace = true
 
 [dependencies]
 rusqlite = { version = "0.38.0", features = ["bundled"]}
-num_cpus = { workspace = true }
 ave-actors-store = { workspace = true }
 tracing = {workspace = true }
 

@@ -1,6 +1,6 @@
 [package]
 name = "ave-actors"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.90.0"
 authors = ["Averiun Ledger, SL <info@averiun.com>"]
@@ -15,7 +15,7 @@ repository = "https://github.com/Averiun-Ledger/ave-actors"
 ave-actors-actor = { path = "actor", version = "0.4.0" }
 ave-actors-store = { path = "store", version = "0.4.0" }
 ave-actors-rocksdb = { path = "databases/rocksdb_db", version = "0.3.0", optional = true}
-ave-actors-sqlite = { path = "databases/sqlite_db", version = "0.3.0", optional = true }
+ave-actors-sqlite = { path = "databases/sqlite_db", version = "0.4.0", optional = true }
 
 [features]
 default = ["sqlite"]
@@ -57,18 +57,16 @@ repository = "https://github.com/Averiun-Ledger/ave-actors"
 ave-actors-actor = { path = "actor", version = "0.4.0"}
 ave-actors-store = { path = "store", version = "0.4.0" }
 ave-actors-rocksdb = { path = "databases/rocksdb_db", version = "0.3.0"}
-ave-actors-sqlite = { path = "databases/sqlite_db", version = "0.3.0"}
+ave-actors-sqlite = { path = "databases/sqlite_db", version = "0.4.0"}
 zeroize = "1.8.2"
 memsecurity = { version = "3.5.2", features = ["encryption"] }
 async-trait = { version = "0.1.89" }
 borsh = { version = "1.6.0", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
-tempfile = "3.26.0"
+tempfile = "3.27.0"
 thiserror = { version = "2.0.18" }
 tokio = { version = "1.50.0" }
 tokio-util = { version = "0.7.18" }
 tracing ={ version = "0.1.44" }
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 tracing-test = "0.2.6"
-num_cpus = "1.17.0"
 test-log = {version = "0.2.19", features = ["trace"] }

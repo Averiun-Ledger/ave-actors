@@ -39,8 +39,8 @@ pub struct SqliteManager {
     path: Arc<PathBuf>,
     /// Per-write durability policy.
     durability: bool,
-    /// Optional sizing profile reused when opening per-store connections.
-    spec: Option<MachineSpec>,
+    /// Cached tuning derived once from the machine spec.
+    tuning: SqliteTuning,
     /// Administrative SQLite connection for DDL and shutdown maintenance.
     admin_conn: Arc<Mutex<Connection>>,
 }
@@ -70,7 +70,7 @@ impl SqliteManager {
     }
 
     fn open_managed_connection(&self) -> Result<Connection, Error> {
-        open(self.path.as_ref(), self.durability, self.spec.clone())
+        open_with_tuning(self.path.as_ref(), self.durability, self.tuning)
     }
 
     fn create_store_handle(
@@ -124,8 +124,15 @@ impl SqliteManager {
 
         let path = path.join("database.db");
 
+        let spec = resolve_spec(spec);
+        let tuning = tuning_for_ram(spec.ram_mb);
+        info!(
+            "SQLite tuning: ram_mb={}, cpu_cores={}",
+            spec.ram_mb, spec.cpu_cores
+        );
+
         debug!("Opening SQLite connection");
-        let conn = open(&path, durability, spec.clone()).map_err(|e| {
+        let conn = open_with_tuning(&path, durability, tuning).map_err(|e| {
             error!(path = %path.display(), error = %e, "Failed to open SQLite connection");
             Error::CreateStore { reason: format!("fail SQLite open connection: {}", e) }
         })?;
@@ -134,7 +141,7 @@ impl SqliteManager {
         Ok(Self {
             path: Arc::new(path),
             durability,
-            spec,
+            tuning,
             admin_conn: Arc::new(Mutex::new(conn)),
         })
     }
@@ -626,18 +633,10 @@ impl Collection for SqliteCollection {
     }
 }
 
-/// Opens a tuned SQLite connection for this backend.
-///
-/// `path` must point to the database file, not just the parent directory.
-/// `durability = true` uses `PRAGMA synchronous=FULL`; otherwise the connection
-/// uses `NORMAL` for lower latency. `spec` controls cache and WAL sizing.
-///
-/// Returns an open [`rusqlite::Connection`] ready to be used by the backend.
-/// Returns [`Error::Store`] if the database cannot be opened or configured.
-pub fn open<P: AsRef<Path>>(
+fn open_with_tuning<P: AsRef<Path>>(
     path: P,
     durability: bool,
-    spec: Option<MachineSpec>,
+    tuning: SqliteTuning,
 ) -> Result<Connection, Error> {
     let path = path.as_ref();
     debug!(path = %path.display(), "Opening SQLite database");
@@ -651,13 +650,7 @@ pub fn open<P: AsRef<Path>>(
         }
     })?;
 
-    let spec = resolve_spec(spec);
-    let (ram_mb, cores) = (spec.ram_mb, spec.cpu_cores);
-    info!("SQLite tuning: ram_mb={}, cpu_cores={}", ram_mb, cores);
-
     let sync_mode = if durability { "FULL" } else { "NORMAL" };
-
-    let tuning = tuning_for_ram(ram_mb);
 
     conn.execute_batch(
         format!(
