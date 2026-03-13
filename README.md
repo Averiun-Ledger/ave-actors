@@ -114,7 +114,7 @@ For RocksDB:
 
 ```toml
 [dependencies]
-ave-actors = { version = "0.9.0", features = ["rocksdb"] }
+ave-actors = { version = "0.10.0", features = ["rocksdb"] }
 ```
 
 If you prefer finer control, depend on subcrates directly:
@@ -123,7 +123,7 @@ If you prefer finer control, depend on subcrates directly:
 [dependencies]
 ave-actors-actor = "0.4.0"
 ave-actors-store = "0.4.0"
-ave-actors-sqlite = "0.3.0"
+ave-actors-sqlite = "0.4.0"
 ```
 
 ## Which crate should I use?
