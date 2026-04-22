@@ -1,8 +1,18 @@
 # ave-actors-sqlite
 
-SQLite backend for [`ave-actors-store`](../../store). It stores actor events and snapshots in a local `database.db` file and exposes the `DbManager`, `Collection`, and `State` contracts expected by the store crate.
+SQLite backend for [`ave-actors-store`](https://crates.io/crates/ave-actors-store). It stores actor events and snapshots in a local `database.db` file and exposes the `DbManager`, `Collection`, and `State` contracts expected by the store crate.
 
 This crate is part of the [ave-actors](https://github.com/Averiun-Ledger/ave-actors) workspace.
+
+API documentation is available on [docs.rs](https://docs.rs/ave-actors-sqlite).
+
+## Install
+
+```toml
+[dependencies]
+ave-actors-sqlite = { version = "0.5.1", features = ["sqlite"] }
+ave-actors-store = "0.4.1"
+```
 
 ## Features
 

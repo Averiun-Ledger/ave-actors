@@ -16,3 +16,5 @@ Cargo.lock
 coverage
 
 SECURITY_*.md
+
+.codex

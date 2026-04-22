@@ -4,6 +4,21 @@ Async actor model for Rust built on [Tokio](https://tokio.rs). Actors communicat
 
 This crate is part of the [ave-actors](https://github.com/Averiun-Ledger/ave-actors) workspace.
 
+API documentation is available on [docs.rs](https://docs.rs/ave-actors-actor).
+
+---
+
+## Install
+
+```toml
+[dependencies]
+ave-actors-actor = "0.4.1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio-util = "0.7"
+tracing = "0.1"
+```
+
 ---
 
 ## Core concepts

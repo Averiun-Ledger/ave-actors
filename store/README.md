@@ -1,8 +1,26 @@
 # ave-actors-store
 
-Event-sourced persistence for actors built on [ave-actors-actor](../actor). Actors record state changes as an immutable event log and recover their state on restart by replaying events and loading snapshots.
+Event-sourced persistence for actors built on [`ave-actors-actor`](https://crates.io/crates/ave-actors-actor). Actors record state changes as an immutable event log and recover their state on restart by replaying events and loading snapshots.
 
 This crate is part of the [ave-actors](https://github.com/Averiun-Ledger/ave-actors) workspace.
+
+API documentation is available on [docs.rs](https://docs.rs/ave-actors-store).
+
+---
+
+## Install
+
+```toml
+[dependencies]
+ave-actors-store = "0.4.1"
+ave-actors-actor = "0.4.1"
+async-trait = "0.1"
+borsh = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio-util = "0.7"
+tracing = "0.1"
+```
 
 ---
 

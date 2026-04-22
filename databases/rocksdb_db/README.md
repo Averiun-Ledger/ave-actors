@@ -1,8 +1,18 @@
 # ave-actors-rocksdb
 
-RocksDB backend for [`ave-actors-store`](../../store). It stores actor events and snapshots in column families and exposes the `DbManager`, `Collection`, and `State` contracts expected by the store crate.
+RocksDB backend for [`ave-actors-store`](https://crates.io/crates/ave-actors-store). It stores actor events and snapshots in column families and exposes the `DbManager`, `Collection`, and `State` contracts expected by the store crate.
 
 This crate is part of the [ave-actors](https://github.com/Averiun-Ledger/ave-actors) workspace.
+
+API documentation is available on [docs.rs](https://docs.rs/ave-actors-rocksdb).
+
+## Install
+
+```toml
+[dependencies]
+ave-actors-rocksdb = { version = "0.3.1", features = ["rocksdb"] }
+ave-actors-store = "0.4.1"
+```
 
 ## Features
 

@@ -16,13 +16,13 @@ This repository is the public home of the `ave-actors` workspace. It includes th
 
 ## Workspace crates
 
-| Crate | Purpose |
-|---|---|
-| [`ave-actors`](.) | Aggregated crate that re-exports the main public API |
-| [`ave-actors-actor`](./actor) | Actor runtime, actor system, paths, supervision, retries, sinks |
-| [`ave-actors-store`](./store) | Event-sourced persistence layer and backend traits |
-| [`ave-actors-sqlite`](./databases/sqlite_db) | SQLite backend for persistent actors |
-| [`ave-actors-rocksdb`](./databases/rocksdb_db) | RocksDB backend for persistent actors |
+| Crate | Version | Purpose |
+|---|---:|---|
+| [`ave-actors`](https://crates.io/crates/ave-actors) | `0.11.1` | Aggregated crate that re-exports the main public API |
+| [`ave-actors-actor`](https://crates.io/crates/ave-actors-actor) | `0.4.1` | Actor runtime, actor system, paths, supervision, retries, sinks |
+| [`ave-actors-store`](https://crates.io/crates/ave-actors-store) | `0.4.1` | Event-sourced persistence layer and backend traits |
+| [`ave-actors-sqlite`](https://crates.io/crates/ave-actors-sqlite) | `0.5.1` | SQLite backend for persistent actors |
+| [`ave-actors-rocksdb`](https://crates.io/crates/ave-actors-rocksdb) | `0.3.1` | RocksDB backend for persistent actors |
 
 ## Feature flags
 
@@ -34,6 +34,15 @@ This repository is the public home of the `ave-actors` workspace. It includes th
 | `export-rocksdb` | No | Re-exports `rocksdb` |
 
 ## Quick start
+
+```toml
+[dependencies]
+ave-actors = { version = "0.11.1", default-features = false }
+async-trait = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio-util = "0.7"
+tracing = "0.1"
+```
 
 The root crate re-exports the actor API, so you can start with a simple actor without importing subcrates directly.
 
@@ -100,7 +109,7 @@ async fn main() {
 
 ## Persistent actors
 
-If you need event sourcing, use the persistence layer from the root crate or directly from [`ave-actors-store`](./store).
+If you need event sourcing, use the persistence layer from the root crate or directly from [`ave-actors-store`](https://crates.io/crates/ave-actors-store).
 
 With the default `sqlite` feature, the root crate already re-exports:
 
@@ -114,16 +123,17 @@ For RocksDB:
 
 ```toml
 [dependencies]
-ave-actors = { version = "0.10.0", features = ["rocksdb"] }
+ave-actors = { version = "0.11.1", default-features = false, features = ["rocksdb"] }
 ```
 
 If you prefer finer control, depend on subcrates directly:
 
 ```toml
 [dependencies]
-ave-actors-actor = "0.4.0"
-ave-actors-store = "0.4.0"
-ave-actors-sqlite = "0.4.0"
+ave-actors-actor = "0.4.1"
+ave-actors-store = "0.4.1"
+ave-actors-sqlite = { version = "0.5.1", features = ["sqlite"] }
+ave-actors-rocksdb = { version = "0.3.1", features = ["rocksdb"] }
 ```
 
 ## Which crate should I use?
@@ -136,10 +146,12 @@ ave-actors-sqlite = "0.4.0"
 
 ## Documentation map
 
-- Actor runtime: [`actor/README.md`](./actor/README.md)
-- Persistence layer: [`store/README.md`](./store/README.md)
-- SQLite backend: [`databases/sqlite_db/README.md`](./databases/sqlite_db/README.md)
-- RocksDB backend: [`databases/rocksdb_db/README.md`](./databases/rocksdb_db/README.md)
+| Crate | README | API docs |
+|---|---|---|
+| `ave-actors-actor` | [GitHub](https://github.com/Averiun-Ledger/ave-actors/tree/main/actor#readme) | [docs.rs](https://docs.rs/ave-actors-actor) |
+| `ave-actors-store` | [GitHub](https://github.com/Averiun-Ledger/ave-actors/tree/main/store#readme) | [docs.rs](https://docs.rs/ave-actors-store) |
+| `ave-actors-sqlite` | [GitHub](https://github.com/Averiun-Ledger/ave-actors/tree/main/databases/sqlite_db#readme) | [docs.rs](https://docs.rs/ave-actors-sqlite) |
+| `ave-actors-rocksdb` | [GitHub](https://github.com/Averiun-Ledger/ave-actors/tree/main/databases/rocksdb_db#readme) | [docs.rs](https://docs.rs/ave-actors-rocksdb) |
 
 ## Development
 
