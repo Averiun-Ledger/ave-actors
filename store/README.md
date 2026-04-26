@@ -12,8 +12,8 @@ API documentation is available on [docs.rs](https://docs.rs/ave-actors-store).
 
 ```toml
 [dependencies]
-ave-actors-store = "0.4.1"
-ave-actors-actor = "0.4.1"
+ave-actors-store = "0.5.0"
+ave-actors-actor = "0.5.0"
 async-trait = "0.1"
 borsh = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

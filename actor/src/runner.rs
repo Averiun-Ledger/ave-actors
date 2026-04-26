@@ -267,16 +267,20 @@ where
                 stop = self.stop_receiver.recv() => {
                     let restarting = self.should_restart_after_stop(ctx);
 
-                    // 1. Drain mailbox: process critical, discard non-critical.
-                    self.drain_mailbox(ctx, !restarting).await;
-
-                    // 2. Stop children.
-                    ctx.stop_childs().await;
-
-                    // 3. Pre-stop hook.
+                    // 1. Pre-stop hook.
                     if let Err(e) = self.actor.pre_stop(ctx).await {
                         error!(error = %e, "pre_stop failed");
                     }
+
+                    // 2. Drain mailbox: process critical, discard non-critical.
+                    self.drain_mailbox(ctx, !restarting).await;
+
+                    // 3. Drain internal actions emitted by mailbox handlers
+                    // and pre_stop hooks before continuing shutdown.
+                    self.drain_inner_actions(ctx).await;
+
+                    // 4. Stop children.
+                    ctx.stop_childs().await;
 
                     // Keep the actor registered while it restarts so lookups by path
                     // and pre-existing ActorRef handles remain valid.
@@ -380,7 +384,8 @@ where
             return;
         }
 
-        let deadline = tokio::time::Instant::now() + A::drain_timeout();
+        let deadline =
+            tokio::time::Instant::now() + A::mailbox_drain_timeout();
         let mut timed_out = false;
 
         for mut msg in critical {
@@ -407,6 +412,63 @@ where
                 warn!("Critical message handling timed out");
                 timed_out = true;
                 msg.respond_stopped();
+            }
+        }
+    }
+
+    /// Drains pending inner actions on stop.
+    ///
+    /// This keeps the publish_event pipeline alive long enough to flush
+    /// inner actions already emitted by mailbox handlers. It only drains
+    /// actions that are already queued; it does not wait for future actions
+    /// on the still-open channel.
+    async fn drain_inner_actions(&mut self, ctx: &mut ActorContext<A>) {
+        let deadline =
+            tokio::time::Instant::now() + A::event_drain_timeout();
+        let mut drained = 0usize;
+
+        loop {
+            let event = match self.inner_receiver.try_recv() {
+                Ok(event) => event,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    if drained > 0 {
+                        debug!(
+                            drained,
+                            "Inner action channel disconnected during drain"
+                        );
+                    }
+                    break;
+                }
+            };
+
+            let remaining =
+                deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                if drained > 0 {
+                    warn!(
+                        drained,
+                        "Inner action drain timeout exceeded after processing pending actions"
+                    );
+                }
+                break;
+            }
+
+            match tokio::time::timeout(remaining, self.inner_handle(event, ctx))
+                .await
+            {
+                Ok(()) => {
+                    drained += 1;
+                }
+                Err(_) => {
+                    if drained > 0 {
+                        warn!(
+                            drained,
+                            "Inner action drain timed out while processing pending actions"
+                        );
+                    }
+                    break;
+                }
             }
         }
     }
@@ -782,13 +844,13 @@ mod tests {
         }
     }
 
-    // --- Actor with a very short drain_timeout for timeout test ---
+    // --- Actor with a very short mailbox_drain_timeout for timeout test ---
 
     #[derive(Debug, Clone)]
     enum SlowMsg {
         /// Non-critical blocker for setup.
         Block,
-        /// Critical but slow (exceeds drain_timeout).
+        /// Critical but slow (exceeds mailbox_drain_timeout).
         SlowCritical,
     }
 
@@ -818,7 +880,7 @@ mod tests {
             info_span!("SlowActor", id = %id)
         }
 
-        fn drain_timeout() -> Duration {
+        fn mailbox_drain_timeout() -> Duration {
             Duration::from_millis(50)
         }
     }
@@ -837,7 +899,7 @@ mod tests {
                     self.release.notified().await;
                 }
                 SlowMsg::SlowCritical => {
-                    // Sleeps well beyond drain_timeout (50ms)
+                    // Sleeps well beyond mailbox_drain_timeout (50ms)
                     tokio::time::sleep(Duration::from_millis(300)).await;
                 }
             }
@@ -944,11 +1006,11 @@ mod tests {
         assert_eq!(*done, vec!["critical"]);
     }
 
-    /// When drain_timeout expires while processing a slow critical message, the
-    /// remaining critical messages are dropped and their ask callers receive
-    /// Error::ActorStopped.
+    /// When mailbox_drain_timeout expires while processing a slow critical
+    /// message, the remaining critical messages are dropped and their ask
+    /// callers receive Error::ActorStopped.
     #[test(tokio::test)]
-    async fn test_drain_timeout_drops_slow_critical() {
+    async fn test_mailbox_drain_timeout_drops_slow_critical() {
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
         let system = SystemRef::new(
             tx,
@@ -983,7 +1045,8 @@ mod tests {
         actor_ref.tell_stop().await;
         release.notify_one();
 
-        // drain_timeout = 50ms, SlowCritical handler sleeps 300ms → timeout fires
+        // mailbox_drain_timeout = 50ms, SlowCritical handler sleeps 300ms
+        // -> timeout fires
         let result = slow_join.await.unwrap();
         assert_eq!(result, Err(Error::ActorStopped));
     }

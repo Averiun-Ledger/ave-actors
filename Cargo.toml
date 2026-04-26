@@ -1,6 +1,6 @@
 [package]
 name = "ave-actors"
-version = "0.11.1"
+version = "0.12.0"
 edition = "2024"
 rust-version = "1.90.0"
 authors = ["Averiun Ledger, SL <info@averiun.com>"]
@@ -12,10 +12,10 @@ keywords = ["traceability", "actor-system", "Averiun", "sustainability"]
 repository = "https://github.com/Averiun-Ledger/ave-actors"
 
 [dependencies]
-ave-actors-actor = { path = "actor", version = "0.4.1" }
-ave-actors-store = { path = "store", version = "0.4.1" }
-ave-actors-rocksdb = { path = "databases/rocksdb_db", version = "0.3.1", optional = true}
-ave-actors-sqlite = { path = "databases/sqlite_db", version = "0.5.1", optional = true }
+ave-actors-actor = { path = "actor", version = "0.5.0" }
+ave-actors-store = { path = "store", version = "0.5.0" }
+ave-actors-rocksdb = { path = "databases/rocksdb_db", version = "0.4.0", optional = true}
+ave-actors-sqlite = { path = "databases/sqlite_db", version = "0.6.0", optional = true }
 
 [features]
 default = ["sqlite"]
@@ -54,10 +54,10 @@ keywords = ["traceability", "actor-system", "Averiun", "sustainability"]
 repository = "https://github.com/Averiun-Ledger/ave-actors"
 
 [workspace.dependencies]
-ave-actors-actor = { path = "actor", version = "0.4.1"}
-ave-actors-store = { path = "store", version = "0.4.1" }
-ave-actors-rocksdb = { path = "databases/rocksdb_db", version = "0.3.1"}
-ave-actors-sqlite = { path = "databases/sqlite_db", version = "0.5.1"}
+ave-actors-actor = { path = "actor", version = "0.5.0"}
+ave-actors-store = { path = "store", version = "0.5.0" }
+ave-actors-rocksdb = { path = "databases/rocksdb_db", version = "0.4.0"}
+ave-actors-sqlite = { path = "databases/sqlite_db", version = "0.6.0"}
 zeroize = "1.8.2"
 memsecurity = { version = "3.5.2", features = ["encryption"] }
 async-trait = { version = "0.1.89" }

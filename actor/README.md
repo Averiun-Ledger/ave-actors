@@ -12,7 +12,7 @@ API documentation is available on [docs.rs](https://docs.rs/ave-actors-actor).
 
 ```toml
 [dependencies]
-ave-actors-actor = "0.4.1"
+ave-actors-actor = "0.5.0"
 async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-util = "0.7"

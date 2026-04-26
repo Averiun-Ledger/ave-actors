@@ -18,11 +18,11 @@ This repository is the public home of the `ave-actors` workspace. It includes th
 
 | Crate | Version | Purpose |
 |---|---:|---|
-| [`ave-actors`](https://crates.io/crates/ave-actors) | `0.11.1` | Aggregated crate that re-exports the main public API |
-| [`ave-actors-actor`](https://crates.io/crates/ave-actors-actor) | `0.4.1` | Actor runtime, actor system, paths, supervision, retries, sinks |
-| [`ave-actors-store`](https://crates.io/crates/ave-actors-store) | `0.4.1` | Event-sourced persistence layer and backend traits |
-| [`ave-actors-sqlite`](https://crates.io/crates/ave-actors-sqlite) | `0.5.1` | SQLite backend for persistent actors |
-| [`ave-actors-rocksdb`](https://crates.io/crates/ave-actors-rocksdb) | `0.3.1` | RocksDB backend for persistent actors |
+| [`ave-actors`](https://crates.io/crates/ave-actors) | `0.12.0` | Aggregated crate that re-exports the main public API |
+| [`ave-actors-actor`](https://crates.io/crates/ave-actors-actor) | `0.5.0` | Actor runtime, actor system, paths, supervision, retries, sinks |
+| [`ave-actors-store`](https://crates.io/crates/ave-actors-store) | `0.5.0` | Event-sourced persistence layer and backend traits |
+| [`ave-actors-sqlite`](https://crates.io/crates/ave-actors-sqlite) | `0.6.0` | SQLite backend for persistent actors |
+| [`ave-actors-rocksdb`](https://crates.io/crates/ave-actors-rocksdb) | `0.4.0` | RocksDB backend for persistent actors |
 
 ## Feature flags
 
@@ -37,7 +37,7 @@ This repository is the public home of the `ave-actors` workspace. It includes th
 
 ```toml
 [dependencies]
-ave-actors = { version = "0.11.1", default-features = false }
+ave-actors = { version = "0.12.0", default-features = false }
 async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-util = "0.7"
@@ -123,17 +123,17 @@ For RocksDB:
 
 ```toml
 [dependencies]
-ave-actors = { version = "0.11.1", default-features = false, features = ["rocksdb"] }
+ave-actors = { version = "0.12.0", default-features = false, features = ["rocksdb"] }
 ```
 
 If you prefer finer control, depend on subcrates directly:
 
 ```toml
 [dependencies]
-ave-actors-actor = "0.4.1"
-ave-actors-store = "0.4.1"
-ave-actors-sqlite = { version = "0.5.1", features = ["sqlite"] }
-ave-actors-rocksdb = { version = "0.3.1", features = ["rocksdb"] }
+ave-actors-actor = "0.5.0"
+ave-actors-store = "0.5.0"
+ave-actors-sqlite = { version = "0.6.0", features = ["sqlite"] }
+ave-actors-rocksdb = { version = "0.4.0", features = ["rocksdb"] }
 ```
 
 ## Which crate should I use?

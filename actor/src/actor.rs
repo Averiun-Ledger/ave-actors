@@ -351,8 +351,15 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
     /// Return an `info_span!` or similar to attach all actor logs to this span.
     fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span;
 
-    /// Maximum time to spend processing critical messages during shutdown before dropping them.
-    fn drain_timeout() -> std::time::Duration {
+    /// Maximum time to spend processing critical mailbox messages during
+    /// shutdown before dropping them.
+    fn mailbox_drain_timeout() -> std::time::Duration {
+        std::time::Duration::from_secs(5)
+    }
+
+    /// Maximum time to spend draining pending published events during
+    /// shutdown before giving up.
+    fn event_drain_timeout() -> std::time::Duration {
         std::time::Duration::from_secs(5)
     }
 

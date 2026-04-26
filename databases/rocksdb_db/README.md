@@ -10,8 +10,8 @@ API documentation is available on [docs.rs](https://docs.rs/ave-actors-rocksdb).
 
 ```toml
 [dependencies]
-ave-actors-rocksdb = { version = "0.3.1", features = ["rocksdb"] }
-ave-actors-store = "0.4.1"
+ave-actors-rocksdb = { version = "0.4.0", features = ["rocksdb"] }
+ave-actors-store = "0.5.0"
 ```
 
 ## Features

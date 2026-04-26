@@ -10,8 +10,8 @@ API documentation is available on [docs.rs](https://docs.rs/ave-actors-sqlite).
 
 ```toml
 [dependencies]
-ave-actors-sqlite = { version = "0.5.1", features = ["sqlite"] }
-ave-actors-store = "0.4.1"
+ave-actors-sqlite = { version = "0.6.0", features = ["sqlite"] }
+ave-actors-store = "0.5.0"
 ```
 
 ## Features
