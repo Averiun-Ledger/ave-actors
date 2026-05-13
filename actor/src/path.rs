@@ -4,15 +4,33 @@ use serde::{Deserialize, Serialize};
 
 use std::cmp::Ordering;
 use std::fmt::{Error, Formatter};
+use std::sync::Arc;
 
 /// A slash-separated path that uniquely identifies an actor in the system (e.g. `/user/orders/order-42`).
 ///
 /// Paths are built by appending segments with the `/` operator. The first
 /// segment is conventionally the root scope (`user`, `system`, etc.).
-#[derive(
-    Clone, Hash, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize,
-)]
-pub struct ActorPath(Vec<String>);
+#[derive(Clone, Hash, Eq, PartialEq, PartialOrd, Ord)]
+pub struct ActorPath(Arc<Vec<String>>);
+
+impl Serialize for ActorPath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.as_ref().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ActorPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let vec = Vec::<String>::deserialize(deserializer)?;
+        Ok(Self(Arc::new(vec)))
+    }
+}
 
 impl ActorPath {
     /// Returns a path containing only the first segment (the root scope).
@@ -20,20 +38,20 @@ impl ActorPath {
         if self.0.len() == 1 {
             self.clone()
         } else if !self.0.is_empty() {
-            Self(self.0.iter().take(1).cloned().collect())
+            Self(Arc::new(self.0.iter().take(1).cloned().collect()))
         } else {
-            Self(Vec::new())
+            Self(Arc::new(Vec::new()))
         }
     }
 
     /// Returns this path with its last segment removed, or an empty path if already at root.
     pub fn parent(&self) -> Self {
         if self.0.len() > 1 {
-            let mut tokens = self.0.clone();
+            let mut tokens = self.0.as_ref().clone();
             tokens.truncate(tokens.len() - 1);
-            Self(tokens)
+            Self(Arc::new(tokens))
         } else {
-            Self(Vec::new())
+            Self(Arc::new(Vec::new()))
         }
     }
 
@@ -43,7 +61,7 @@ impl ActorPath {
     }
 
     /// Returns the number of segments in this path (its depth).
-    pub const fn level(&self) -> usize {
+    pub fn level(&self) -> usize {
         self.0.len()
     }
 
@@ -56,14 +74,14 @@ impl ActorPath {
         } else if level == self.level() - 1 {
             self.parent()
         } else {
-            let mut tokens = self.0.clone();
+            let mut tokens = self.0.as_ref().clone();
             tokens.truncate(level);
-            Self(tokens)
+            Self(Arc::new(tokens))
         }
     }
 
     /// Returns `true` if this path has no segments (e.g. parsed from `"/"`).
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
@@ -88,7 +106,7 @@ impl ActorPath {
     }
 
     /// Returns `true` if this path has exactly one segment, i.e. it is a direct child of the root scope.
-    pub const fn is_top_level(&self) -> bool {
+    pub fn is_top_level(&self) -> bool {
         self.0.len() == 1
     }
 }
@@ -101,7 +119,7 @@ impl From<&str> for ActorPath {
             .filter(|x| !x.trim().is_empty())
             .map(|s| s.to_string())
             .collect();
-        Self(tokens)
+        Self(Arc::new(tokens))
     }
 }
 
@@ -123,7 +141,7 @@ impl std::ops::Div<&str> for ActorPath {
     type Output = Self;
 
     fn div(self, rhs: &str) -> Self::Output {
-        let mut keys = self.0;
+        let mut keys = self.0.as_ref().clone();
         let mut tokens: Vec<String> = rhs
             .split('/')
             .filter(|x| !x.trim().is_empty())
@@ -131,7 +149,7 @@ impl std::ops::Div<&str> for ActorPath {
             .collect();
 
         keys.append(&mut tokens);
-        Self(keys)
+        Self(Arc::new(keys))
     }
 }
 
@@ -163,28 +181,28 @@ mod tests {
     #[test]
     fn parse_empty_string() {
         let path = ActorPath::from("");
-        assert_eq!(path.0, Vec::<String>::new());
+        assert_eq!(path.0.as_ref(), &Vec::<String>::new());
     }
 
     #[test]
     fn parse_single_root() {
         let path = ActorPath::from("/acme");
         println!("{:?}", path);
-        assert_eq!(path.0, vec!["acme"]);
+        assert_eq!(path.0.as_ref(), &vec!["acme"]);
     }
 
     #[test]
     fn parse_two_deep() {
         let path = ActorPath::from("/acme/building");
         println!("{:?}", path);
-        assert_eq!(path.0, vec!["acme", "building"]);
+        assert_eq!(path.0.as_ref(), &vec!["acme", "building"]);
     }
 
     #[test]
     fn parse_three_deep() {
         let path = ActorPath::from("/acme/building/room");
         println!("{:?}", path);
-        assert_eq!(path.0, vec!["acme", "building", "room"]);
+        assert_eq!(path.0.as_ref(), &vec!["acme", "building", "room"]);
     }
 
     #[test]
@@ -205,7 +223,7 @@ mod tests {
     fn parse_get_parent() {
         let path = ActorPath::from("/acme/building/room/sensor").parent();
         println!("{:?}", path);
-        assert_eq!(path.parent().0, vec!["acme", "building"]);
+        assert_eq!(path.parent().0.as_ref(), &vec!["acme", "building"]);
     }
 
     #[test]

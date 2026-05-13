@@ -16,6 +16,7 @@ use std::{
     collections::VecDeque,
     path::PathBuf,
     sync::{Arc, Mutex},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 use std::{fs, path::Path};
 
@@ -30,19 +31,108 @@ const ITER_CHUNK_SIZE: usize = 1_000;
 ///
 /// - **Collections**: SQLite tables with (prefix, sn, value) schema
 /// - **State**: SQLite tables with (prefix, value) schema
-/// - **Connection**: Administrative connection in the manager plus dedicated
-///   read/write connections per store handle
+/// - **Connection**: Administrative connection in the manager plus a shared
+///   connection pool sized from machine specs.
 ///
 #[derive(Clone)]
 pub struct SqliteManager {
-    /// Database file path.
-    path: Arc<PathBuf>,
-    /// Per-write durability policy.
-    durability: bool,
-    /// Cached tuning derived once from the machine spec.
-    tuning: SqliteTuning,
     /// Administrative SQLite connection for DDL and shutdown maintenance.
     admin_conn: Arc<Mutex<Connection>>,
+    /// Shared connection pool for all actor handles.
+    pool: Arc<SqlitePool>,
+}
+
+/// Internal connection pool.
+///
+/// The pool is elastic: it creates connections on demand but never retains
+/// more than `max_size` idle connections. This matches the actor model where
+/// database access is sporadic — actors keep state in memory and only touch
+/// persistence during recovery, persist, or snapshot.
+struct SqlitePool {
+    path: PathBuf,
+    durability: bool,
+    tuning: SqliteTuning,
+    max_size: usize,
+    available: Mutex<Vec<Connection>>,
+    total: AtomicUsize,
+}
+
+/// A connection checked out from the pool.
+///
+/// On drop the connection is returned to the pool (or discarded if the pool
+/// already has `max_size` idle connections).
+struct PooledConnection {
+    conn: Option<Connection>,
+    pool: Arc<SqlitePool>,
+}
+
+impl std::ops::Deref for PooledConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        // Invariant: `conn` is only `None` after `Drop` has consumed it.
+        // `Deref` is never called after Drop, so this is guaranteed to succeed.
+        self.conn.as_ref().expect("PooledConnection accessed after drop")
+    }
+}
+
+impl std::ops::DerefMut for PooledConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // Invariant: same as `Deref` — `conn` is `Some` until Drop runs.
+        self.conn.as_mut().expect("PooledConnection accessed after drop")
+    }
+}
+
+impl Drop for PooledConnection {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.checkin(conn);
+        }
+    }
+}
+
+impl SqlitePool {
+    /// Obtains a connection from the pool, creating a new one if necessary.
+    fn checkout(self: &Arc<Self>) -> Result<PooledConnection, Error> {
+        // Reuse an idle connection if one exists.
+        let mut available = self.available.lock().map_err(|e| Error::Store {
+            operation: StoreOperation::LockManagerData,
+            reason: format!("connection pool mutex poisoned: {}", e),
+        })?;
+        if let Some(conn) = available.pop() {
+            drop(available);
+            return Ok(PooledConnection {
+                conn: Some(conn),
+                pool: self.clone(),
+            });
+        }
+        drop(available);
+
+        // No idle connection available — open a fresh one.
+        let conn =
+            open_with_tuning(&self.path, self.durability, self.tuning)?;
+        self.total.fetch_add(1, Ordering::Relaxed);
+
+        Ok(PooledConnection {
+            conn: Some(conn),
+            pool: self.clone(),
+        })
+    }
+
+    /// Returns a connection to the idle set, discarding it if the pool is
+    /// already at capacity.
+    fn checkin(&self, conn: Connection) {
+        // If the mutex is poisoned we cannot return the connection to the pool;
+        // just drop it so we don't panic inside Drop.
+        if let Ok(mut available) = self.available.lock() {
+            if available.len() < self.max_size {
+                available.push(conn);
+                return;
+            }
+        }
+        self.total.fetch_sub(1, Ordering::Relaxed);
+        // Connection is dropped here.
+    }
 }
 
 impl SqliteManager {
@@ -67,22 +157,6 @@ impl SqliteManager {
                 "invalid SQLite identifier '{identifier}': allowed pattern is [A-Za-z_][A-Za-z0-9_]*"
             ),
         })
-    }
-
-    fn open_managed_connection(&self) -> Result<Connection, Error> {
-        open_with_tuning(self.path.as_ref(), self.durability, self.tuning)
-    }
-
-    fn create_store_handle(
-        &self,
-        identifier: &str,
-        prefix: &str,
-    ) -> Result<SqliteCollection, Error> {
-        let read_conn = self.open_managed_connection()?;
-        let write_conn = self.open_managed_connection()?;
-        Ok(SqliteCollection::new(
-            read_conn, write_conn, identifier, prefix,
-        ))
     }
 
     /// Creates a new SQLite database manager.
@@ -122,7 +196,7 @@ impl SqliteManager {
             })?;
         }
 
-        let path = path.join("database.db");
+        let db_path = path.join("database.db");
 
         let spec = resolve_spec(spec);
         let tuning = tuning_for_ram(spec.ram_mb);
@@ -132,17 +206,29 @@ impl SqliteManager {
         );
 
         debug!("Opening SQLite connection");
-        let conn = open_with_tuning(&path, durability, tuning).map_err(|e| {
-            error!(path = %path.display(), error = %e, "Failed to open SQLite connection");
+        let conn = open_with_tuning(&db_path, durability, tuning).map_err(|e| {
+            error!(path = %db_path.display(), error = %e, "Failed to open SQLite connection");
             Error::CreateStore { reason: format!("fail SQLite open connection: {}", e) }
         })?;
 
-        debug!("SQLite database manager created successfully");
-        Ok(Self {
-            path: Arc::new(path),
+        // Pool size: 2× vCPU, clamped between 4 and 32.  This gives enough
+        // headroom for concurrent reads while keeping memory / fd usage bounded.
+        let max_size = (spec.cpu_cores * 2).clamp(4, 32);
+        info!("SQLite connection pool size: {}", max_size);
+
+        let pool = Arc::new(SqlitePool {
+            path: db_path,
             durability,
             tuning,
+            max_size,
+            available: Mutex::new(Vec::new()),
+            total: AtomicUsize::new(0),
+        });
+
+        debug!("SQLite database manager created successfully");
+        Ok(Self {
             admin_conn: Arc::new(Mutex::new(conn)),
+            pool,
         })
     }
 }
@@ -176,7 +262,7 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
         }
 
         debug!(table = identifier, prefix = prefix, "State table created");
-        self.create_store_handle(identifier, prefix)
+        Ok(SqliteCollection::new(self.clone(), identifier, prefix))
     }
 
     fn create_collection(
@@ -211,7 +297,7 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
             prefix = prefix,
             "Collection table created"
         );
-        self.create_store_handle(identifier, prefix)
+        Ok(SqliteCollection::new(self.clone(), identifier, prefix))
     }
 
     fn stop(&mut self) -> Result<(), Error> {
@@ -251,10 +337,9 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
 /// - `value` is the serialized data
 ///
 pub struct SqliteCollection {
-    /// Dedicated read connection for this store handle.
-    read_conn: Arc<Mutex<Connection>>,
-    /// Dedicated write connection for this store handle.
-    write_conn: Arc<Mutex<Connection>>,
+    /// Reference back to the manager so we can check out a pooled connection
+    /// on every operation.
+    manager: SqliteManager,
     /// Table name in the database.
     table: String,
     /// Prefix for filtering rows (actor namespace).
@@ -266,8 +351,7 @@ impl SqliteCollection {
     ///
     /// # Arguments
     ///
-    /// * `read_conn` - Dedicated read connection.
-    /// * `write_conn` - Dedicated write connection.
+    /// * `manager` - The SQLite manager that owns the connection pool.
     /// * `table` - Name of the table in the database.
     /// * `prefix` - Prefix for namespacing this collection's data.
     ///
@@ -275,15 +359,9 @@ impl SqliteCollection {
     ///
     /// Returns a new SqliteCollection instance.
     ///
-    pub fn new(
-        read_conn: Connection,
-        write_conn: Connection,
-        table: &str,
-        prefix: &str,
-    ) -> Self {
+    pub fn new(manager: SqliteManager, table: &str, prefix: &str) -> Self {
         Self {
-            read_conn: Arc::new(Mutex::new(read_conn)),
-            write_conn: Arc::new(Mutex::new(write_conn)),
+            manager,
             table: table.to_owned(),
             prefix: prefix.to_owned(),
         }
@@ -292,7 +370,7 @@ impl SqliteCollection {
     /// Create a new iterator filtering by prefix.
     fn make_iter(&self, reverse: bool) -> EntryIterator {
         Box::new(SqliteChunkedIterator::new(
-            self.read_conn.clone(),
+            self.manager.clone(),
             self.table.clone(),
             self.prefix.clone(),
             reverse,
@@ -322,10 +400,10 @@ impl SqliteCollection {
 ///
 /// This works correctly when `sn` values are zero-padded, so lexicographic
 /// order matches numeric order. It fetches `ITER_CHUNK_SIZE` rows per chunk and
-/// releases the lock between chunks so concurrent writers are not blocked for
-/// the entire scan.
+/// releases the connection back to the pool between chunks so concurrent
+/// operations are not blocked for the entire scan.
 struct SqliteChunkedIterator {
-    conn: Arc<Mutex<Connection>>,
+    manager: SqliteManager,
     table: String,
     prefix: String,
     reverse: bool,
@@ -339,13 +417,13 @@ struct SqliteChunkedIterator {
 
 impl SqliteChunkedIterator {
     const fn new(
-        conn: Arc<Mutex<Connection>>,
+        manager: SqliteManager,
         table: String,
         prefix: String,
         reverse: bool,
     ) -> Self {
         Self {
-            conn,
+            manager,
             table,
             prefix,
             reverse,
@@ -356,8 +434,8 @@ impl SqliteChunkedIterator {
     }
 
     fn fetch_chunk(&mut self) -> Result<(), Error> {
-        let conn = self.conn.lock().map_err(|e| {
-            error!(table = %self.table, error = %e, "Failed to acquire lock for chunk fetch");
+        let conn = self.manager.pool.checkout().map_err(|e| {
+            error!(table = %self.table, error = %e, "Failed to check out connection for chunk fetch");
             Error::Store {
                 operation: StoreOperation::LockConnection,
                 reason: format!("{}", e),
@@ -440,13 +518,16 @@ impl State for SqliteCollection {
         let query =
             format!("SELECT value FROM {} WHERE prefix = ?1", &self.table);
         let key = self.state_key();
-        let row: Vec<u8> = self.read_conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for state get");
+        let conn = self.manager.pool.checkout().map_err(|e| {
+            error!(error = %e, "Failed to check out connection for state get");
             Error::Store {
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
-        })?.query_row(&query, params![self.prefix], |row| row.get(0))
+        })?;
+
+        let row: Vec<u8> = conn
+            .query_row(&query, params![self.prefix], |row| row.get(0))
             .map_err(|e| self.map_get_error(e, key))?;
 
         Ok(row)
@@ -457,13 +538,15 @@ impl State for SqliteCollection {
             "INSERT OR REPLACE INTO {} (prefix, value) VALUES (?1, ?2)",
             &self.table
         );
-        self.write_conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for state put");
+        let conn = self.manager.pool.checkout().map_err(|e| {
+            error!(error = %e, "Failed to check out connection for state put");
             Error::Store {
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
-        })?.execute(&stmt, params![self.prefix, data])
+        })?;
+
+        conn.execute(&stmt, params![self.prefix, data])
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to put state");
                 Error::Store {
@@ -476,13 +559,16 @@ impl State for SqliteCollection {
 
     fn del(&mut self) -> Result<(), Error> {
         let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
-        let affected_rows = self.write_conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for state delete");
+        let conn = self.manager.pool.checkout().map_err(|e| {
+            error!(error = %e, "Failed to check out connection for state delete");
             Error::Store {
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
-        })?.execute(&stmt, params![self.prefix,])
+        })?;
+
+        let affected_rows = conn
+            .execute(&stmt, params![self.prefix,])
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to delete state");
                 Error::Store {
@@ -501,13 +587,15 @@ impl State for SqliteCollection {
 
     fn purge(&mut self) -> Result<(), Error> {
         let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
-        self.write_conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for state purge");
+        let conn = self.manager.pool.checkout().map_err(|e| {
+            error!(error = %e, "Failed to check out connection for state purge");
             Error::Store {
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
-        })?.execute(&stmt, params![self.prefix])
+        })?;
+
+        conn.execute(&stmt, params![self.prefix])
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to purge state");
                 Error::Store {
@@ -531,13 +619,16 @@ impl Collection for SqliteCollection {
             &self.table
         );
         let collection_key = self.collection_key(key);
-        let row: Vec<u8> = self.read_conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for collection get");
+        let conn = self.manager.pool.checkout().map_err(|e| {
+            error!(error = %e, "Failed to check out connection for collection get");
             Error::Store {
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
-        })?.query_row(&query, params![self.prefix, key], |row| row.get(0))
+        })?;
+
+        let row: Vec<u8> = conn
+            .query_row(&query, params![self.prefix, key], |row| row.get(0))
             .map_err(|e| self.map_get_error(e, collection_key))?;
 
         Ok(row)
@@ -548,13 +639,15 @@ impl Collection for SqliteCollection {
             "INSERT OR REPLACE INTO {} (prefix, sn, value) VALUES (?1, ?2, ?3)",
             &self.table
         );
-        self.write_conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for collection put");
+        let conn = self.manager.pool.checkout().map_err(|e| {
+            error!(error = %e, "Failed to check out connection for collection put");
             Error::Store {
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
-        })?.execute(&stmt, params![self.prefix, key, data])
+        })?;
+
+        conn.execute(&stmt, params![self.prefix, key, data])
             .map_err(|e| {
                 error!(table = %self.table, key = key, error = %e, "Failed to put collection entry");
                 Error::Store {
@@ -570,13 +663,16 @@ impl Collection for SqliteCollection {
             "DELETE FROM {} WHERE prefix = ?1 AND sn = ?2",
             &self.table
         );
-        let affected_rows = self.write_conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for collection delete");
+        let conn = self.manager.pool.checkout().map_err(|e| {
+            error!(error = %e, "Failed to check out connection for collection delete");
             Error::Store {
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
-        })?.execute(&stmt, params![self.prefix, key])
+        })?;
+
+        let affected_rows = conn
+            .execute(&stmt, params![self.prefix, key])
             .map_err(|e| {
                 error!(table = %self.table, key = key, error = %e, "Failed to delete collection entry");
                 Error::Store {
@@ -595,13 +691,15 @@ impl Collection for SqliteCollection {
 
     fn purge(&mut self) -> Result<(), Error> {
         let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
-        self.write_conn.lock().map_err(|e| {
-            error!(error = %e, "Failed to acquire connection lock for collection purge");
+        let conn = self.manager.pool.checkout().map_err(|e| {
+            error!(error = %e, "Failed to check out connection for collection purge");
             Error::Store {
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
-        })?.execute(&stmt, params![self.prefix])
+        })?;
+
+        conn.execute(&stmt, params![self.prefix])
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to purge collection");
                 Error::Store {
@@ -730,19 +828,17 @@ struct SqliteTuning {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    /// Retains every `TempDir` created during tests so they are cleaned up
+    /// automatically when the test process exits.
+    static TEMP_DIRS: Mutex<Vec<tempfile::TempDir>> = Mutex::new(Vec::new());
+
     pub fn create_temp_dir() -> String {
-        let path = temp_dir();
-
-        if fs::metadata(&path).is_err() {
-            fs::create_dir_all(&path).unwrap();
-        }
+        let dir = tempfile::tempdir().expect("Can not create temporal directory.");
+        let path = dir.path().to_str().unwrap().to_owned();
+        TEMP_DIRS.lock().unwrap().push(dir);
         path
-    }
-
-    fn temp_dir() -> String {
-        let dir =
-            tempfile::tempdir().expect("Can not create temporal directory.");
-        dir.path().to_str().unwrap().to_owned()
     }
 
     impl Default for SqliteManager {

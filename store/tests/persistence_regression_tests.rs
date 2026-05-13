@@ -623,10 +623,14 @@ async fn test_light_persistence_rolls_back_written_event_when_snapshot_fails() {
     assert!(matches!(response, Err(ActorError::StoreOperation { .. })));
 
     let counter = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
-    assert!(matches!(counter, StoreResponse::LastEventNumber(0)));
+    // Event is the authoritative write; it persists even when snapshot fails.
+    assert!(matches!(counter, StoreResponse::LastEventNumber(1)));
 
     let recovered = store_ref.ask(StoreCommand::Recover).await.unwrap();
-    assert!(matches!(recovered, StoreResponse::State(None)));
+    match recovered {
+        StoreResponse::State(Some(state)) => assert_eq!(state.value, 5),
+        _ => panic!("expected recovered state from persisted event"),
+    }
 }
 
 #[test(tokio::test)]

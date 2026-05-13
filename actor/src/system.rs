@@ -147,19 +147,23 @@ impl SystemRef {
             }
 
             // Wait for all confirmations in parallel.
+            let mut set = tokio::task::JoinSet::new();
             for (path, timeout, receiver) in receivers {
-                if let Some(timeout) = timeout {
-                    if tokio::time::timeout(timeout, receiver).await.is_err() {
-                        warn!(
-                            path = %path,
-                            timeout_ms = timeout.as_millis(),
-                            "Timed out waiting for root actor shutdown acknowledgement"
-                        );
+                set.spawn(async move {
+                    if let Some(timeout) = timeout {
+                        if tokio::time::timeout(timeout, receiver).await.is_err() {
+                            warn!(
+                                path = %path,
+                                timeout_ms = timeout.as_millis(),
+                                "Timed out waiting for root actor shutdown acknowledgement"
+                            );
+                        }
+                    } else {
+                        let _ = receiver.await;
                     }
-                } else {
-                    let _ = receiver.await;
-                }
+                });
             }
+            while set.join_next().await.is_some() {}
 
             if let Err(e) = event_sender
                 .send(SystemEvent::StopSystem(reason.clone()))

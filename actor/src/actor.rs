@@ -116,21 +116,24 @@ where
             }
         }
 
-        // Wait for all confirmations. Children shut down in parallel so the
-        // total wait is max(child_shutdown_time) rather than the sum.
+        // Wait for all confirmations in parallel.
+        let mut set = tokio::task::JoinSet::new();
         for (path, timeout, receiver) in receivers {
-            if let Some(timeout) = timeout {
-                if tokio::time::timeout(timeout, receiver).await.is_err() {
-                    tracing::warn!(
-                        child = %path,
-                        timeout_ms = timeout.as_millis(),
-                        "Timed out waiting for child actor shutdown acknowledgement"
-                    );
+            set.spawn(async move {
+                if let Some(timeout) = timeout {
+                    if tokio::time::timeout(timeout, receiver).await.is_err() {
+                        tracing::warn!(
+                            child = %path,
+                            timeout_ms = timeout.as_millis(),
+                            "Timed out waiting for child actor shutdown acknowledgement"
+                        );
+                    }
+                } else {
+                    let _ = receiver.await;
                 }
-            } else {
-                let _ = receiver.await;
-            }
+            });
         }
+        while set.join_next().await.is_some() {}
     }
 
     pub(crate) async fn remove_actor(&self) {

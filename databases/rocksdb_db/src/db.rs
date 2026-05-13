@@ -589,7 +589,7 @@ impl Collection for RocksDbStore {
             self.name.clone(),
             self.prefix.clone(),
             reverse,
-        )))
+        )?))
     }
 }
 
@@ -604,14 +604,15 @@ impl<'a> RocksDbIterator<'a> {
         name: String,
         prefix: String,
         reverse: bool,
-    ) -> Self {
+    ) -> Result<Self, Error> {
         let prefix_dot = format!("{}.", prefix).into_bytes();
         let mut upper_bound = prefix_dot.clone();
         upper_bound.push(0xFF);
 
-        let handle = store
-            .cf_handle(&name)
-            .expect("RocksDB column for the store does not exist.");
+        let handle = store.cf_handle(&name).ok_or_else(|| Error::Store {
+            operation: StoreOperation::ColumnAccess,
+            reason: "RocksDB column for the store does not exist.".to_owned(),
+        })?;
 
         let mode = if reverse {
             IteratorMode::From(&upper_bound, Direction::Reverse)
@@ -620,7 +621,7 @@ impl<'a> RocksDbIterator<'a> {
         };
 
         let iter = store.iterator_cf(&handle, mode);
-        Self { prefix_dot, iter }
+        Ok(Self { prefix_dot, iter })
     }
 }
 
@@ -662,11 +663,18 @@ impl Iterator for RocksDbIterator<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    /// Retains every `TempDir` created during tests so they are cleaned up
+    /// automatically when the test process exits.
+    static TEMP_DIRS: Mutex<Vec<tempfile::TempDir>> = Mutex::new(Vec::new());
+
     impl Default for RocksDbManager {
         fn default() -> Self {
             let dir = tempfile::tempdir()
                 .expect("Can not create temporal directory.");
-            let path = dir.keep();
+            let path = dir.path().to_path_buf();
+            TEMP_DIRS.lock().unwrap().push(dir);
             RocksDbManager::new(&path, false, None)
                 .expect("Can not create the database.")
         }

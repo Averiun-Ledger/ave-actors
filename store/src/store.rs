@@ -534,7 +534,10 @@ where
         result
     }
 
-    /// Atomically stores `event` and a state snapshot (used for `LightPersistence`). Rolls back the event if the snapshot fails.
+    /// Stores `event` and a state snapshot (used for `LightPersistence`).
+    ///
+    /// The event is the authoritative write; if the snapshot fails the event is
+    /// still safely persisted and recovery will replay it from the log.
     fn persist_state<E>(&mut self, event: &E, state: &P) -> Result<(), Error>
     where
         E: Event + BorshSerialize + BorshDeserialize,
@@ -562,35 +565,24 @@ where
             next_event_number
         );
 
-        // 1. First persist the event
+        // Persist the event first — this is the authoritative write.
         let event_key = format!("{:020}", next_event_number);
-        let result = self.events.put(&event_key, &bytes);
+        self.events.put(&event_key, &bytes).map_err(|e| {
+            error!(key = %event_key, error = %e, "Failed to persist event");
+            store_error(StoreOperation::PersistLight, e)
+        })?;
 
-        // 2. Only increment counter if persist was successful
-        if result.is_ok() {
-            self.event_counter += 1;
-            debug!(
-                "Successfully persisted event, event_counter now: {}",
-                self.event_counter
-            );
-        } else {
-            return result;
-        }
+        self.event_counter += 1;
+        debug!(
+            "Successfully persisted event, event_counter now: {}",
+            self.event_counter
+        );
 
-        // 3. NOW create snapshot with the updated event_counter
-        // This ensures state_counter = event_counter after the snapshot
-        if let Err(snapshot_err) = self.snapshot(state) {
-            self.event_counter = next_event_number;
-            if let Err(rollback_err) = self.events.del(&event_key) {
-                return Err(store_error(
-                    StoreOperation::RollbackPersistLight,
-                    format!(
-                        "snapshot failed: {}; rollback delete failed: {}",
-                        snapshot_err, rollback_err
-                    ),
-                ));
-            }
-            return Err(snapshot_err);
+        // Snapshot is a derived view; if it fails the event is still safely
+        // persisted and recovery will replay it from the log.
+        if let Err(e) = self.snapshot(state) {
+            error!(error = %e, "Snapshot failed after event persistence");
+            return Err(store_error(StoreOperation::Snapshot, e));
         }
 
         Ok(())
@@ -643,16 +635,34 @@ where
     }
 
     /// Retrieve events.
+    ///
+    /// Uses a single backend scan instead of N individual gets, eliminating
+    /// the N+1 query pattern for both recovery and external range queries.
     fn events(&self, from: u64, to: u64) -> Result<Vec<P::Event>, Error> {
         if from > to {
             return Ok(Vec::new());
         }
 
+        let from_key = format!("{:020}", from);
+        let to_key = format!("{:020}", to);
         let mut events = Vec::new();
 
-        for i in from..=to {
-            let key = format!("{:020}", i);
-            let data = self.events.get(&key)?;
+        let iter = self.events.iter(false).map_err(|e| {
+            store_error(StoreOperation::GetEventsRange, e)
+        })?;
+
+        for item in iter {
+            let (key, data) = item.map_err(|e| {
+                store_error(StoreOperation::GetEventsRange, e)
+            })?;
+
+            if key < from_key {
+                continue;
+            }
+            if key > to_key {
+                break;
+            }
+
             let data = if let Some(key_box) = &self.key_box {
                 self.decrypt(key_box, data.as_slice())?
             } else {
@@ -665,6 +675,17 @@ where
             })?;
 
             events.push(event);
+        }
+
+        let expected = (to - from + 1) as usize;
+        if events.len() != expected {
+            return Err(store_error(
+                StoreOperation::GetEventsRange,
+                format!(
+                    "event log gap detected: expected {} events in range [{}..={}], found {}",
+                    expected, from, to, events.len()
+                ),
+            ));
         }
         Ok(events)
     }
@@ -773,7 +794,12 @@ where
                     "Updating snapshot after applying {} events",
                     events.len()
                 );
-                self.snapshot(&state)?;
+                if let Err(e) = self.snapshot(&state) {
+                    warn!(
+                        error = %e,
+                        "Snapshot failed after recovery; state is reconstructed in memory"
+                    );
+                }
                 debug!(
                     "Recovery completed. Final event_counter: {}",
                     self.event_counter
@@ -821,7 +847,12 @@ where
 
                 // Create snapshot for future recoveries
                 debug!("Creating snapshot after replaying events");
-                self.snapshot(&state)?;
+                if let Err(e) = self.snapshot(&state) {
+                    warn!(
+                        error = %e,
+                        "Snapshot failed after recovery; state is reconstructed in memory"
+                    );
+                }
 
                 debug!(
                     "Recovery completed. Final event_counter: {}",
