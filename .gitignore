@@ -21,3 +21,5 @@ SECURITY_*.md
 
 AGENTS.md
 temporal/
+.agents/
+todo.txt

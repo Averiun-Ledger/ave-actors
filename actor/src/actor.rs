@@ -250,8 +250,7 @@ where
         let should_remove = self
             .child_senders
             .get(child_path)
-            .map(StopHandle::is_closed)
-            .unwrap_or(false);
+            .is_some_and(StopHandle::is_closed);
         if should_remove {
             self.child_senders.remove(child_path);
         }

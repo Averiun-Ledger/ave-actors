@@ -312,30 +312,21 @@ impl SystemRef {
             }
             Ok(Ok(false)) => {
                 error!(path = %path, "Actor runner failed to initialize");
-                self.remove_actor(&path).await;
-                if is_root {
-                    self.root_senders.write().await.remove(&path);
-                }
+                self.cleanup_failed_actor_init(&path, is_root).await;
                 Err(Error::FunctionalCritical {
                     description: format!("Runner can not init {}", path),
                 })
             }
             Ok(Err(e)) => {
                 error!(path = %path, error = %e, "Failed to receive initialization signal");
-                self.remove_actor(&path).await;
-                if is_root {
-                    self.root_senders.write().await.remove(&path);
-                }
+                self.cleanup_failed_actor_init(&path, is_root).await;
                 Err(Error::FunctionalCritical {
                     description: e.to_string(),
                 })
             }
             Err(timeout) => {
                 init_handle.abort();
-                self.remove_actor(&path).await;
-                if is_root {
-                    self.root_senders.write().await.remove(&path);
-                }
+                self.cleanup_failed_actor_init(&path, is_root).await;
                 Err(Error::Timeout {
                     ms: timeout.as_millis(),
                 })
@@ -362,7 +353,7 @@ impl SystemRef {
     {
         let actor = actor_init.into_actor();
         let path = ActorPath::from("/user") / name;
-        let id = &path.key();
+        let id = path.key();
 
         let (actor_ref, ..) = self
             .create_actor_path::<A>(
@@ -392,6 +383,13 @@ impl SystemRef {
         drop(actors);
         if removed {
             self.deindex_actor(path).await;
+        }
+    }
+
+    async fn cleanup_failed_actor_init(&self, path: &ActorPath, is_root: bool) {
+        self.remove_actor(path).await;
+        if is_root {
+            self.root_senders.write().await.remove(path);
         }
     }
 

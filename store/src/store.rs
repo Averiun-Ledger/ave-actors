@@ -200,7 +200,7 @@ where
         let prev_state = self.clone();
 
         if let Err(e) = self.apply(event) {
-            self.update(prev_state.clone());
+            self.update(prev_state);
             return Err(e);
         }
 
@@ -215,7 +215,7 @@ where
                 {
                     Ok(response) => response,
                     Err(e) => {
-                        self.update(prev_state.clone());
+                        self.update(prev_state);
                         return Err(actor_store_error(
                             StoreOperation::PersistLight,
                             e,
@@ -233,7 +233,7 @@ where
                 {
                     Ok(response) => response,
                     Err(e) => {
-                        self.update(prev_state.clone());
+                        self.update(prev_state);
                         return Err(actor_store_error(
                             StoreOperation::PersistFull,
                             e,
@@ -294,7 +294,7 @@ where
         manager: impl DbManager<C, S>,
         key_box: Option<EncryptedKey>,
     ) -> Result<(), ActorError> {
-        let prefix = prefix.unwrap_or_else(|| ctx.path().key());
+        let prefix = prefix.unwrap_or_else(|| ctx.path().key().to_owned());
 
         let store =
             Store::<Self>::new(name, &prefix, manager, key_box, self.clone())
@@ -401,19 +401,18 @@ where
         // Initialize event_counter from persisted metadata when available.
         // Fall back to the latest snapshot boundary and event log for
         // backwards compatibility with stores created before metadata existed.
-        let last_event_counter = if let Some((key, _)) = store.events.last()? {
-            key.parse::<u64>()
-                .map_err(|e| store_error(StoreOperation::ParseEventKey, e))?
-                + 1
-        } else {
-            0
-        };
+        let last_event_counter = store
+            .events
+            .last()?
+            .map(|(key, _)| {
+                key.parse::<u64>()
+                    .map_err(|e| store_error(StoreOperation::ParseEventKey, e))
+                    .map(|n| n + 1)
+            })
+            .transpose()?
+            .unwrap_or(0);
 
-        let snapshot_counter = if let Some((_, counter)) = store.get_state()? {
-            counter
-        } else {
-            0
-        };
+        let snapshot_counter = store.get_state()?.map(|(_, c)| c).unwrap_or(0);
 
         if let Some(metadata) = store.get_metadata()? {
             store.event_counter =
@@ -442,11 +441,7 @@ where
             Err(err) => return Err(err),
         };
 
-        let bytes = if let Some(key_box) = &self.key_box {
-            self.decrypt(key_box, data.as_slice())?
-        } else {
-            data
-        };
+        let bytes = self.maybe_decrypt(data)?;
 
         let metadata: StoreMetadata =
             borsh::from_slice(&bytes).map_err(|e| {
@@ -467,11 +462,7 @@ where
             store_error(StoreOperation::EncodeActor, e)
         })?;
 
-        let bytes = if let Some(key_box) = &self.key_box {
-            self.encrypt(key_box, data.as_slice())?
-        } else {
-            data
-        };
+        let bytes = self.maybe_encrypt(&data)?;
 
         self.metadata.put(&bytes)
     }
@@ -501,11 +492,7 @@ where
             store_error(StoreOperation::EncodeEvent, e)
         })?;
 
-        let bytes = if let Some(key_box) = &self.key_box {
-            self.encrypt(key_box, &bytes)?
-        } else {
-            bytes
-        };
+        let bytes = self.maybe_encrypt(&bytes)?;
 
         // Calculate next event position (0-indexed)
         // event_counter works like vector.len(): 0 means empty, 1 means one event at position 0
@@ -549,11 +536,7 @@ where
             store_error(StoreOperation::EncodeEvent, e)
         })?;
 
-        let bytes = if let Some(key_box) = &self.key_box {
-            self.encrypt(key_box, &bytes)?
-        } else {
-            bytes
-        };
+        let bytes = self.maybe_encrypt(&bytes)?;
 
         // Calculate next event position (0-indexed)
         // event_counter works like vector.len(): 0 means empty, 1 means one event at position 0
@@ -590,41 +573,29 @@ where
 
     /// Returns the most recently persisted event, or `None` if no events have been stored.
     fn last_event(&self) -> Result<Option<P::Event>, Error> {
-        if let Some((_, data)) = self.events.last()? {
-            let data = if let Some(key_box) = &self.key_box {
-                self.decrypt(key_box, data.as_slice())?
-            } else {
-                data
-            };
-
-            let event: P::Event = borsh::from_slice(&data).map_err(|e| {
-                error!("Can't decode event: {}", e);
-                store_error(StoreOperation::DecodeEvent, e)
-            })?;
-
-            Ok(Some(event))
-        } else {
-            Ok(None)
-        }
+        self.events
+            .last()?
+            .map(|(_, data)| self.maybe_decrypt(data))
+            .transpose()?
+            .map(|data| {
+                borsh::from_slice(&data).map_err(|e| {
+                    error!("Can't decode event: {}", e);
+                    store_error(StoreOperation::DecodeEvent, e)
+                })
+            })
+            .transpose()
     }
 
     fn get_state(&self) -> Result<Option<(P, u64)>, Error> {
         let data = match self.states.get() {
             Ok(data) => data,
-            Err(e) => {
-                if let Error::EntryNotFound { .. } = e {
-                    return Ok(None);
-                } else {
-                    return Err(e);
-                }
+            Err(Error::EntryNotFound { .. }) => {
+                return Ok(None);
             }
+            Err(e) => return Err(e),
         };
 
-        let bytes = if let Some(key_box) = &self.key_box {
-            self.decrypt(key_box, data.as_slice())?
-        } else {
-            data
-        };
+        let bytes = self.maybe_decrypt(data)?;
 
         let state: (P, u64) = borsh::from_slice(&bytes).map_err(|e| {
             error!("Can't decode state: {}", e);
@@ -647,14 +618,14 @@ where
         let to_key = format!("{:020}", to);
         let mut events = Vec::new();
 
-        let iter = self.events.iter(false).map_err(|e| {
-            store_error(StoreOperation::GetEventsRange, e)
-        })?;
+        let iter = self
+            .events
+            .iter(false)
+            .map_err(|e| store_error(StoreOperation::GetEventsRange, e))?;
 
         for item in iter {
-            let (key, data) = item.map_err(|e| {
-                store_error(StoreOperation::GetEventsRange, e)
-            })?;
+            let (key, data) = item
+                .map_err(|e| store_error(StoreOperation::GetEventsRange, e))?;
 
             if key < from_key {
                 continue;
@@ -663,11 +634,7 @@ where
                 break;
             }
 
-            let data = if let Some(key_box) = &self.key_box {
-                self.decrypt(key_box, data.as_slice())?
-            } else {
-                data
-            };
+            let data = self.maybe_decrypt(data)?;
 
             let event: P::Event = borsh::from_slice(&data).map_err(|e| {
                 error!("Can't decode event: {}", e);
@@ -683,7 +650,10 @@ where
                 StoreOperation::GetEventsRange,
                 format!(
                     "event log gap detected: expected {} events in range [{}..={}], found {}",
-                    expected, from, to, events.len()
+                    expected,
+                    from,
+                    to,
+                    events.len()
                 ),
             ));
         }
@@ -717,11 +687,7 @@ where
                 store_error(StoreOperation::EncodeActor, e)
             })?;
 
-        let bytes = if let Some(key_box) = &self.key_box {
-            self.encrypt(key_box, data.as_slice())?
-        } else {
-            data
-        };
+        let bytes = self.maybe_encrypt(&data)?;
 
         self.states.put(&bytes)?;
         self.state_counter = next_state_counter;
@@ -746,125 +712,133 @@ where
     fn recover(&mut self) -> Result<Option<P>, Error> {
         debug!("Starting recovery process");
 
-        if let Some((mut state, counter)) = self.get_state()? {
-            self.state_counter = counter;
-            debug!("Recovered state with counter: {}", counter);
-
-            let last_event_counter =
-                if let Some((key, ..)) = self.events.last()? {
-                    key.parse::<u64>().map_err(|e| {
-                        store_error(StoreOperation::ParseEventKey, e)
-                    })? + 1
-                } else {
-                    0
-                };
-
-            // When old events have been compacted away, the snapshot counter is
-            // still the authoritative lower bound for the next event index.
-            self.event_counter = self.state_counter.max(last_event_counter);
-
-            debug!(
-                "Recovery state: event_counter={}, state_counter={}",
-                self.event_counter, self.state_counter
-            );
-
-            if self.event_counter > self.state_counter {
-                warn!(
-                    event_counter = self.event_counter,
-                    state_counter = self.state_counter,
-                    "State mismatch detected, replaying events"
-                );
-                debug!(
-                    "Applying events from {} to {}",
-                    self.state_counter,
-                    self.event_counter - 1
-                );
-                let events =
-                    self.events(self.state_counter, self.event_counter - 1)?;
-                debug!("Found {} events to replay", events.len());
-
-                for (i, event) in events.iter().enumerate() {
-                    debug!("Applying event {} of {}", i + 1, events.len());
-                    state.apply(event).map_err(|e| {
-                        store_error(StoreOperation::ApplyEvent, e)
-                    })?;
-                }
-
-                debug!(
-                    "Updating snapshot after applying {} events",
-                    events.len()
-                );
-                if let Err(e) = self.snapshot(&state) {
-                    warn!(
-                        error = %e,
-                        "Snapshot failed after recovery; state is reconstructed in memory"
-                    );
-                }
-                debug!(
-                    "Recovery completed. Final event_counter: {}",
-                    self.event_counter
-                );
-                // Note: We don't increment event_counter here as it already has the correct value
-                // from the last persisted event key or the latest snapshot boundary.
-            } else {
-                debug!("State is up to date, no events to apply");
-            }
-
-            Ok(Some(state))
-        } else {
-            debug!("No previous state found");
-
-            // Check if there are any events in the database
-            if let Some((key, ..)) = self.events.last()? {
-                debug!(
-                    "No snapshot but events found - replaying from beginning"
-                );
-
-                self.event_counter = key.parse::<u64>().map_err(|e| {
-                    store_error(StoreOperation::ParseEventKey, e)
-                })? + 1;
-                self.state_counter = 0;
-
-                debug!(
-                    "Using provided initial state and applying {} events",
-                    self.event_counter
-                );
-
-                // Use the initial state provided during Store creation
-                // This was created with create_initial(params) by the user
-                let mut state = self.initial_state.clone();
-
-                // Apply ALL events from the beginning
-                let events = self.events(0, self.event_counter - 1)?;
-                debug!("Replaying {} events from scratch", events.len());
-
-                for (i, event) in events.iter().enumerate() {
-                    debug!("Applying event {} of {}", i + 1, events.len());
-                    state.apply(event).map_err(|e| {
-                        store_error(StoreOperation::ApplyEvent, e)
-                    })?;
-                }
-
-                // Create snapshot for future recoveries
-                debug!("Creating snapshot after replaying events");
-                if let Err(e) = self.snapshot(&state) {
-                    warn!(
-                        error = %e,
-                        "Snapshot failed after recovery; state is reconstructed in memory"
-                    );
-                }
-
-                debug!(
-                    "Recovery completed. Final event_counter: {}",
-                    self.event_counter
-                );
-
-                Ok(Some(state))
-            } else {
-                debug!("No previous state and no events found, starting fresh");
-                Ok(None)
-            }
+        if let Some((state, counter)) = self.get_state()? {
+            return self.recover_from_snapshot(state, counter);
         }
+
+        debug!("No previous state found");
+
+        if let Some((key, ..)) = self.events.last()? {
+            return self.recover_from_initial_events(&key);
+        }
+
+        debug!("No previous state and no events found, starting fresh");
+        Ok(None)
+    }
+
+    fn recover_from_snapshot(
+        &mut self,
+        mut state: P,
+        counter: u64,
+    ) -> Result<Option<P>, Error> {
+        self.state_counter = counter;
+        debug!("Recovered state with counter: {}", counter);
+
+        let last_event_counter = self
+            .events
+            .last()?
+            .map(|(key, _)| {
+                key.parse::<u64>()
+                    .map_err(|e| store_error(StoreOperation::ParseEventKey, e))
+                    .map(|n| n + 1)
+            })
+            .transpose()?
+            .unwrap_or(0);
+
+        // When old events have been compacted away, the snapshot counter is
+        // still the authoritative lower bound for the next event index.
+        self.event_counter = self.state_counter.max(last_event_counter);
+
+        debug!(
+            "Recovery state: event_counter={}, state_counter={}",
+            self.event_counter, self.state_counter
+        );
+
+        if self.event_counter > self.state_counter {
+            warn!(
+                event_counter = self.event_counter,
+                state_counter = self.state_counter,
+                "State mismatch detected, replaying events"
+            );
+            debug!(
+                "Applying events from {} to {}",
+                self.state_counter,
+                self.event_counter - 1
+            );
+            let events =
+                self.events(self.state_counter, self.event_counter - 1)?;
+            debug!("Found {} events to replay", events.len());
+
+            for (i, event) in events.iter().enumerate() {
+                debug!("Applying event {} of {}", i + 1, events.len());
+                state
+                    .apply(event)
+                    .map_err(|e| store_error(StoreOperation::ApplyEvent, e))?;
+            }
+
+            debug!("Updating snapshot after applying {} events", events.len());
+            if let Err(e) = self.snapshot(&state) {
+                warn!(
+                    error = %e,
+                    "Snapshot failed after recovery; state is reconstructed in memory"
+                );
+            }
+            debug!(
+                "Recovery completed. Final event_counter: {}",
+                self.event_counter
+            );
+            // Note: We don't increment event_counter here as it already has the correct value
+            // from the last persisted event key or the latest snapshot boundary.
+        } else {
+            debug!("State is up to date, no events to apply");
+        }
+
+        Ok(Some(state))
+    }
+
+    fn recover_from_initial_events(
+        &mut self,
+        last_key: &str,
+    ) -> Result<Option<P>, Error> {
+        debug!("No snapshot but events found - replaying from beginning");
+
+        self.event_counter = last_key
+            .parse::<u64>()
+            .map_err(|e| store_error(StoreOperation::ParseEventKey, e))?
+            + 1;
+        self.state_counter = 0;
+
+        debug!(
+            "Using provided initial state and applying {} events",
+            self.event_counter
+        );
+
+        let mut state = self.initial_state.clone();
+
+        let events = self.events(0, self.event_counter - 1)?;
+        debug!("Replaying {} events from scratch", events.len());
+
+        for (i, event) in events.iter().enumerate() {
+            debug!("Applying event {} of {}", i + 1, events.len());
+            state
+                .apply(event)
+                .map_err(|e| store_error(StoreOperation::ApplyEvent, e))?;
+        }
+
+        debug!("Creating snapshot after replaying events");
+        if let Err(e) = self.snapshot(&state) {
+            warn!(
+                error = %e,
+                "Snapshot failed after recovery; state is reconstructed in memory"
+            );
+        }
+
+        debug!(
+            "Recovery completed. Final event_counter: {}",
+            self.event_counter
+        );
+
+        Ok(Some(state))
     }
 
     /// Snapshot the current reconstructed state if there are events since the
@@ -882,11 +856,10 @@ where
         }
 
         // Reconstruct state from last snapshot (or initial) + pending events.
-        let mut state = if let Some((s, _)) = self.get_state()? {
-            s
-        } else {
-            self.initial_state.clone()
-        };
+        let mut state = self
+            .get_state()?
+            .map(|(s, _)| s)
+            .unwrap_or_else(|| self.initial_state.clone());
 
         let events = self.events(self.state_counter, self.event_counter - 1)?;
         for event in &events {
@@ -921,45 +894,45 @@ where
         key_box: &EncryptedKey,
         bytes: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        if let Ok(key) = key_box.key() {
-            // Validate key size (XChaCha20-Poly1305 requires exactly 32 bytes)
-            if key.len() != 32 {
-                error!(
-                    expected = 32,
-                    got = key.len(),
-                    "Invalid encryption key length"
-                );
-                return Err(Error::Store {
-                    operation: StoreOperation::ValidateKeyLength,
-                    reason: format!(
-                        "Invalid key length: expected 32 bytes, got {}",
-                        key.len()
-                    ),
-                });
-            }
-
-            // Create cipher from key
-            let cipher = XChaCha20Poly1305::new(key.as_ref().into());
-
-            // Generate cryptographically secure random nonce (192-bits/24-bytes)
-            // XChaCha20 uses extended nonce, virtually eliminating collision risk
-            let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-
-            // Encrypt and authenticate the data
-            // XChaCha20-Poly1305 provides both confidentiality and authenticity
-            let ciphertext: Vec<u8> =
-                cipher.encrypt(&nonce, bytes.as_ref()).map_err(|e| {
-                    error!(error = %e, "Encryption failed");
-                    store_error(StoreOperation::EncryptData, e)
-                })?;
-
-            // Prepend nonce to ciphertext for storage
-            // Format: [nonce (24 bytes) || ciphertext || poly1305_tag (16 bytes)]
-            Ok([nonce.to_vec(), ciphertext].concat())
-        } else {
+        let key = key_box.key().map_err(|_| {
             error!("Failed to decrypt encryption key");
-            Err(store_error(StoreOperation::DecryptKey, "Can't decrypt key"))
+            store_error(StoreOperation::DecryptKey, "Can't decrypt key")
+        })?;
+
+        // Validate key size (XChaCha20-Poly1305 requires exactly 32 bytes)
+        if key.len() != 32 {
+            error!(
+                expected = 32,
+                got = key.len(),
+                "Invalid encryption key length"
+            );
+            return Err(Error::Store {
+                operation: StoreOperation::ValidateKeyLength,
+                reason: format!(
+                    "Invalid key length: expected 32 bytes, got {}",
+                    key.len()
+                ),
+            });
         }
+
+        // Create cipher from key
+        let cipher = XChaCha20Poly1305::new(key.as_ref().into());
+
+        // Generate cryptographically secure random nonce (192-bits/24-bytes)
+        // XChaCha20 uses extended nonce, virtually eliminating collision risk
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+
+        // Encrypt and authenticate the data
+        // XChaCha20-Poly1305 provides both confidentiality and authenticity
+        let ciphertext: Vec<u8> =
+            cipher.encrypt(&nonce, bytes.as_ref()).map_err(|e| {
+                error!(error = %e, "Encryption failed");
+                store_error(StoreOperation::EncryptData, e)
+            })?;
+
+        // Prepend nonce to ciphertext for storage
+        // Format: [nonce (24 bytes) || ciphertext || poly1305_tag (16 bytes)]
+        Ok([nonce.to_vec(), ciphertext].concat())
     }
 
     /// Decrypts a XChaCha20-Poly1305 ciphertext produced by [`encrypt`](Store::encrypt).
@@ -989,50 +962,66 @@ where
             });
         }
 
-        if let Ok(key) = key_box.key() {
-            // Validate key size (XChaCha20-Poly1305 requires exactly 32 bytes)
-            if key.len() != 32 {
-                error!(
-                    expected = 32,
-                    got = key.len(),
-                    "Invalid decryption key length"
-                );
-                return Err(store_error(
-                    StoreOperation::ValidateKeyLength,
-                    format!(
-                        "Invalid key length: expected 32 bytes, got {}",
-                        key.len()
-                    ),
-                ));
-            }
-
-            // Extract nonce from the beginning of ciphertext
-            let nonce = XNonce::from_slice(&ciphertext[..NONCE_SIZE]);
-
-            // Extract actual ciphertext (includes Poly1305 authentication tag at the end)
-            let ciphertext_data = &ciphertext[NONCE_SIZE..];
-
-            // Create cipher and decrypt
-            let cipher = XChaCha20Poly1305::new(key.as_ref().into());
-
-            // Decrypt and verify authentication tag
-            // This will fail if data has been tampered with or corrupted
-            let plaintext =
-                cipher.decrypt(nonce, ciphertext_data).map_err(|e| {
-                    warn!(error = %e, "Decryption failed, possible tampering or corruption");
-                    store_error(
-                        StoreOperation::DecryptData,
-                        format!(
-                            "Decryption failed (possible tampering): {}",
-                            e
-                        ),
-                    )
-                })?;
-
-            Ok(plaintext)
-        } else {
+        let key = key_box.key().map_err(|_| {
             error!("Failed to decrypt decryption key");
-            Err(store_error(StoreOperation::DecryptKey, "Can't decrypt key"))
+            store_error(StoreOperation::DecryptKey, "Can't decrypt key")
+        })?;
+
+        // Validate key size (XChaCha20-Poly1305 requires exactly 32 bytes)
+        if key.len() != 32 {
+            error!(
+                expected = 32,
+                got = key.len(),
+                "Invalid decryption key length"
+            );
+            return Err(store_error(
+                StoreOperation::ValidateKeyLength,
+                format!(
+                    "Invalid key length: expected 32 bytes, got {}",
+                    key.len()
+                ),
+            ));
+        }
+
+        // Extract nonce from the beginning of ciphertext
+        let nonce = XNonce::from_slice(&ciphertext[..NONCE_SIZE]);
+
+        // Extract actual ciphertext (includes Poly1305 authentication tag at the end)
+        let ciphertext_data = &ciphertext[NONCE_SIZE..];
+
+        // Create cipher and decrypt
+        let cipher = XChaCha20Poly1305::new(key.as_ref().into());
+
+        // Decrypt and verify authentication tag
+        // This will fail if data has been tampered with or corrupted
+        let plaintext =
+            cipher.decrypt(nonce, ciphertext_data).map_err(|e| {
+                warn!(error = %e, "Decryption failed, possible tampering or corruption");
+                store_error(
+                    StoreOperation::DecryptData,
+                    format!(
+                        "Decryption failed (possible tampering): {}",
+                        e
+                    ),
+                )
+            })?;
+
+        Ok(plaintext)
+    }
+
+    /// Encrypts `data` only when a key is configured; otherwise returns it unchanged.
+    fn maybe_encrypt(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        self.key_box.as_ref().map_or_else(
+            || Ok(data.to_vec()),
+            |key_box| self.encrypt(key_box, data),
+        )
+    }
+
+    /// Decrypts `data` only when a key is configured; otherwise returns it unchanged.
+    fn maybe_decrypt(&self, data: Vec<u8>) -> Result<Vec<u8>, Error> {
+        match &self.key_box {
+            Some(key_box) => self.decrypt(key_box, &data),
+            None => Ok(data),
         }
     }
 }

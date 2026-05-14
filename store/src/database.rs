@@ -111,14 +111,9 @@ pub trait Collection: Sync + Send + 'static {
     /// Returns [`Error::EntryNotFound`] if `from` is provided but does not exist.
     fn get_by_range(
         &self,
-        from: Option<String>,
+        from: Option<&str>,
         quantity: isize,
     ) -> Result<Vec<Vec<u8>>, Error> {
-        fn convert<'a>(
-            iter: impl Iterator<Item = CollectionEntryResult> + 'a,
-        ) -> CollectionIter<'a> {
-            Box::new(iter)
-        }
         let (mut iter, quantity) = match from {
             Some(key) => {
                 // Find the key
@@ -130,19 +125,21 @@ pub trait Collection: Sync + Send + 'static {
                 let mut iter = iter.peekable();
                 loop {
                     let Some(next_item) = iter.peek() else {
-                        return Err(Error::EntryNotFound { key });
+                        return Err(Error::EntryNotFound {
+                            key: key.to_string(),
+                        });
                     };
                     let (current_key, _) = match next_item {
                         Ok((current_key, event)) => (current_key, event),
                         Err(error) => return Err(error.clone()),
                     };
-                    if current_key == &key {
+                    if current_key == key {
                         break;
                     }
                     iter.next();
                 }
                 iter.next(); // Exclusive From
-                (convert(iter), quantity.abs())
+                (Box::new(iter) as CollectionIter<'_>, quantity.abs())
             }
             None => {
                 if quantity >= 0 {
@@ -321,8 +318,7 @@ macro_rules! test_store_trait {
                     result,
                     vec![b"value1".to_vec(), b"value2".to_vec()]
                 );
-                let result =
-                    store.get_by_range(Some("key3".to_string()), -2).unwrap();
+                let result = store.get_by_range(Some("key3"), -2).unwrap();
                 assert_eq!(
                     result,
                     vec![b"value2".to_vec(), b"value1".to_vec()]

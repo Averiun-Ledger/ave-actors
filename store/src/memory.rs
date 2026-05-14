@@ -24,15 +24,15 @@ pub struct MemoryManager {
     data: MemoryData,
 }
 
-impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
-    fn create_state(
+impl MemoryManager {
+    fn get_or_create_store(
         &self,
         name: &str,
         prefix: &str,
     ) -> Result<MemoryStore, Error> {
         let mut data_lock = self.data.write().map_err(|e| Error::Store {
             operation: StoreOperation::LockManagerData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
         let data = data_lock
             .entry((name.to_owned(), prefix.to_owned()))
@@ -45,6 +45,16 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
             prefix: prefix.to_owned(),
             data,
         })
+    }
+}
+
+impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
+    fn create_state(
+        &self,
+        name: &str,
+        prefix: &str,
+    ) -> Result<MemoryStore, Error> {
+        self.get_or_create_store(name, prefix)
     }
 
     fn stop(&mut self) -> Result<(), Error> {
@@ -56,21 +66,7 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
         name: &str,
         prefix: &str,
     ) -> Result<MemoryStore, Error> {
-        let mut data_lock = self.data.write().map_err(|e| Error::Store {
-            operation: StoreOperation::LockManagerData,
-            reason: format!("{}", e),
-        })?;
-        let data = data_lock
-            .entry((name.to_owned(), prefix.to_owned()))
-            .or_insert_with(|| Arc::new(RwLock::new(BTreeMap::new())))
-            .clone();
-        drop(data_lock);
-
-        Ok(MemoryStore {
-            name: name.to_owned(),
-            prefix: prefix.to_owned(),
-            data,
-        })
+        self.get_or_create_store(name, prefix)
     }
 }
 
@@ -100,7 +96,7 @@ impl State for MemoryStore {
     fn get(&self) -> Result<Vec<u8>, Error> {
         let lock = self.data.read().map_err(|e| Error::Store {
             operation: StoreOperation::LockData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
 
         lock.get(&self.prefix).map_or_else(
@@ -118,7 +114,7 @@ impl State for MemoryStore {
             .write()
             .map_err(|e| Error::Store {
                 operation: StoreOperation::LockData,
-                reason: format!("{}", e),
+                reason: e.to_string(),
             })?
             .insert(self.prefix.clone(), data.to_vec());
 
@@ -128,7 +124,7 @@ impl State for MemoryStore {
     fn del(&mut self) -> Result<(), Error> {
         let mut lock = self.data.write().map_err(|e| Error::Store {
             operation: StoreOperation::LockData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
         match lock.remove(&self.prefix) {
             Some(_) => Ok(()),
@@ -143,7 +139,7 @@ impl State for MemoryStore {
             .write()
             .map_err(|e| Error::Store {
                 operation: StoreOperation::LockData,
-                reason: format!("{}", e),
+                reason: e.to_string(),
             })?
             .remove(&self.prefix);
         Ok(())
@@ -164,7 +160,7 @@ impl Collection for MemoryStore {
         let key = format!("{}.{}", self.prefix, key);
         let lock = self.data.read().map_err(|e| Error::Store {
             operation: StoreOperation::LockData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
 
         lock.get(&key).map_or_else(
@@ -179,7 +175,7 @@ impl Collection for MemoryStore {
             .write()
             .map_err(|e| Error::Store {
                 operation: StoreOperation::LockData,
-                reason: format!("{}", e),
+                reason: e.to_string(),
             })?
             .insert(key, data.to_vec());
 
@@ -190,7 +186,7 @@ impl Collection for MemoryStore {
         let key = format!("{}.{}", self.prefix, key);
         let mut lock = self.data.write().map_err(|e| Error::Store {
             operation: StoreOperation::LockData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
         match lock.remove(&key) {
             Some(_) => Ok(()),
@@ -201,7 +197,7 @@ impl Collection for MemoryStore {
     fn purge(&mut self) -> Result<(), Error> {
         let mut lock = self.data.write().map_err(|e| Error::Store {
             operation: StoreOperation::LockData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
         let collection_prefix = self.collection_prefix();
 
@@ -226,7 +222,7 @@ impl Collection for MemoryStore {
     > {
         let lock = self.data.read().map_err(|e| Error::Store {
             operation: StoreOperation::LockData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
         let collection_prefix = self.collection_prefix();
         let prefix_len = collection_prefix.len();

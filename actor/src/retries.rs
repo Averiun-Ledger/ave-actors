@@ -12,7 +12,7 @@ use crate::{
 
 use async_trait::async_trait;
 
-use std::{fmt::Debug, marker::PhantomData, time::Duration};
+use std::{fmt::Debug, marker::PhantomData};
 use tracing::{debug, error, info_span};
 
 #[async_trait]
@@ -156,7 +156,7 @@ where
         self.completion_pending = true;
         if let Ok(actor) = ctx.reference().await {
             self.pending_retry = Some(tokio::spawn(async move {
-                tokio::time::sleep(Duration::ZERO).await;
+                tokio::task::yield_now().await;
                 let _ = actor.tell(RetryMessage::Complete).await;
             }));
         } else {

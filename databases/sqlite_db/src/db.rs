@@ -15,8 +15,8 @@ use tracing::{debug, error, info};
 use std::{
     collections::VecDeque,
     path::PathBuf,
-    sync::{Arc, Mutex},
     sync::atomic::{AtomicUsize, Ordering},
+    sync::{Arc, Mutex},
 };
 use std::{fs, path::Path};
 
@@ -72,14 +72,18 @@ impl std::ops::Deref for PooledConnection {
     fn deref(&self) -> &Self::Target {
         // Invariant: `conn` is only `None` after `Drop` has consumed it.
         // `Deref` is never called after Drop, so this is guaranteed to succeed.
-        self.conn.as_ref().expect("PooledConnection accessed after drop")
+        self.conn
+            .as_ref()
+            .expect("PooledConnection accessed after drop")
     }
 }
 
 impl std::ops::DerefMut for PooledConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // Invariant: same as `Deref` — `conn` is `Some` until Drop runs.
-        self.conn.as_mut().expect("PooledConnection accessed after drop")
+        self.conn
+            .as_mut()
+            .expect("PooledConnection accessed after drop")
     }
 }
 
@@ -95,10 +99,11 @@ impl SqlitePool {
     /// Obtains a connection from the pool, creating a new one if necessary.
     fn checkout(self: &Arc<Self>) -> Result<PooledConnection, Error> {
         // Reuse an idle connection if one exists.
-        let mut available = self.available.lock().map_err(|e| Error::Store {
-            operation: StoreOperation::LockManagerData,
-            reason: format!("connection pool mutex poisoned: {}", e),
-        })?;
+        let mut available =
+            self.available.lock().map_err(|e| Error::Store {
+                operation: StoreOperation::LockManagerData,
+                reason: format!("connection pool mutex poisoned: {}", e),
+            })?;
         if let Some(conn) = available.pop() {
             drop(available);
             return Ok(PooledConnection {
@@ -109,8 +114,7 @@ impl SqlitePool {
         drop(available);
 
         // No idle connection available — open a fresh one.
-        let conn =
-            open_with_tuning(&self.path, self.durability, self.tuning)?;
+        let conn = open_with_tuning(&self.path, self.durability, self.tuning)?;
         self.total.fetch_add(1, Ordering::Relaxed);
 
         Ok(PooledConnection {
@@ -124,11 +128,11 @@ impl SqlitePool {
     fn checkin(&self, conn: Connection) {
         // If the mutex is poisoned we cannot return the connection to the pool;
         // just drop it so we don't panic inside Drop.
-        if let Ok(mut available) = self.available.lock() {
-            if available.len() < self.max_size {
-                available.push(conn);
-                return;
-            }
+        if let Ok(mut available) = self.available.lock()
+            && available.len() < self.max_size
+        {
+            available.push(conn);
+            return;
         }
         self.total.fetch_sub(1, Ordering::Relaxed);
         // Connection is dropped here.
@@ -595,14 +599,13 @@ impl State for SqliteCollection {
             }
         })?;
 
-        conn.execute(&stmt, params![self.prefix])
-            .map_err(|e| {
-                error!(table = %self.table, error = %e, "Failed to purge state");
-                Error::Store {
-                    operation: StoreOperation::Purge,
-                    reason: format!("{}", e),
-                }
-            })?;
+        conn.execute(&stmt, params![self.prefix]).map_err(|e| {
+            error!(table = %self.table, error = %e, "Failed to purge state");
+            Error::Store {
+                operation: StoreOperation::Purge,
+                reason: format!("{}", e),
+            }
+        })?;
         debug!(table = %self.table, "State purged");
         Ok(())
     }
@@ -835,7 +838,8 @@ mod tests {
     static TEMP_DIRS: Mutex<Vec<tempfile::TempDir>> = Mutex::new(Vec::new());
 
     pub fn create_temp_dir() -> String {
-        let dir = tempfile::tempdir().expect("Can not create temporal directory.");
+        let dir =
+            tempfile::tempdir().expect("Can not create temporal directory.");
         let path = dir.path().to_str().unwrap().to_owned();
         TEMP_DIRS.lock().unwrap().push(dir);
         path

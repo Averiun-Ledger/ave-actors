@@ -35,13 +35,10 @@ impl<'de> Deserialize<'de> for ActorPath {
 impl ActorPath {
     /// Returns a path containing only the first segment (the root scope).
     pub fn root(&self) -> Self {
-        if self.0.len() == 1 {
-            self.clone()
-        } else if !self.0.is_empty() {
-            Self(Arc::new(self.0.iter().take(1).cloned().collect()))
-        } else {
-            Self(Arc::new(Vec::new()))
-        }
+        self.0.first().map_or_else(
+            || Self(Arc::new(Vec::new())),
+            |first| Self(Arc::new(vec![first.clone()])),
+        )
     }
 
     /// Returns this path with its last segment removed, or an empty path if already at root.
@@ -56,8 +53,8 @@ impl ActorPath {
     }
 
     /// Returns the last segment of the path (the actor's local id).
-    pub fn key(&self) -> String {
-        self.0.last().cloned().unwrap_or_else(|| "".to_string())
+    pub fn key(&self) -> &str {
+        self.0.last().map(|s| s.as_str()).unwrap_or("")
     }
 
     /// Returns the number of segments in this path (its depth).
@@ -116,7 +113,8 @@ impl From<&str> for ActorPath {
     fn from(str: &str) -> Self {
         let tokens: Vec<String> = str
             .split('/')
-            .filter(|x| !x.trim().is_empty())
+            .map(|s| s.trim())
+            .filter(|x| !x.is_empty())
             .map(|s| s.to_string())
             .collect();
         Self(Arc::new(tokens))
@@ -144,7 +142,8 @@ impl std::ops::Div<&str> for ActorPath {
         let mut keys = self.0.as_ref().clone();
         let mut tokens: Vec<String> = rhs
             .split('/')
-            .filter(|x| !x.trim().is_empty())
+            .map(|s| s.trim())
+            .filter(|x| !x.is_empty())
             .map(|s| s.to_string())
             .collect();
 
@@ -216,7 +215,7 @@ mod tests {
     fn test_get_key() {
         let path = ActorPath::from("/acme/building/room/sensor");
         println!("{:?}", path);
-        assert_eq!(path.key(), "sensor".to_string());
+        assert_eq!(path.key(), "sensor");
     }
 
     #[test]

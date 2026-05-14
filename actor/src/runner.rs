@@ -384,8 +384,7 @@ where
             return;
         }
 
-        let deadline =
-            tokio::time::Instant::now() + A::mailbox_drain_timeout();
+        let deadline = tokio::time::Instant::now() + A::mailbox_drain_timeout();
         let mut timed_out = false;
 
         for mut msg in critical {
@@ -423,8 +422,7 @@ where
     /// actions that are already queued; it does not wait for future actions
     /// on the still-open channel.
     async fn drain_inner_actions(&mut self, ctx: &mut ActorContext<A>) {
-        let deadline =
-            tokio::time::Instant::now() + A::event_drain_timeout();
+        let deadline = tokio::time::Instant::now() + A::event_drain_timeout();
         let mut drained = 0usize;
 
         loop {
