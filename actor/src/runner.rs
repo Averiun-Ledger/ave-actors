@@ -7,7 +7,7 @@ use crate::{
         Actor, ActorContext, ActorLifecycle, ActorRef, ChildAction, ChildError,
         ChildErrorReceiver, ChildErrorSender, Handler,
     },
-    handler::{BoxedMessageHandler, HandleHelper, MailboxReceiver, mailbox},
+    handler::{Envelope, HandleHelper, MailboxReceiver, mailbox},
     supervision::{RetryStrategy, SupervisionStrategy},
     system::{SystemEvent, SystemRef},
 };
@@ -370,7 +370,8 @@ where
             self.receiver.close();
         }
 
-        let mut critical: Vec<BoxedMessageHandler<A>> = Vec::new();
+        let mut critical: Vec<Envelope<A>> =
+            Vec::with_capacity(self.receiver.len().min(64));
 
         while let Ok(mut msg) = self.receiver.try_recv() {
             if msg.is_critical() {

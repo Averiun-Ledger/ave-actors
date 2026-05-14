@@ -248,6 +248,45 @@ impl Collection for MemoryStore {
 
         Ok(Box::new(items.into_iter().map(Ok)))
     }
+
+    fn iter_range<'a>(
+        &'a self,
+        start: &str,
+        end: &str,
+        reverse: bool,
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>,
+        Error,
+    > {
+        let lock = self.data.read().map_err(|e| Error::Store {
+            operation: StoreOperation::LockData,
+            reason: e.to_string(),
+        })?;
+        let collection_prefix = self.collection_prefix();
+        let prefix_len = collection_prefix.len();
+
+        let start_key = format!("{}.{}", self.prefix, start);
+        let end_key = format!("{}.{}", self.prefix, end);
+
+        let items: Vec<(String, Vec<u8>)> = if reverse {
+            lock.range(start_key..=end_key)
+                .rev()
+                .map(|(key, value)| {
+                    let key = &key[prefix_len..];
+                    (key.to_owned(), value.clone())
+                })
+                .collect()
+        } else {
+            lock.range(start_key..=end_key)
+                .map(|(key, value)| {
+                    let key = &key[prefix_len..];
+                    (key.to_owned(), value.clone())
+                })
+                .collect()
+        };
+
+        Ok(Box::new(items.into_iter().map(Ok)))
+    }
 }
 
 #[cfg(test)]

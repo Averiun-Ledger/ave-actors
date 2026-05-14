@@ -591,6 +591,59 @@ impl Collection for RocksDbStore {
             reverse,
         )?))
     }
+
+    fn iter_range<'a>(
+        &'a self,
+        start: &str,
+        end: &str,
+        reverse: bool,
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>,
+        Error,
+    > {
+        let Some(_handle) = self.store.cf_handle(&self.name) else {
+            error!(cf = %self.name, "Column family not found for collection iter_range");
+            return Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                reason: "RocksDB column for the store does not exist."
+                    .to_owned(),
+            });
+        };
+        Ok(Box::new(RocksDbRangeIterator::new(
+            &self.store,
+            self.name.clone(),
+            self.prefix.clone(),
+            start,
+            end,
+            reverse,
+        )?))
+    }
+
+    fn del_range(&mut self, start: &str, end: &str) -> Result<(), Error> {
+        if let Some(handle) = self.store.cf_handle(&self.name) {
+            let wopts = write_options(self.strong_durability);
+            let start_key = format!("{}.{}", self.prefix, start).into_bytes();
+            let mut end_key = format!("{}.{}", self.prefix, end).into_bytes();
+            end_key.push(0xFF);
+            debug!(cf = %self.name, "Deleting collection range");
+            self.store
+                .delete_range_cf_opt(&handle, start_key, end_key, &wopts)
+                .map_err(|e| {
+                    error!(cf = %self.name, error = %e, "Failed to delete collection range");
+                    Error::Store {
+                        operation: StoreOperation::RocksdbOperation,
+                        reason: format!("{:?}", e),
+                    }
+                })
+        } else {
+            error!(cf = %self.name, "Column family not found for collection del_range");
+            Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                reason: "RocksDB column for the store does not exist."
+                    .to_owned(),
+            })
+        }
+    }
 }
 
 pub struct RocksDbIterator<'a> {
@@ -636,8 +689,8 @@ impl Iterator for RocksDbIterator<'_> {
                         return None;
                     }
                     let suffix = &key[self.prefix_dot.len()..];
-                    let key_str = match String::from_utf8(suffix.to_vec()) {
-                        Ok(key_str) => key_str,
+                    let key_str = match std::str::from_utf8(suffix) {
+                        Ok(s) => s.to_owned(),
                         Err(error) => {
                             return Some(Err(Error::Get {
                                 key: String::from_utf8_lossy(&key).into_owned(),
@@ -649,6 +702,92 @@ impl Iterator for RocksDbIterator<'_> {
                 }
                 Err(e) => {
                     error!(error = %e, "RocksDB iteration error");
+                    return Some(Err(Error::Get {
+                        key: String::from_utf8_lossy(&self.prefix_dot)
+                            .into_owned(),
+                        reason: format!("{}", e),
+                    }));
+                }
+            }
+        }
+        None
+    }
+}
+
+pub struct RocksDbRangeIterator<'a> {
+    start_key: Vec<u8>,
+    end_key: Vec<u8>,
+    prefix_dot: Vec<u8>,
+    reverse: bool,
+    iter: DBIteratorWithThreadMode<'a, DB>,
+}
+
+impl<'a> RocksDbRangeIterator<'a> {
+    pub fn new(
+        store: &'a Arc<DB>,
+        name: String,
+        prefix: String,
+        start: &str,
+        end: &str,
+        reverse: bool,
+    ) -> Result<Self, Error> {
+        let prefix_dot = format!("{}.", prefix).into_bytes();
+        let start_key = format!("{}.{}", prefix, start).into_bytes();
+        let end_key = format!("{}.{}", prefix, end).into_bytes();
+
+        let handle = store.cf_handle(&name).ok_or_else(|| Error::Store {
+            operation: StoreOperation::ColumnAccess,
+            reason: "RocksDB column for the store does not exist.".to_owned(),
+        })?;
+
+        let mode = if reverse {
+            IteratorMode::From(&end_key, Direction::Reverse)
+        } else {
+            IteratorMode::From(&start_key, Direction::Forward)
+        };
+
+        let iter = store.iterator_cf(&handle, mode);
+        Ok(Self {
+            start_key,
+            end_key,
+            prefix_dot,
+            reverse,
+            iter,
+        })
+    }
+}
+
+impl Iterator for RocksDbRangeIterator<'_> {
+    type Item = Result<(String, Vec<u8>), Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for item in self.iter.by_ref() {
+            match item {
+                Ok((key, value)) => {
+                    if !key.starts_with(&self.prefix_dot) {
+                        return None;
+                    }
+                    if !self.reverse && key.as_ref() > self.end_key.as_slice() {
+                        return None;
+                    }
+                    if self.reverse && key.as_ref() < self.start_key.as_slice()
+                    {
+                        return None;
+                    }
+                    let suffix = &key[self.prefix_dot.len()..];
+                    let key_str = match std::str::from_utf8(suffix) {
+                        Ok(s) => s.to_owned(),
+                        Err(error) => {
+                            return Some(Err(Error::Get {
+                                key: String::from_utf8_lossy(&key).into_owned(),
+                                reason: format!("{}", error),
+                            }));
+                        }
+                    };
+                    return Some(Ok((key_str, value.to_vec())));
+                }
+                Err(e) => {
+                    error!(error = %e, "RocksDB range iteration error");
                     return Some(Err(Error::Get {
                         key: String::from_utf8_lossy(&self.prefix_dot)
                             .into_owned(),

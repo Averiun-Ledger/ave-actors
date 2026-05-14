@@ -97,12 +97,55 @@ pub trait Collection: Sync + Send + 'static {
     /// Removes all entries from the collection.
     fn purge(&mut self) -> Result<(), Error>;
 
+    /// Removes all entries whose keys fall within the inclusive range
+    /// `[start, end]`.
+    ///
+    /// The default implementation iterates over the range (via
+    /// [`iter_range`](Collection::iter_range)) and deletes each entry
+    /// individually. Backends that support native range deletes should
+    /// override it for better performance.
+    fn del_range(&mut self, start: &str, end: &str) -> Result<(), Error> {
+        let keys: Vec<String> = self
+            .iter_range(start, end, false)?
+            .map(|item| item.map(|(k, _)| k))
+            .collect::<Result<Vec<_>, _>>()?;
+        for key in keys {
+            match self.del(&key) {
+                Ok(()) | Err(Error::EntryNotFound { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
     /// Returns an iterator over all key-value pairs.
     ///
     /// Pass `reverse = true` to iterate in descending key order.
     /// Returns an error if the backend cannot acquire the necessary locks to start
     /// iteration; individual items in the iterator may also yield errors.
     fn iter<'a>(&'a self, reverse: bool) -> Result<CollectionIter<'a>, Error>;
+
+    /// Returns an iterator over key-value pairs within the inclusive range
+    /// `[start, end]`.
+    ///
+    /// Pass `reverse = true` to iterate in descending key order.
+    /// The default implementation delegates to [`iter`](Collection::iter) and
+    /// filters in-memory, so backends that support native range queries should
+    /// override it for better performance.
+    fn iter_range<'a>(
+        &'a self,
+        start: &str,
+        end: &str,
+        reverse: bool,
+    ) -> Result<CollectionIter<'a>, Error> {
+        let start = start.to_owned();
+        let end = end.to_owned();
+        let iter = self.iter(reverse)?;
+        Ok(Box::new(iter.filter(move |item| match item {
+            Ok((key, _)) => key >= &start && key <= &end,
+            Err(_) => true,
+        })))
+    }
 
     /// Returns at most `quantity.abs()` values, optionally starting after `from`.
     ///
@@ -290,6 +333,52 @@ macro_rules! test_store_trait {
             }
 
             #[test]
+            fn test_iter_range() {
+                let mut manager = <$type>::default();
+                let mut store: $type2 =
+                    manager.create_collection("test", "test").unwrap();
+                Collection::put(&mut store, "key1", b"value1").unwrap();
+                Collection::put(&mut store, "key2", b"value2").unwrap();
+                Collection::put(&mut store, "key3", b"value3").unwrap();
+                let items: Vec<_> = store
+                    .iter_range("key2", "key3", false)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(
+                    items,
+                    vec![
+                        ("key2".to_string(), b"value2".to_vec()),
+                        ("key3".to_string(), b"value3".to_vec()),
+                    ]
+                );
+                assert!(manager.stop().is_ok())
+            }
+
+            #[test]
+            fn test_iter_range_reverse() {
+                let mut manager = <$type>::default();
+                let mut store: $type2 =
+                    manager.create_collection("test", "test").unwrap();
+                Collection::put(&mut store, "key1", b"value1").unwrap();
+                Collection::put(&mut store, "key2", b"value2").unwrap();
+                Collection::put(&mut store, "key3", b"value3").unwrap();
+                let items: Vec<_> = store
+                    .iter_range("key1", "key2", true)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(
+                    items,
+                    vec![
+                        ("key2".to_string(), b"value2".to_vec()),
+                        ("key1".to_string(), b"value1".to_vec()),
+                    ]
+                );
+                assert!(manager.stop().is_ok())
+            }
+
+            #[test]
             fn test_last() {
                 let mut manager = <$type>::default();
                 let mut store: $type2 =
@@ -322,6 +411,34 @@ macro_rules! test_store_trait {
                 assert_eq!(
                     result,
                     vec![b"value2".to_vec(), b"value1".to_vec()]
+                );
+                assert!(manager.stop().is_ok())
+            }
+
+            #[test]
+            fn test_del_range() {
+                let mut manager = <$type>::default();
+                let mut store: $type2 =
+                    manager.create_collection("test", "test").unwrap();
+                Collection::put(&mut store, "key1", b"value1").unwrap();
+                Collection::put(&mut store, "key2", b"value2").unwrap();
+                Collection::put(&mut store, "key3", b"value3").unwrap();
+                Collection::del_range(&mut store, "key1", "key2").unwrap();
+                assert_eq!(
+                    Collection::get(&store, "key1"),
+                    Err(Error::EntryNotFound {
+                        key: "test.key1".to_owned()
+                    })
+                );
+                assert_eq!(
+                    Collection::get(&store, "key2"),
+                    Err(Error::EntryNotFound {
+                        key: "test.key2".to_owned()
+                    })
+                );
+                assert_eq!(
+                    Collection::get(&store, "key3"),
+                    Ok(b"value3".to_vec())
                 );
                 assert!(manager.stop().is_ok())
             }

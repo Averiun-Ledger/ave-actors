@@ -517,6 +517,123 @@ impl Iterator for SqliteChunkedIterator {
     }
 }
 
+/// Chunked iterator bounded by an inclusive `[start, end]` key range.
+struct SqliteRangeChunkedIterator {
+    manager: SqliteManager,
+    table: String,
+    prefix: String,
+    start: String,
+    end: String,
+    reverse: bool,
+    buffer: VecDeque<(String, Vec<u8>)>,
+    last_key: Option<String>,
+    exhausted: bool,
+}
+
+impl SqliteRangeChunkedIterator {
+    const fn new(
+        manager: SqliteManager,
+        table: String,
+        prefix: String,
+        start: String,
+        end: String,
+        reverse: bool,
+    ) -> Self {
+        Self {
+            manager,
+            table,
+            prefix,
+            start,
+            end,
+            reverse,
+            buffer: VecDeque::new(),
+            last_key: None,
+            exhausted: false,
+        }
+    }
+
+    fn fetch_chunk(&mut self) -> Result<(), Error> {
+        let conn = self.manager.pool.checkout().map_err(|e| {
+            error!(table = %self.table, error = %e, "Failed to check out connection for range chunk fetch");
+            Error::Store {
+                operation: StoreOperation::LockConnection,
+                reason: format!("{}", e),
+            }
+        })?;
+
+        let order = if self.reverse { "DESC" } else { "ASC" };
+        let cmp = if self.reverse { "<" } else { ">" };
+
+        let rows: Vec<(String, Vec<u8>)> = match &self.last_key {
+            None => {
+                let q = format!(
+                    "SELECT sn, value FROM {} WHERE prefix = ?1 AND sn >= ?2 AND sn <= ?3 ORDER BY sn {} LIMIT {}",
+                    self.table, order, ITER_CHUNK_SIZE
+                );
+                conn.prepare(&q).and_then(|mut s| {
+                    s.query_map(
+                        params![self.prefix, self.start, self.end],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .and_then(|rows| rows.collect())
+                })
+                .map_err(|e| {
+                    error!(table = %self.table, error = %e, "Failed to fetch first range chunk from DB");
+                    Error::Get {
+                        key: self.prefix.clone(),
+                        reason: format!("{}", e),
+                    }
+                })?
+            }
+            Some(last) => {
+                let q = format!(
+                    "SELECT sn, value FROM {} WHERE prefix = ?1 AND sn >= ?2 AND sn <= ?3 AND sn {} ?4 ORDER BY sn {} LIMIT {}",
+                    self.table, cmp, order, ITER_CHUNK_SIZE
+                );
+                let last = last.clone();
+                conn.prepare(&q).and_then(|mut s| {
+                    s.query_map(
+                        params![self.prefix, self.start, self.end, last],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .and_then(|rows| rows.collect())
+                })
+                .map_err(|e| {
+                    error!(table = %self.table, error = %e, "Failed to fetch next range chunk from DB");
+                    Error::Get {
+                        key: self.prefix.clone(),
+                        reason: format!("{}", e),
+                    }
+                })?
+            }
+        };
+
+        if rows.is_empty() {
+            self.exhausted = true;
+        } else {
+            self.last_key = rows.last().map(|(k, _)| k.clone());
+            self.buffer.extend(rows);
+        }
+        Ok(())
+    }
+}
+
+impl Iterator for SqliteRangeChunkedIterator {
+    type Item = Result<(String, Vec<u8>), Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.buffer.is_empty()
+            && !self.exhausted
+            && let Err(error) = self.fetch_chunk()
+        {
+            self.exhausted = true;
+            return Some(Err(error));
+        }
+
+        self.buffer.pop_front().map(Ok)
+    }
+}
+
 impl State for SqliteCollection {
     fn get(&self) -> Result<Vec<u8>, Error> {
         let query =
@@ -727,6 +844,49 @@ impl Collection for SqliteCollection {
         Error,
     > {
         Ok(self.make_iter(reverse))
+    }
+
+    fn iter_range<'a>(
+        &'a self,
+        start: &str,
+        end: &str,
+        reverse: bool,
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>,
+        Error,
+    > {
+        Ok(Box::new(SqliteRangeChunkedIterator::new(
+            self.manager.clone(),
+            self.table.clone(),
+            self.prefix.clone(),
+            start.to_owned(),
+            end.to_owned(),
+            reverse,
+        )))
+    }
+
+    fn del_range(&mut self, start: &str, end: &str) -> Result<(), Error> {
+        let stmt = format!(
+            "DELETE FROM {} WHERE prefix = ?1 AND sn >= ?2 AND sn <= ?3",
+            &self.table
+        );
+        let conn = self.manager.pool.checkout().map_err(|e| {
+            error!(error = %e, "Failed to check out connection for collection del_range");
+            Error::Store {
+                operation: StoreOperation::OpenConnection,
+                reason: format!("{}", e),
+            }
+        })?;
+
+        conn.execute(&stmt, params![self.prefix, start, end])
+            .map_err(|e| {
+                error!(table = %self.table, start = %start, end = %end, error = %e, "Failed to delete collection range");
+                Error::Store {
+                    operation: StoreOperation::Delete,
+                    reason: format!("{}", e),
+                }
+            })?;
+        Ok(())
     }
 
     fn name(&self) -> &str {

@@ -113,7 +113,7 @@ impl PersistentActor for SingleEventActor {
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         println!("  [APPLY] data: '{}' → '{}'", self.data, event.0);
-        self.data = event.0.clone();
+        self.data.clone_from(&event.0);
         Ok(())
     }
 }

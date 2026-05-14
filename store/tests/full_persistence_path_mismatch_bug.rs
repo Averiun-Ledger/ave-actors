@@ -193,7 +193,7 @@ async fn test_explicit_prefix_usage() {
             println!("  [PRE_START] Using EXPLICIT prefix='my_fixed_prefix'");
             self.start_store(
                 "prefix_test",
-                Some("my_fixed_prefix".to_string()),
+                Some("my_fixed_prefix"),
                 ctx,
                 manager,
                 None,

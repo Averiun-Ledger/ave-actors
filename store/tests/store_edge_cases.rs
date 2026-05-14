@@ -116,7 +116,7 @@ impl PersistentActor for EncryptedActor {
 
     fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
         self.counter = event.counter;
-        self.data = event.data.clone();
+        self.data.clone_from(&event.data);
         Ok(())
     }
 }

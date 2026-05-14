@@ -11,7 +11,7 @@ use std::sync::Arc;
 /// Paths are built by appending segments with the `/` operator. The first
 /// segment is conventionally the root scope (`user`, `system`, etc.).
 #[derive(Clone, Hash, Eq, PartialEq, PartialOrd, Ord)]
-pub struct ActorPath(Arc<Vec<String>>);
+pub struct ActorPath(Arc<[String]>);
 
 impl Serialize for ActorPath {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -28,7 +28,7 @@ impl<'de> Deserialize<'de> for ActorPath {
         D: serde::Deserializer<'de>,
     {
         let vec = Vec::<String>::deserialize(deserializer)?;
-        Ok(Self(Arc::new(vec)))
+        Ok(Self(Arc::from(vec)))
     }
 }
 
@@ -36,19 +36,17 @@ impl ActorPath {
     /// Returns a path containing only the first segment (the root scope).
     pub fn root(&self) -> Self {
         self.0.first().map_or_else(
-            || Self(Arc::new(Vec::new())),
-            |first| Self(Arc::new(vec![first.clone()])),
+            || Self(Arc::from([])),
+            |first| Self(Arc::from([first.clone()])),
         )
     }
 
     /// Returns this path with its last segment removed, or an empty path if already at root.
     pub fn parent(&self) -> Self {
         if self.0.len() > 1 {
-            let mut tokens = self.0.as_ref().clone();
-            tokens.truncate(tokens.len() - 1);
-            Self(Arc::new(tokens))
+            Self(Arc::from(&self.0[..self.0.len() - 1]))
         } else {
-            Self(Arc::new(Vec::new()))
+            Self(Arc::from([]))
         }
     }
 
@@ -71,9 +69,7 @@ impl ActorPath {
         } else if level == self.level() - 1 {
             self.parent()
         } else {
-            let mut tokens = self.0.as_ref().clone();
-            tokens.truncate(level);
-            Self(Arc::new(tokens))
+            Self(Arc::from(&self.0[..level]))
         }
     }
 
@@ -117,7 +113,7 @@ impl From<&str> for ActorPath {
             .filter(|x| !x.is_empty())
             .map(|s| s.to_string())
             .collect();
-        Self(Arc::new(tokens))
+        Self(Arc::from(tokens))
     }
 }
 
@@ -139,7 +135,7 @@ impl std::ops::Div<&str> for ActorPath {
     type Output = Self;
 
     fn div(self, rhs: &str) -> Self::Output {
-        let mut keys = self.0.as_ref().clone();
+        let mut keys = self.0.to_vec();
         let mut tokens: Vec<String> = rhs
             .split('/')
             .map(|s| s.trim())
@@ -148,7 +144,7 @@ impl std::ops::Div<&str> for ActorPath {
             .collect();
 
         keys.append(&mut tokens);
-        Self(Arc::new(keys))
+        Self(Arc::from(keys))
     }
 }
 

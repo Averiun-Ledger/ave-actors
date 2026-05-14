@@ -12,6 +12,8 @@ use tokio_util::sync::CancellationToken;
 
 use tracing::{Instrument, Span, debug, error, warn};
 
+use dashmap::DashMap;
+
 use std::{
     any::Any,
     collections::{HashMap, HashSet},
@@ -82,16 +84,16 @@ pub enum SystemEvent {
 pub struct SystemRef {
     /// Registry of all actors in the system, indexed by their paths.
     /// Uses type erasure (Any) to store heterogeneous actor types.
-    actors:
-        Arc<RwLock<HashMap<ActorPath, Box<dyn Any + Send + Sync + 'static>>>>,
+    actors: Arc<DashMap<ActorPath, Box<dyn Any + Send + Sync + 'static>>>,
     /// Direct-children index to avoid scanning the full actor registry on lookups.
-    child_index: Arc<RwLock<HashMap<ActorPath, HashSet<ActorPath>>>>,
+    child_index: Arc<DashMap<ActorPath, HashSet<ActorPath>>>,
 
     /// Registry of helper objects that can be shared across actors.
     /// Helpers can be any type (database connections, configurations, etc.).
-    helpers: Arc<RwLock<HashMap<String, Box<dyn Any + Send + Sync + 'static>>>>,
+    helpers: Arc<DashMap<String, Box<dyn Any + Send + Sync + 'static>>>,
 
     /// Stop senders for root-level actors to enable coordinated shutdown.
+    /// Kept as RwLock<HashMap> because shutdown needs `std::mem::take` of the whole map.
     root_senders: Arc<RwLock<HashMap<ActorPath, StopHandle>>>,
     /// Broadcast bus for observable system-level events such as root actor errors.
     system_event_sender: broadcast::Sender<SystemEvent>,
@@ -112,7 +114,7 @@ impl SystemRef {
     ) -> Self {
         let root_senders =
             Arc::new(RwLock::new(HashMap::<ActorPath, StopHandle>::new()));
-        let child_index = Arc::new(RwLock::new(HashMap::new()));
+        let child_index = Arc::new(DashMap::new());
         let (system_event_sender, _) = broadcast::channel::<SystemEvent>(256);
         let shutting_down = Arc::new(AtomicBool::new(false));
         let root_sender_clone = root_senders.clone();
@@ -176,9 +178,9 @@ impl SystemRef {
         });
 
         Self {
-            actors: Arc::new(RwLock::new(HashMap::new())),
+            actors: Arc::new(DashMap::new()),
             child_index,
-            helpers: Arc::new(RwLock::new(HashMap::new())),
+            helpers: Arc::new(DashMap::new()),
             graceful_token,
             crash_token,
             root_senders,
@@ -205,8 +207,6 @@ impl SystemRef {
     async fn index_actor(&self, path: &ActorPath) {
         let parent = path.parent();
         self.child_index
-            .write()
-            .await
             .entry(parent)
             .or_default()
             .insert(path.clone());
@@ -214,11 +214,11 @@ impl SystemRef {
 
     async fn deindex_actor(&self, path: &ActorPath) {
         let parent = path.parent();
-        let mut child_index = self.child_index.write().await;
-        if let Some(children) = child_index.get_mut(&parent) {
+        if let Some(mut children) = self.child_index.get_mut(&parent) {
             children.remove(path);
             if children.is_empty() {
-                child_index.remove(&parent);
+                drop(children);
+                self.child_index.remove(&parent);
             }
         }
     }
@@ -231,10 +231,9 @@ impl SystemRef {
     where
         A: Actor + Handler<A>,
     {
-        let actors = self.actors.read().await;
-        actors
+        self.actors
             .get(path)
-            .and_then(|any| any.downcast_ref::<ActorRef<A>>().cloned())
+            .and_then(|any| any.value().downcast_ref::<ActorRef<A>>().cloned())
             .ok_or_else(|| Error::NotFound { path: path.clone() })
     }
 
@@ -259,15 +258,16 @@ impl SystemRef {
         let (mut runner, actor_ref, stop_sender) =
             ActorRunner::create(path.clone(), actor, parent_error_sender);
 
-        // Atomically check+insert under the same write lock to avoid
-        // concurrent duplicate creations for the same path.
-        {
-            let mut actors = self.actors.write().await;
-            if actors.contains_key(&path) {
+        // Atomically check+insert to avoid concurrent duplicate creations
+        // for the same path.
+        match self.actors.entry(path.clone()) {
+            dashmap::Entry::Occupied(_) => {
                 debug!(path = %path, "Actor already exists");
                 return Err(Error::Exists { path });
             }
-            actors.insert(path.clone(), Box::new(actor_ref.clone()));
+            dashmap::Entry::Vacant(e) => {
+                e.insert(Box::new(actor_ref.clone()));
+            }
         }
         self.index_actor(&path).await;
 
@@ -378,9 +378,7 @@ impl SystemRef {
     }
 
     pub(crate) async fn remove_actor(&self, path: &ActorPath) {
-        let mut actors = self.actors.write().await;
-        let removed = actors.remove(path).is_some();
-        drop(actors);
+        let removed = self.actors.remove(path).is_some();
         if removed {
             self.deindex_actor(path).await;
         }
@@ -408,13 +406,9 @@ impl SystemRef {
     /// Returns the paths of all currently registered direct children of the actor at `path`.
     pub async fn children(&self, path: &ActorPath) -> Vec<ActorPath> {
         self.child_index
-            .read()
-            .await
             .get(path)
-            .into_iter()
-            .flat_map(|children| children.iter())
-            .cloned()
-            .collect()
+            .map(|children| children.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
     }
 
     /// Stores a shared resource (e.g. a database pool or config object) under `name` for retrieval by any actor.
@@ -422,8 +416,7 @@ impl SystemRef {
     where
         H: Any + Send + Sync + Clone + 'static,
     {
-        let mut helpers = self.helpers.write().await;
-        helpers.insert(name.to_owned(), Box::new(helper));
+        self.helpers.insert(name.to_owned(), Box::new(helper));
     }
 
     /// Returns the helper stored under `name`, or `None` if not found or if the type does not match.
@@ -431,11 +424,9 @@ impl SystemRef {
     where
         H: Any + Send + Sync + Clone + 'static,
     {
-        let helpers = self.helpers.read().await;
-        helpers
+        self.helpers
             .get(name)
-            .and_then(|any| any.downcast_ref::<H>())
-            .cloned()
+            .and_then(|any| any.value().downcast_ref::<H>().cloned())
     }
 
     /// Spawns a [`Sink`] in a background Tokio task so it processes actor events asynchronously.

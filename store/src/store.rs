@@ -289,15 +289,15 @@ where
     async fn start_store<C: Collection, S: State>(
         &mut self,
         name: &str,
-        prefix: Option<String>,
+        prefix: Option<&str>,
         ctx: &mut ActorContext<Self>,
         manager: impl DbManager<C, S>,
         key_box: Option<EncryptedKey>,
     ) -> Result<(), ActorError> {
-        let prefix = prefix.unwrap_or_else(|| ctx.path().key().to_owned());
+        let prefix = prefix.unwrap_or_else(|| ctx.path().key());
 
         let store =
-            Store::<Self>::new(name, &prefix, manager, key_box, self.clone())
+            Store::<Self>::new(name, prefix, manager, key_box, self.clone())
                 .map_err(|e| actor_store_error(StoreOperation::StoreInit, e))?;
         let store = ctx.create_child("store", store).await?;
         let response = store.ask(StoreCommand::Recover).await?;
@@ -468,15 +468,23 @@ where
     }
 
     fn compact_to_snapshot(&mut self) -> Result<(), Error> {
-        for idx in self.compacted_until..self.state_counter {
-            let key = format!("{:020}", idx);
-            match self.events.del(&key) {
-                Ok(()) | Err(Error::EntryNotFound { .. }) => {
-                    self.compacted_until = idx + 1;
-                }
-                Err(err) => return Err(err),
-            }
+        if self.compacted_until >= self.state_counter {
+            return Ok(());
         }
+
+        let start_key = format!("{:020}", self.compacted_until);
+        let end_key = format!("{:020}", self.state_counter.saturating_sub(1));
+
+        match self.events.del_range(&start_key, &end_key) {
+            Ok(()) => {
+                self.compacted_until = self.state_counter;
+            }
+            Err(Error::EntryNotFound { .. }) => {
+                self.compacted_until = self.state_counter;
+            }
+            Err(err) => return Err(err),
+        }
+
         Ok(())
     }
 
@@ -616,23 +624,17 @@ where
 
         let from_key = format!("{:020}", from);
         let to_key = format!("{:020}", to);
-        let mut events = Vec::new();
+        let expected = (to - from + 1) as usize;
+        let mut events = Vec::with_capacity(expected);
 
         let iter = self
             .events
-            .iter(false)
+            .iter_range(&from_key, &to_key, false)
             .map_err(|e| store_error(StoreOperation::GetEventsRange, e))?;
 
         for item in iter {
-            let (key, data) = item
+            let (_, data) = item
                 .map_err(|e| store_error(StoreOperation::GetEventsRange, e))?;
-
-            if key < from_key {
-                continue;
-            }
-            if key > to_key {
-                break;
-            }
 
             let data = self.maybe_decrypt(data)?;
 
@@ -644,7 +646,6 @@ where
             events.push(event);
         }
 
-        let expected = (to - from + 1) as usize;
         if events.len() != expected {
             return Err(store_error(
                 StoreOperation::GetEventsRange,
@@ -932,7 +933,10 @@ where
 
         // Prepend nonce to ciphertext for storage
         // Format: [nonce (24 bytes) || ciphertext || poly1305_tag (16 bytes)]
-        Ok([nonce.to_vec(), ciphertext].concat())
+        let mut out = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
     }
 
     /// Decrypts a XChaCha20-Poly1305 ciphertext produced by [`encrypt`](Store::encrypt).
