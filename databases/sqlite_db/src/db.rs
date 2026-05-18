@@ -15,8 +15,7 @@ use tracing::{debug, error, info};
 use std::{
     collections::VecDeque,
     path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
 };
 use std::{fs, path::Path};
 
@@ -48,13 +47,21 @@ pub struct SqliteManager {
 /// more than `max_size` idle connections. This matches the actor model where
 /// database access is sporadic — actors keep state in memory and only touch
 /// persistence during recovery, persist, or snapshot.
+///
+/// Creation is also bounded: if `max_size` connections already exist (idle or
+/// checked-out), `checkout` blocks until a connection is returned.
 struct SqlitePool {
     path: PathBuf,
     durability: bool,
     tuning: SqliteTuning,
     max_size: usize,
-    available: Mutex<Vec<Connection>>,
-    total: AtomicUsize,
+    state: Mutex<PoolState>,
+    condvar: Condvar,
+}
+
+struct PoolState {
+    available: Vec<Connection>,
+    total: usize,
 }
 
 /// A connection checked out from the pool.
@@ -96,26 +103,45 @@ impl Drop for PooledConnection {
 }
 
 impl SqlitePool {
-    /// Obtains a connection from the pool, creating a new one if necessary.
+    /// Obtains a connection from the pool, creating a new one only if the
+    /// total number of connections (idle + checked-out) is below `max_size`.
     fn checkout(self: &Arc<Self>) -> Result<PooledConnection, Error> {
-        // Reuse an idle connection if one exists.
-        let mut available =
-            self.available.lock().map_err(|e| Error::Store {
+        let mut state = self.state.lock().map_err(|e| Error::Store {
+            operation: StoreOperation::LockManagerData,
+            reason: format!("connection pool mutex poisoned: {}", e),
+        })?;
+
+        // Wait until an idle connection is available or we have a free slot.
+        while state.available.is_empty() && state.total >= self.max_size {
+            state = self.condvar.wait(state).map_err(|e| Error::Store {
                 operation: StoreOperation::LockManagerData,
-                reason: format!("connection pool mutex poisoned: {}", e),
+                reason: format!("connection pool condvar poisoned: {}", e),
             })?;
-        if let Some(conn) = available.pop() {
-            drop(available);
+        }
+
+        if let Some(conn) = state.available.pop() {
             return Ok(PooledConnection {
                 conn: Some(conn),
                 pool: self.clone(),
             });
         }
-        drop(available);
 
-        // No idle connection available — open a fresh one.
-        let conn = open_with_tuning(&self.path, self.durability, self.tuning)?;
-        self.total.fetch_add(1, Ordering::Relaxed);
+        // We have a slot to create a new connection.
+        state.total += 1;
+        drop(state);
+
+        let conn = match open_with_tuning(&self.path, self.durability, self.tuning) {
+            Ok(conn) => conn,
+            Err(e) => {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                state.total -= 1;
+                self.condvar.notify_one();
+                return Err(e);
+            }
+        };
 
         Ok(PooledConnection {
             conn: Some(conn),
@@ -126,16 +152,14 @@ impl SqlitePool {
     /// Returns a connection to the idle set, discarding it if the pool is
     /// already at capacity.
     fn checkin(&self, conn: Connection) {
-        // If the mutex is poisoned we cannot return the connection to the pool;
-        // just drop it so we don't panic inside Drop.
-        if let Ok(mut available) = self.available.lock()
-            && available.len() < self.max_size
-        {
-            available.push(conn);
-            return;
+        let mut state =
+            self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.available.len() < self.max_size {
+            state.available.push(conn);
+        } else {
+            state.total -= 1;
         }
-        self.total.fetch_sub(1, Ordering::Relaxed);
-        // Connection is dropped here.
+        self.condvar.notify_one();
     }
 }
 
@@ -215,9 +239,10 @@ impl SqliteManager {
             Error::CreateStore { reason: format!("fail SQLite open connection: {}", e) }
         })?;
 
-        // Pool size: 2× vCPU, clamped between 4 and 32.  This gives enough
-        // headroom for concurrent reads while keeping memory / fd usage bounded.
-        let max_size = (spec.cpu_cores * 2).clamp(4, 32);
+        // Pool size: 1× vCPU, clamped between 4 and 16. SQLite is single-writer
+        // and each connection carries its own page cache, so excess connections
+        // hurt more than help.
+        let max_size = spec.cpu_cores.clamp(4, 16);
         info!("SQLite connection pool size: {}", max_size);
 
         let pool = Arc::new(SqlitePool {
@@ -225,8 +250,11 @@ impl SqliteManager {
             durability,
             tuning,
             max_size,
-            available: Mutex::new(Vec::new()),
-            total: AtomicUsize::new(0),
+            state: Mutex::new(PoolState {
+                available: Vec::new(),
+                total: 0,
+            }),
+            condvar: Condvar::new(),
         });
 
         debug!("SQLite database manager created successfully");
