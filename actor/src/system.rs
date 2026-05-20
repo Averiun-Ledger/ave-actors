@@ -478,6 +478,7 @@ impl SystemRunner {
 mod tests {
 
     use super::*;
+    use async_trait::async_trait;
     use test_log::test;
 
     #[test(tokio::test)]
@@ -490,6 +491,76 @@ mod tests {
         system.add_helper("test", helper).await;
         let helper: Option<TestHelper> = system.get_helper("test").await;
         assert_eq!(helper, Some(TestHelper { value: 42 }));
+    }
+
+    #[test(tokio::test)]
+    async fn test_system_runner_channel_closed() {
+        let (event_sender, event_receiver) = tokio::sync::mpsc::channel(4);
+        let mut runner = SystemRunner::new(event_receiver);
+        drop(event_sender);
+        let reason = runner.run().await;
+        assert_eq!(reason, ShutdownReason::Graceful);
+    }
+
+    #[test(tokio::test)]
+    async fn test_run_sink() {
+        let (system, _) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let (tx, rx) = tokio::sync::broadcast::channel(1);
+        let sink = crate::sink::Sink::new(rx, DummySubscriber);
+        system.run_sink(sink).await;
+        let _ = tx.send(());
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_system_runner_actor_error_event() {
+        let (event_sender, event_receiver) = tokio::sync::mpsc::channel(4);
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let mut runner = SystemRunner::new(event_receiver);
+        let system_clone = system.clone();
+        tokio::spawn(async move {
+            system_clone.publish_system_event(SystemEvent::ActorError {
+                path: ActorPath::from("/user/test"),
+                error: crate::Error::Functional {
+                    description: "test error".to_owned(),
+                },
+            });
+            system_clone.stop_system();
+        });
+        let reason = runner.run().await;
+        assert_eq!(reason, ShutdownReason::Graceful);
+    }
+
+    #[test(tokio::test)]
+    async fn test_system_runner_crash() {
+        let (event_sender, event_receiver) = tokio::sync::mpsc::channel(4);
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let mut runner = SystemRunner::new(event_receiver);
+        let system_clone = system.clone();
+        tokio::spawn(async move {
+            system_clone.crash_system();
+        });
+        let reason = runner.run().await;
+        assert_eq!(reason, ShutdownReason::Crash);
+    }
+
+    #[derive(Clone)]
+    struct DummySubscriber;
+
+    #[async_trait]
+    impl crate::sink::Subscriber<()> for DummySubscriber {
+        async fn notify(&self, _event: ()) {}
     }
 
     #[derive(Debug, Clone, PartialEq)]

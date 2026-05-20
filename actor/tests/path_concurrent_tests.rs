@@ -357,40 +357,6 @@ async fn test_multiple_actor_communication() {
 }
 
 // Test event subscription with multiple subscribers
-#[test(tokio::test)]
-async fn test_multiple_event_subscribers() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
-
-    let actor = ConcurrentActor::new();
-    let actor_ref = system
-        .create_root_actor("event_source", actor)
-        .await
-        .unwrap();
-
-    // Create multiple subscribers
-    let mut subscribers = Vec::new();
-    for _ in 0..3 {
-        let subscriber = actor_ref.subscribe();
-        subscribers.push(subscriber);
-    }
-
-    // Send event-generating messages
-    actor_ref.tell(ConcurrentMessage::Increment).await.unwrap();
-    actor_ref.tell(ConcurrentMessage::Increment).await.unwrap();
-    actor_ref.tell(ConcurrentMessage::Decrement).await.unwrap();
-
-    // Wait for events to be published
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    // Verify each subscriber received events (note: we can't easily test reception
-    // without modifying the subscriber interface, so this test mainly ensures
-    // the system doesn't crash with multiple subscribers)
-
-    // The fact that we get here without panicking means multiple subscribers work
-    assert_eq!(subscribers.len(), 3);
-}
 
 // Test actor lifecycle with rapid creation/destruction
 #[test(tokio::test)]

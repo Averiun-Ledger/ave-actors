@@ -778,4 +778,40 @@ mod tests {
             .await
             .expect("retry actor should stop after exhausting retries");
     }
+
+    #[test(tokio::test)]
+    async fn test_retry_end_with_pending_retry() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+
+        let retry_actor = RetryActor::new(
+            CountingTarget {
+                deliveries: Arc::new(AtomicUsize::new(0)),
+            },
+            CountMessage,
+            Strategy::FixedInterval(FixedIntervalStrategy::new(
+                5,
+                Duration::from_secs(10),
+            )),
+        );
+
+        let retry_ref: ActorRef<RetryActor<CountingTarget>> = system
+            .create_root_actor("retry_end_pending", retry_actor)
+            .await
+            .unwrap();
+
+        retry_ref.tell(RetryMessage::Retry).await.unwrap();
+        retry_ref.tell(RetryMessage::End).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), retry_ref.closed())
+            .await
+            .expect("retry actor should stop after End");
+    }
+
 }

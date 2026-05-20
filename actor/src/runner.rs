@@ -620,8 +620,11 @@ mod tests {
 
     use crate::{
         Error,
-        actor::{Actor, ActorContext, Event, Handler, Message},
-        supervision::{FixedIntervalStrategy, Strategy, SupervisionStrategy},
+        actor::{Actor, ActorContext, ChildError, Event, Handler, Message},
+        supervision::{
+            FixedIntervalStrategy, NoIntervalStrategy, Strategy,
+            SupervisionStrategy,
+        },
         system::SystemRef,
     };
     use async_trait::async_trait;
@@ -1048,5 +1051,539 @@ mod tests {
         // -> timeout fires
         let result = slow_join.await.unwrap();
         assert_eq!(result, Err(Error::ActorStopped));
+    }
+
+    // Actor that always fails pre_start with Retry strategy (1 retry).
+    #[derive(Debug, Clone)]
+    struct MaxRetriesActor;
+
+    impl crate::NotPersistentActor for MaxRetriesActor {}
+
+    #[async_trait]
+    impl Actor for MaxRetriesActor {
+        type Message = ();
+        type Response = ();
+        type Event = TestEvent;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("MaxRetriesActor", id = %id)
+        }
+
+        fn supervision_strategy() -> SupervisionStrategy {
+            SupervisionStrategy::Retry(Strategy::NoInterval(
+                NoIntervalStrategy::new(1),
+            ))
+        }
+
+        async fn pre_start(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Err(Error::FunctionalCritical {
+                description: "always fail".to_owned(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Handler<MaxRetriesActor> for MaxRetriesActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<MaxRetriesActor>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_max_retries_exceeded() {
+        let (event_sender, _) = mpsc::channel(100);
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/max_retries"),
+            MaxRetriesActor,
+            None,
+        );
+        let inner_system = system.clone();
+        let handle = tokio::spawn(async move {
+            runner
+                .init(
+                    inner_system,
+                    stop_sender,
+                    None,
+                    MaxRetriesActor::get_span("id", None),
+                )
+                .await;
+        });
+        tokio::time::timeout(Duration::from_secs(2), actor_ref.closed())
+            .await
+            .expect("actor should stop after max retries exceeded");
+        handle.await.unwrap();
+    }
+
+    // Actor with Stop supervision that emits fail in pre_start.
+    #[derive(Debug, Clone)]
+    struct StopStrategyActor;
+
+    impl crate::NotPersistentActor for StopStrategyActor {}
+
+    #[async_trait]
+    impl Actor for StopStrategyActor {
+        type Message = ();
+        type Response = ();
+        type Event = TestEvent;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("StopStrategyActor", id = %id)
+        }
+
+        fn supervision_strategy() -> SupervisionStrategy {
+            SupervisionStrategy::Stop
+        }
+
+        async fn pre_start(
+            &mut self,
+            ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            ctx.emit_fail(Error::FunctionalCritical {
+                description: "fail".to_owned(),
+            })
+            .await?;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Handler<StopStrategyActor> for StopStrategyActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<StopStrategyActor>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_apply_stop_strategy() {
+        let (event_sender, _) = mpsc::channel(100);
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/stop_strategy"),
+            StopStrategyActor,
+            None,
+        );
+        let inner_system = system.clone();
+        let handle = tokio::spawn(async move {
+            runner
+                .init(
+                    inner_system,
+                    stop_sender,
+                    None,
+                    StopStrategyActor::get_span("id", None),
+                )
+                .await;
+        });
+        tokio::time::timeout(Duration::from_secs(2), actor_ref.closed())
+            .await
+            .expect("actor should stop with stop strategy");
+        handle.await.unwrap();
+    }
+
+    // Simple actor for mailbox-close test.
+    #[derive(Debug, Clone)]
+    struct SimpleRunningActor;
+
+    impl crate::NotPersistentActor for SimpleRunningActor {}
+
+    #[async_trait]
+    impl Actor for SimpleRunningActor {
+        type Message = ();
+        type Response = ();
+        type Event = TestEvent;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("SimpleRunningActor", id = %id)
+        }
+    }
+
+    #[async_trait]
+    impl Handler<SimpleRunningActor> for SimpleRunningActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<SimpleRunningActor>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_mailbox_closed_stops_actor() {
+        let (event_sender, _) = mpsc::channel(100);
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/simple"),
+            SimpleRunningActor,
+            None,
+        );
+        let inner_system = system.clone();
+        let handle = tokio::spawn(async move {
+            runner
+                .init(
+                    inner_system,
+                    stop_sender,
+                    None,
+                    SimpleRunningActor::get_span("id", None),
+                )
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(actor_ref);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("actor task should finish when mailbox closes")
+            .unwrap();
+    }
+
+    // ========== inner_handle with parent responding Restart ==========
+
+    #[test(tokio::test)]
+    async fn test_inner_handle_fail_parent_restart() {
+        let (event_sender, _) = mpsc::channel(100);
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let (parent_sender, mut parent_receiver) =
+            mpsc::channel::<ChildError>(1);
+        let (mut runner, _actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/fail_parent_restart"),
+            SimpleRunningActor,
+            Some(parent_sender),
+        );
+
+        let responder = tokio::spawn(async move {
+            if let Some(ChildError::Fault { sender, .. }) =
+                parent_receiver.recv().await
+            {
+                let _ = sender.send(ChildAction::Restart);
+            }
+        });
+
+        let mut ctx = ActorContext::new(
+            stop_sender,
+            runner.path.clone(),
+            system,
+            runner.error_sender.clone(),
+            runner.inner_sender.clone(),
+            info_span!("test"),
+        );
+
+        runner
+            .inner_handle(
+                InnerAction::Fail(Error::FunctionalCritical {
+                    description: "test".into(),
+                }),
+                &mut ctx,
+            )
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(1), responder)
+            .await
+            .expect("responder should finish")
+            .expect("responder should not panic");
+
+        assert_eq!(runner.lifecycle, ActorLifecycle::Restarted);
+    }
+
+    #[test(tokio::test)]
+    async fn test_inner_handle_fail_parent_stop() {
+        let (event_sender, _) = mpsc::channel(100);
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let (parent_sender, mut parent_receiver) =
+            mpsc::channel::<ChildError>(1);
+        let (mut runner, _actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/fail_parent_stop"),
+            SimpleRunningActor,
+            Some(parent_sender),
+        );
+
+        let responder = tokio::spawn(async move {
+            if let Some(ChildError::Fault { sender, .. }) =
+                parent_receiver.recv().await
+            {
+                let _ = sender.send(ChildAction::Stop);
+            }
+        });
+
+        let mut ctx = ActorContext::new(
+            stop_sender,
+            runner.path.clone(),
+            system,
+            runner.error_sender.clone(),
+            runner.inner_sender.clone(),
+            info_span!("test"),
+        );
+
+        runner
+            .inner_handle(
+                InnerAction::Fail(Error::FunctionalCritical {
+                    description: "test".into(),
+                }),
+                &mut ctx,
+            )
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(1), responder)
+            .await
+            .expect("responder should finish")
+            .expect("responder should not panic");
+
+        assert_ne!(runner.lifecycle, ActorLifecycle::Restarted);
+    }
+
+    #[test(tokio::test)]
+    async fn test_inner_handle_error_no_parent_publishes_system_event() {
+        let system = SystemRef::new(
+            mpsc::channel(100).0,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let mut system_events = system.subscribe_system_events();
+        let (mut runner, _actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/error_no_parent"),
+            SimpleRunningActor,
+            None,
+        );
+        let mut ctx = ActorContext::new(
+            stop_sender,
+            runner.path.clone(),
+            system,
+            runner.error_sender.clone(),
+            runner.inner_sender.clone(),
+            info_span!("test"),
+        );
+        runner
+            .inner_handle(
+                InnerAction::Error(Error::Functional {
+                    description: "test".into(),
+                }),
+                &mut ctx,
+            )
+            .await;
+        let event = system_events.try_recv();
+        assert!(event.is_ok(), "system event should be published");
+    }
+
+    // ========== pre_restart error path ==========
+
+    #[derive(Debug, Clone)]
+    struct PreRestartErrorActor;
+
+    impl crate::NotPersistentActor for PreRestartErrorActor {}
+
+    #[async_trait]
+    impl Actor for PreRestartErrorActor {
+        type Message = ();
+        type Response = ();
+        type Event = TestEvent;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("PreRestartErrorActor", id = %id)
+        }
+
+        fn supervision_strategy() -> SupervisionStrategy {
+            SupervisionStrategy::Retry(Strategy::NoInterval(
+                NoIntervalStrategy::new(3),
+            ))
+        }
+
+        async fn pre_start(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Err(Error::FunctionalCritical {
+                description: "pre_start fail".to_owned(),
+            })
+        }
+
+        async fn pre_restart(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+            _error: Option<&Error>,
+        ) -> Result<(), Error> {
+            Err(Error::FunctionalCritical {
+                description: "pre_restart fail".to_owned(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Handler<PreRestartErrorActor> for PreRestartErrorActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<PreRestartErrorActor>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_pre_restart_error() {
+        let (event_sender, _) = mpsc::channel(100);
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/pre_restart_err"),
+            PreRestartErrorActor,
+            None,
+        );
+        let inner_system = system.clone();
+        let handle = tokio::spawn(async move {
+            runner
+                .init(
+                    inner_system,
+                    stop_sender,
+                    None,
+                    PreRestartErrorActor::get_span("id", None),
+                )
+                .await;
+        });
+        tokio::time::timeout(Duration::from_secs(2), actor_ref.closed())
+            .await
+            .expect("actor should stop after max retries exceeded");
+        handle.await.unwrap();
+    }
+
+    // ========== Retry strategy success path ==========
+
+    #[derive(Debug, Clone)]
+    struct RetryOnceActor {
+        failed: Arc<Mutex<bool>>,
+    }
+
+    impl crate::NotPersistentActor for RetryOnceActor {}
+
+    #[async_trait]
+    impl Actor for RetryOnceActor {
+        type Message = ();
+        type Response = ();
+        type Event = TestEvent;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("RetryOnceActor", id = %id)
+        }
+
+        fn supervision_strategy() -> SupervisionStrategy {
+            SupervisionStrategy::Retry(Strategy::NoInterval(
+                NoIntervalStrategy::new(3),
+            ))
+        }
+
+        async fn pre_start(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            let mut guard = self.failed.lock().await;
+            if *guard {
+                *guard = false;
+                Err(Error::FunctionalCritical {
+                    description: "fail once".into(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Handler<RetryOnceActor> for RetryOnceActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<RetryOnceActor>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_apply_retry_strategy_success() {
+        let (event_sender, _) = mpsc::channel(100);
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let actor = RetryOnceActor {
+            failed: Arc::new(Mutex::new(true)),
+        };
+        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/retry_success"),
+            actor,
+            None,
+        );
+        let inner_system = system.clone();
+        let handle = tokio::spawn(async move {
+            runner
+                .init(
+                    inner_system,
+                    stop_sender,
+                    None,
+                    RetryOnceActor::get_span("id", None),
+                )
+                .await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        actor_ref.tell_stop().await;
+
+        tokio::time::timeout(Duration::from_secs(2), actor_ref.closed())
+            .await
+            .expect("actor should stop");
+        handle.await.unwrap();
     }
 }

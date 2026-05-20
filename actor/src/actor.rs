@@ -734,4 +734,88 @@ mod test {
         actor_ref.ask_stop().await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
+
+    #[test(tokio::test)]
+    async fn test_publish_event_after_stop() {
+        let (event_sender, _event_receiver) = mpsc::channel(100);
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let (stop_sender, _stop_receiver) = mpsc::channel(1);
+        let (error_sender, _error_receiver) = mpsc::channel(1);
+        let (inner_sender, inner_receiver) = mpsc::channel(1);
+        drop(inner_receiver);
+        let ctx = ActorContext::<TestActor>::new(
+            stop_sender,
+            ActorPath::from("/user/test"),
+            system,
+            error_sender,
+            inner_sender,
+            info_span!("test"),
+        );
+        let result = ctx.publish_event(TestEvent(1)).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::SendEvent { .. }));
+    }
+
+    #[test(tokio::test)]
+    async fn test_emit_error_channel_closed() {
+        let (event_sender, _event_receiver) = mpsc::channel(100);
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let (stop_sender, _stop_receiver) = mpsc::channel(1);
+        let (error_sender, _error_receiver) = mpsc::channel(1);
+        let (inner_sender, inner_receiver) = mpsc::channel(1);
+        drop(inner_receiver);
+        let mut ctx = ActorContext::<TestActor>::new(
+            stop_sender,
+            ActorPath::from("/user/test"),
+            system,
+            error_sender,
+            inner_sender,
+            info_span!("test"),
+        );
+        let result = ctx
+            .emit_error(Error::Functional {
+                description: "test".to_owned(),
+            })
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::Send { .. }));
+    }
+
+    #[test(tokio::test)]
+    async fn test_emit_fail_channel_closed() {
+        let (event_sender, _event_receiver) = mpsc::channel(100);
+        let system = SystemRef::new(
+            event_sender,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let (stop_sender, _stop_receiver) = mpsc::channel(1);
+        let (error_sender, _error_receiver) = mpsc::channel(1);
+        let (inner_sender, inner_receiver) = mpsc::channel(1);
+        drop(inner_receiver);
+        let mut ctx = ActorContext::<TestActor>::new(
+            stop_sender,
+            ActorPath::from("/user/test"),
+            system,
+            error_sender,
+            inner_sender,
+            info_span!("test"),
+        );
+        let result = ctx
+            .emit_fail(Error::FunctionalCritical {
+                description: "test".to_owned(),
+            })
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::Send { .. }));
+    }
+
 }

@@ -335,4 +335,21 @@ mod tests {
         println!("{}", &child);
         assert!(path.is_parent_of(&child))
     }
+
+    #[test]
+    fn test_div_with_slashes() {
+        let path = ActorPath::from("/acme");
+        let child = path / "building/room";
+        assert_eq!(child.level(), 3);
+        assert_eq!(child.key(), "room");
+    }
+
+    #[test]
+    fn test_serde_roundtrip() {
+        let path = ActorPath::from("/acme/building/room");
+        let json = serde_json::to_string(&path).unwrap();
+        let decoded: ActorPath = serde_json::from_str(&json).unwrap();
+        assert_eq!(path, decoded);
+    }
+
 }

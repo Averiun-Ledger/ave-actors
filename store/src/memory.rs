@@ -292,8 +292,33 @@ impl Collection for MemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::{Collection, State};
     use crate::test_store_trait;
     test_store_trait! {
         unit_test_memory_manager:crate::memory::MemoryManager:MemoryStore
+    }
+
+    #[test]
+    fn test_state_del_not_found() {
+        let manager = MemoryManager::default();
+        let mut state = manager.create_state("test", "test").unwrap();
+        assert_eq!(
+            State::del(&mut state),
+            Err(Error::EntryNotFound {
+                key: "test".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn test_collection_del_not_found() {
+        let manager = MemoryManager::default();
+        let mut collection = manager.create_collection("test", "test").unwrap();
+        assert_eq!(
+            Collection::del(&mut collection, "missing"),
+            Err(Error::EntryNotFound {
+                key: "test.missing".to_owned()
+            })
+        );
     }
 }

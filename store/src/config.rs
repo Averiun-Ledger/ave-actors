@@ -141,3 +141,34 @@ pub fn detect_cpu_cores() -> usize {
         .map(|n| n.get())
         .unwrap_or(1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_spec_profile() {
+        let spec =
+            resolve_spec(Some(MachineSpec::Profile(MachineProfile::Small)));
+        assert_eq!(spec.ram_mb, 2048);
+        assert_eq!(spec.cpu_cores, 2);
+    }
+
+    #[test]
+    fn test_resolve_spec_custom() {
+        let spec = resolve_spec(Some(MachineSpec::Custom {
+            ram_mb: 1024,
+            cpu_cores: 4,
+        }));
+        assert_eq!(spec.ram_mb, 1024);
+        assert_eq!(spec.cpu_cores, 4);
+    }
+
+    #[test]
+    fn test_resolve_spec_none() {
+        let spec = resolve_spec(None);
+        assert!(spec.ram_mb > 0);
+        assert!(spec.cpu_cores > 0);
+    }
+
+}

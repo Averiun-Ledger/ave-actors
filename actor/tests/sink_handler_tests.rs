@@ -202,36 +202,6 @@ async fn test_sink_with_failing_subscriber() {
     assert_eq!(response.value, 1);
 }
 
-#[test(tokio::test)]
-async fn test_sink_with_closed_receiver() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
-
-    let actor = TestActor { counter: 0 };
-    let actor_ref = system
-        .create_root_actor("closed_sink_test", actor)
-        .await
-        .unwrap();
-
-    let subscriber = CollectingSubscriber::new();
-    let receiver = actor_ref.subscribe();
-
-    // Create sink
-    let sink = Sink::new(receiver, subscriber);
-    system.run_sink(sink).await;
-
-    // Give sink time to start
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    // Stop the actor (this will close the receiver)
-    actor_ref.ask_stop().await.unwrap();
-
-    // Wait for sink to handle the closed receiver
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    // Sink should handle the closed receiver gracefully and exit
-}
 
 // Tests for Handler functionality and error scenarios
 

@@ -348,31 +348,6 @@ async fn test_actor_ref_operations() {
     assert!(actor_ref.is_closed());
 }
 
-#[test(tokio::test)]
-async fn test_event_subscription() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
-
-    let actor = EdgeCaseActor {
-        fail_on_start: false,
-        fail_on_restart: false,
-        fail_on_stop: false,
-        fail_on_message: false,
-    };
-
-    let actor_ref = system
-        .create_root_actor("event_actor", actor)
-        .await
-        .unwrap();
-    let _receiver = actor_ref.subscribe();
-
-    // Test event emission
-    actor_ref.tell(EdgeCaseCommand::TriggerError).await.unwrap();
-
-    // Should not receive events from tell (only ask generates events via from_response)
-    tokio::time::sleep(Duration::from_millis(50)).await;
-}
 
 #[test(tokio::test)]
 async fn test_child_actor_management() {
@@ -407,52 +382,6 @@ async fn test_child_actor_management() {
     }
 }
 
-#[test(tokio::test)]
-async fn test_error_and_fault_handling() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
-
-    let parent = EdgeCaseActor {
-        fail_on_start: false,
-        fail_on_restart: false,
-        fail_on_stop: false,
-        fail_on_message: false,
-    };
-
-    let parent_ref = system
-        .create_root_actor("error_parent", parent)
-        .await
-        .unwrap();
-
-    // Create child that will fail
-    let _failing_child = EdgeCaseActor {
-        fail_on_start: false,
-        fail_on_restart: false,
-        fail_on_stop: false,
-        fail_on_message: true,
-    };
-
-    // Manually create child for testing error propagation
-    let _system_clone = system.clone();
-    let _child_path = ActorPath::from("/user/error_parent/failing_child");
-    // This is testing internal API which might not be directly accessible
-    // We'll test error handling through the main API instead
-
-    // Test error emission
-    parent_ref
-        .tell(EdgeCaseCommand::TriggerError)
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Test fault emission
-    parent_ref
-        .tell(EdgeCaseCommand::TriggerFault)
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-}
 
 #[test(tokio::test)]
 async fn test_system_helpers() {

@@ -662,10 +662,13 @@ impl<'a> RocksDbIterator<'a> {
         let mut upper_bound = prefix_dot.clone();
         upper_bound.push(0xFF);
 
-        let handle = store.cf_handle(&name).ok_or_else(|| Error::Store {
-            operation: StoreOperation::ColumnAccess,
-            reason: "RocksDB column for the store does not exist.".to_owned(),
-        })?;
+        let Some(handle) = store.cf_handle(&name) else {
+            return Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                reason: "RocksDB column for the store does not exist."
+                    .to_owned(),
+            });
+        };
 
         let mode = if reverse {
             IteratorMode::From(&upper_bound, Direction::Reverse)
@@ -735,10 +738,13 @@ impl<'a> RocksDbRangeIterator<'a> {
         let start_key = format!("{}.{}", prefix, start).into_bytes();
         let end_key = format!("{}.{}", prefix, end).into_bytes();
 
-        let handle = store.cf_handle(&name).ok_or_else(|| Error::Store {
-            operation: StoreOperation::ColumnAccess,
-            reason: "RocksDB column for the store does not exist.".to_owned(),
-        })?;
+        let Some(handle) = store.cf_handle(&name) else {
+            return Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                reason: "RocksDB column for the store does not exist."
+                    .to_owned(),
+            });
+        };
 
         let mode = if reverse {
             IteratorMode::From(&end_key, Direction::Reverse)
@@ -824,4 +830,158 @@ mod tests {
     test_store_trait! {
         unit_test_rocksdb_manager:crate::db::RocksDbManager:RocksDbStore
     }
+
+    #[test]
+    fn test_missing_cf_state_and_collection() {
+        let manager = RocksDbManager::default();
+        let mut store = RocksDbStore {
+            name: "no_such_cf".to_owned(),
+            prefix: "pref".to_owned(),
+            store: manager.db.clone(),
+            strong_durability: false,
+        };
+
+        assert!(matches!(
+            State::get(&store),
+            Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            State::put(&mut store, b"x"),
+            Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            State::del(&mut store),
+            Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            State::purge(&mut store),
+            Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            Collection::last(&store),
+            Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::get(&store, "k"),
+            Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::put(&mut store, "k", b"v"),
+            Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::del(&mut store, "k"),
+            Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::purge(&mut store),
+            Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::iter(&store, false),
+            Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::iter_range(&store, "a", "z", false),
+            Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::del_range(&mut store, "a", "z"),
+            Err(Error::Store {
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_missing_cf_iterators() {
+        let manager = RocksDbManager::default();
+        let db = manager.db.clone();
+        assert!(
+            RocksDbIterator::new(
+                &db,
+                "missing".to_owned(),
+                "p".to_owned(),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            RocksDbRangeIterator::new(
+                &db,
+                "missing".to_owned(),
+                "p".to_owned(),
+                "a",
+                "z",
+                false
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_iterator_invalid_utf8() {
+        let manager = RocksDbManager::default();
+        let mut store = manager.create_collection("c", "pref").unwrap();
+        Collection::put(&mut store, "a", b"1").unwrap();
+
+        let handle = manager.db.cf_handle("c").unwrap();
+        let bad_key = b"pref.\xFE";
+        manager.db.put_cf(&handle, bad_key, b"bad").unwrap();
+
+        let mut iter = store.iter(false).unwrap();
+        assert_eq!(
+            iter.next().unwrap().unwrap(),
+            ("a".to_string(), b"1".to_vec())
+        );
+        let err = iter.next().unwrap().unwrap_err();
+        assert!(matches!(err, Error::Get { .. }));
+
+        let mut iter = store.iter(true).unwrap();
+        let err = iter.next().unwrap().unwrap_err();
+        assert!(matches!(err, Error::Get { .. }));
+    }
+
+    #[test]
+    fn test_ensure_cf_null_name_fails() {
+        let manager = RocksDbManager::default();
+        let result = manager.ensure_cf("test\0name");
+        assert!(result.is_err());
+    }
+
 }

@@ -1769,4 +1769,713 @@ mod tests {
             .unwrap();
         assert_eq!(data, decrypted.as_slice());
     }
+
+    #[test]
+    fn test_get_metadata_decode_error() {
+        let manager = MemoryManager::default();
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            manager.clone(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let mut metadata =
+            manager.create_state("store_metadata", "test").unwrap();
+        State::put(&mut metadata, b"not_borsh").unwrap();
+        let result = store.get_metadata();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_last_event_decode_error() {
+        let manager = MemoryManager::default();
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            manager.clone(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let mut events =
+            manager.create_collection("store_events", "test").unwrap();
+        Collection::put(&mut events, "00000000000000000000", b"not_borsh")
+            .unwrap();
+        let result = store.last_event();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_state_decode_error() {
+        let manager = MemoryManager::default();
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            manager.clone(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let mut states = manager.create_state("store_states", "test").unwrap();
+        State::put(&mut states, b"not_borsh").unwrap();
+        let result = store.get_state();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_events_gap_detection() {
+        let manager = MemoryManager::default();
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            manager.clone(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let mut events =
+            manager.create_collection("store_events", "test").unwrap();
+        let event_bytes = borsh::to_vec(&TestEvent(1)).unwrap();
+        Collection::put(&mut events, "00000000000000000000", &event_bytes)
+            .unwrap();
+        Collection::put(&mut events, "00000000000000000002", &event_bytes)
+            .unwrap();
+        let result = store.events(0, 2);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("gap detected"));
+    }
+
+    #[test]
+    fn test_events_decode_error() {
+        let manager = MemoryManager::default();
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            manager.clone(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let mut events =
+            manager.create_collection("store_events", "test").unwrap();
+        let event_bytes = borsh::to_vec(&TestEvent(1)).unwrap();
+        Collection::put(&mut events, "00000000000000000000", &event_bytes)
+            .unwrap();
+        Collection::put(&mut events, "00000000000000000001", b"not_borsh")
+            .unwrap();
+        let result = store.events(0, 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compact_to_snapshot() {
+        let manager = MemoryManager::default();
+        let mut store = Store::<TestActor>::new(
+            "store",
+            "test",
+            manager.clone(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        store.persist(&TestEvent(1)).unwrap();
+        store.persist(&TestEvent(2)).unwrap();
+        store.snapshot(&TestActor::create_initial(())).unwrap();
+        assert_eq!(store.state_counter, 2);
+        assert_eq!(store.compacted_until, 0);
+        store.compact_to_snapshot().unwrap();
+        assert_eq!(store.compacted_until, 2);
+        let events = manager.create_collection("store_events", "test").unwrap();
+        assert!(Collection::get(&events, "00000000000000000000").is_err());
+        assert!(Collection::get(&events, "00000000000000000001").is_err());
+    }
+
+    #[test]
+    fn test_purge() {
+        let manager = MemoryManager::default();
+        let mut store = Store::<TestActor>::new(
+            "store",
+            "test",
+            manager.clone(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        store.persist(&TestEvent(1)).unwrap();
+        store.snapshot(&TestActor::create_initial(())).unwrap();
+        store.purge().unwrap();
+        assert_eq!(store.event_counter, 0);
+        assert_eq!(store.state_counter, 0);
+    }
+
+    #[test]
+    fn test_decrypt_ciphertext_too_short() {
+        let key = EncryptedKey::new(&[0u8; 32]).unwrap();
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            Some(key.clone()),
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let result = store.decrypt(&key, b"short");
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Invalid ciphertext length"));
+    }
+
+    #[test]
+    fn test_decrypt_tampered() {
+        let key = EncryptedKey::new(&[0u8; 32]).unwrap();
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            Some(key.clone()),
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let encrypted = store.encrypt(&key, b"data").unwrap();
+        let mut tampered = encrypted.clone();
+        tampered[25] ^= 1;
+        let result = store.decrypt(&key, &tampered);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("tampering"));
+    }
+
+    #[test]
+    fn test_recover_no_snapshot_no_events() {
+        let mut store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let result = store.recover().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_recover_with_snapshot_no_pending() {
+        let mut store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        store.persist(&TestEvent(1)).unwrap();
+        store.snapshot(&TestActor::create_initial(())).unwrap();
+        let result = store.recover().unwrap();
+        assert!(result.is_some());
+        assert_eq!(store.event_counter, 1);
+        assert_eq!(store.state_counter, 1);
+    }
+
+    #[test]
+    fn test_recover_from_snapshot_with_mismatch() {
+        let mut store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        store.persist(&TestEvent(1)).unwrap();
+        store.snapshot(&TestActor::create_initial(())).unwrap();
+        store.persist(&TestEvent(2)).unwrap();
+        let result = store.recover().unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_snapshot_if_needed_light() {
+        let mut store = Store::<TestActorLight>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActorLight::create_initial(()),
+        )
+        .unwrap();
+        assert!(store.snapshot_if_needed().is_ok());
+    }
+
+    #[test]
+    fn test_snapshot_if_needed_no_events() {
+        let mut store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        assert!(store.snapshot_if_needed().is_ok());
+    }
+
+    #[test]
+    fn test_snapshot_if_needed_with_events() {
+        let mut store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        store.persist(&TestEvent(1)).unwrap();
+        assert!(store.snapshot_if_needed().is_ok());
+        assert_eq!(store.state_counter, 1);
+    }
+
+    #[test(tokio::test)]
+    async fn test_persist_full_event_snapshot_required() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let actor_ref = system.create_root_actor("store", store).await.unwrap();
+        let result = actor_ref
+            .ask(StoreCommand::PersistFullEvent {
+                event: TestEvent(1),
+                snapshot_every: Some(1),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(result, StoreResponse::SnapshotRequired));
+    }
+
+    #[test(tokio::test)]
+    async fn test_persist_full_success() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let actor_ref = system.create_root_actor("store", store).await.unwrap();
+        let result = actor_ref
+            .ask(StoreCommand::PersistFull {
+                event: TestEvent(1),
+                actor: TestActor::create_initial(()),
+                snapshot_every: Some(100),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(result, StoreResponse::Persisted));
+    }
+
+    #[test(tokio::test)]
+    async fn test_compact_success() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let actor_ref = system.create_root_actor("store", store).await.unwrap();
+        actor_ref
+            .ask(StoreCommand::Persist(TestEvent(1)))
+            .await
+            .unwrap();
+        actor_ref
+            .ask(StoreCommand::Snapshot(TestActor::create_initial(())))
+            .await
+            .unwrap();
+        let result = actor_ref.ask(StoreCommand::Compact).await.unwrap();
+        assert!(matches!(result, StoreResponse::Compacted));
+    }
+
+    #[test(tokio::test)]
+    async fn test_last_events_from_success() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let actor_ref = system.create_root_actor("store", store).await.unwrap();
+        actor_ref
+            .ask(StoreCommand::Persist(TestEvent(1)))
+            .await
+            .unwrap();
+        let result = actor_ref
+            .ask(StoreCommand::LastEventsFrom(0))
+            .await
+            .unwrap();
+        if let StoreResponse::Events(events) = result {
+            assert_eq!(events.len(), 1);
+        } else {
+            panic!("Expected Events");
+        }
+    }
+
+    #[test]
+    fn test_store_new_with_metadata() {
+        let manager = MemoryManager::default();
+        let mut metadata =
+            manager.create_state("store_metadata", "test").unwrap();
+        let meta = StoreMetadata {
+            next_event_index: 5,
+            compacted_until: 2,
+        };
+        let bytes = borsh::to_vec(&meta).unwrap();
+        State::put(&mut metadata, &bytes).unwrap();
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            manager,
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        assert_eq!(store.event_counter, 5);
+        assert_eq!(store.compacted_until, 2);
+    }
+
+    #[test(tokio::test)]
+    async fn test_handle_persist_success() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let actor_ref = system.create_root_actor("store", store).await.unwrap();
+        let result = actor_ref
+            .ask(StoreCommand::Persist(TestEvent(1)))
+            .await
+            .unwrap();
+        assert!(matches!(result, StoreResponse::Persisted));
+    }
+
+    #[test(tokio::test)]
+    async fn test_handle_persist_light_success() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+        let store = Store::<TestActorLight>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActorLight::create_initial(()),
+        )
+        .unwrap();
+        let actor_ref = system.create_root_actor("store", store).await.unwrap();
+        let result = actor_ref
+            .ask(StoreCommand::PersistLight(
+                TestEventLight(vec![1]),
+                TestActorLight::create_initial(()),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(result, StoreResponse::Persisted));
+    }
+
+    #[test(tokio::test)]
+    async fn test_handle_recover_success() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let actor_ref = system.create_root_actor("store", store).await.unwrap();
+        actor_ref
+            .ask(StoreCommand::Persist(TestEvent(1)))
+            .await
+            .unwrap();
+        let result = actor_ref.ask(StoreCommand::Recover).await.unwrap();
+        assert!(matches!(result, StoreResponse::State(Some(_))));
+    }
+
+    #[test(tokio::test)]
+    async fn test_handle_last_event_success() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+        let store = Store::<TestActor>::new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            TestActor::create_initial(()),
+        )
+        .unwrap();
+        let actor_ref = system.create_root_actor("store", store).await.unwrap();
+        actor_ref
+            .ask(StoreCommand::Persist(TestEvent(1)))
+            .await
+            .unwrap();
+        let result = actor_ref.ask(StoreCommand::LastEvent).await.unwrap();
+        assert!(matches!(result, StoreResponse::LastEvent(Some(_))));
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        Serialize,
+        Deserialize,
+        BorshSerialize,
+        BorshDeserialize,
+        Default,
+    )]
+    struct TestActorCompact {
+        value: i32,
+    }
+
+    #[derive(
+        Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+    )]
+    struct TestEventCompact(i32);
+    impl Event for TestEventCompact {}
+
+    #[async_trait]
+    impl Actor for TestActorCompact {
+        type Message = TestMessage;
+        type Event = TestEventCompact;
+        type Response = TestResponse;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("TestActorCompact", id = %id)
+        }
+
+        async fn pre_start(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), ActorError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Handler<TestActorCompact> for TestActorCompact {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: TestMessage,
+            _ctx: &mut ActorContext<TestActorCompact>,
+        ) -> Result<TestResponse, ActorError> {
+            Ok(TestResponse::None)
+        }
+    }
+
+    #[async_trait]
+    impl PersistentActor for TestActorCompact {
+        type Persistence = FullPersistence;
+        type InitParams = ();
+
+        fn create_initial(_: ()) -> Self {
+            Self { value: 0 }
+        }
+
+        fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+            self.value += event.0;
+            Ok(())
+        }
+
+        fn compact_on_snapshot() -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn test_snapshot_with_compaction() {
+        let manager = MemoryManager::default();
+        let mut store = Store::<TestActorCompact>::new(
+            "store",
+            "test",
+            manager.clone(),
+            None,
+            TestActorCompact::create_initial(()),
+        )
+        .unwrap();
+        store.persist(&TestEventCompact(1)).unwrap();
+        store.persist(&TestEventCompact(2)).unwrap();
+        store
+            .snapshot(&TestActorCompact::create_initial(()))
+            .unwrap();
+        assert_eq!(store.state_counter, 2);
+        assert_eq!(store.compacted_until, 2);
+        let events = manager.create_collection("store_events", "test").unwrap();
+        assert!(Collection::get(&events, "00000000000000000000").is_err());
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        Default,
+        Serialize,
+        Deserialize,
+        BorshSerialize,
+        BorshDeserialize,
+    )]
+    struct FailingApplyActor;
+
+    #[derive(
+        Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+    )]
+    struct FailingApplyEvent;
+    impl Event for FailingApplyEvent {}
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum FailingApplyResponse {
+        None,
+    }
+    impl Response for FailingApplyResponse {}
+
+    #[async_trait]
+    impl Actor for FailingApplyActor {
+        type Message = ();
+        type Event = FailingApplyEvent;
+        type Response = FailingApplyResponse;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("FailingApplyActor", id = %id)
+        }
+
+        async fn pre_start(
+            &mut self,
+            ctx: &mut ActorContext<Self>,
+        ) -> Result<(), ActorError> {
+            let db = Store::<Self>::new(
+                "store",
+                "test",
+                MemoryManager::default(),
+                None,
+                Self::create_initial(()),
+            )
+            .unwrap();
+            let _store = ctx.create_child("store", db).await.unwrap();
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl PersistentActor for FailingApplyActor {
+        type Persistence = FullPersistence;
+        type InitParams = ();
+
+        fn create_initial(_: ()) -> Self {
+            Self
+        }
+
+        fn apply(&mut self, _event: &Self::Event) -> Result<(), ActorError> {
+            Err(ActorError::Functional {
+                description: "apply fail".to_string(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Handler<FailingApplyActor> for FailingApplyActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            ctx: &mut ActorContext<FailingApplyActor>,
+        ) -> Result<FailingApplyResponse, ActorError> {
+            self.persist(&FailingApplyEvent, ctx).await?;
+            Ok(FailingApplyResponse::None)
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_persist_apply_failure() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+        let actor_ref = system
+            .create_root_actor("test", FailingApplyActor::initial(()))
+            .await
+            .unwrap();
+        let result = actor_ref.ask(()).await;
+        assert!(result.is_err());
+    }
+
 }

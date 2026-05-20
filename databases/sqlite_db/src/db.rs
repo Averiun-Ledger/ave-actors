@@ -130,18 +130,18 @@ impl SqlitePool {
         state.total += 1;
         drop(state);
 
-        let conn = match open_with_tuning(&self.path, self.durability, self.tuning) {
-            Ok(conn) => conn,
-            Err(e) => {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                state.total -= 1;
-                self.condvar.notify_one();
-                return Err(e);
-            }
-        };
+        let conn =
+            match open_with_tuning(&self.path, self.durability, self.tuning) {
+                Ok(conn) => conn,
+                Err(e) => {
+                    let mut state =
+                        self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    state.total -= 1;
+                    drop(state);
+                    self.condvar.notify_one();
+                    return Err(e);
+                }
+            };
 
         Ok(PooledConnection {
             conn: Some(conn),
@@ -152,13 +152,13 @@ impl SqlitePool {
     /// Returns a connection to the idle set, discarding it if the pool is
     /// already at capacity.
     fn checkin(&self, conn: Connection) {
-        let mut state =
-            self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.available.len() < self.max_size {
             state.available.push(conn);
         } else {
             state.total -= 1;
         }
+        drop(state);
         self.condvar.notify_one();
     }
 }
@@ -1050,4 +1050,170 @@ mod tests {
     test_store_trait! {
         unit_test_sqlite_manager:SqliteManager:SqliteCollection
     }
+
+    #[test]
+    fn test_open_with_tuning_bad_path() {
+        let result = open_with_tuning(
+            "/dev/null/invalid_sqlite_path",
+            false,
+            tuning_for_ram(1024),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pool_checkout_open_failure() {
+        let pool = Arc::new(SqlitePool {
+            path: PathBuf::from("/dev/null/invalid_sqlite_path"),
+            durability: false,
+            tuning: tuning_for_ram(1024),
+            max_size: 1,
+            state: Mutex::new(PoolState {
+                available: Vec::new(),
+                total: 0,
+            }),
+            condvar: Condvar::new(),
+        });
+
+        let result = pool.checkout();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_operations_with_broken_pool() {
+        let valid_path = PathBuf::from(create_temp_dir()).join("database.db");
+        let admin_conn =
+            open_with_tuning(&valid_path, false, tuning_for_ram(1024)).unwrap();
+
+        let pool = Arc::new(SqlitePool {
+            path: PathBuf::from("/dev/null/invalid_sqlite_path"),
+            durability: false,
+            tuning: tuning_for_ram(1024),
+            max_size: 1,
+            state: Mutex::new(PoolState {
+                available: Vec::new(),
+                total: 0,
+            }),
+            condvar: Condvar::new(),
+        });
+
+        let manager = SqliteManager {
+            admin_conn: Arc::new(Mutex::new(admin_conn)),
+            pool,
+        };
+
+        let mut collection =
+            SqliteCollection::new(manager.clone(), "test", "test");
+
+        assert!(Collection::get(&collection, "key").is_err());
+        assert!(Collection::put(&mut collection, "key", b"val").is_err());
+        assert!(Collection::del(&mut collection, "key").is_err());
+        assert!(Collection::purge(&mut collection).is_err());
+
+        // `iter`, `iter_range` and `last` are lazy: they only touch the pool
+        // when the iterator is consumed.  `iter()` and `iter_range()`
+        // themselves succeed even with a broken pool.
+        {
+            let mut iter = collection.iter(false).unwrap();
+            assert!(iter.next().unwrap().is_err());
+        }
+
+        {
+            let mut iter = collection.iter_range("a", "z", false).unwrap();
+            assert!(iter.next().unwrap().is_err());
+        }
+
+        assert!(Collection::del_range(&mut collection, "a", "z").is_err());
+
+        let mut state = SqliteCollection::new(manager, "state", "test");
+        assert!(State::get(&state).is_err());
+        assert!(State::put(&mut state, b"val").is_err());
+        assert!(State::del(&mut state).is_err());
+        assert!(State::purge(&mut state).is_err());
+    }
+
+    #[test]
+    fn test_new_create_dir_failure() {
+        // Use a read-only system path where directory creation will fail.
+        let result = SqliteManager::new(
+            &PathBuf::from("/sys/invalid_sqlite_dir"),
+            false,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_new_open_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("is_a_dir");
+        fs::create_dir(&db_path).unwrap();
+        // Make database.db a directory so the connection open fails.
+        fs::create_dir(db_path.join("database.db")).unwrap();
+
+        let result = SqliteManager::new(&db_path, false, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_open_with_tuning_readonly_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("readonly.db");
+        fs::write(&db_path, b"").unwrap();
+
+        let mut perms = fs::metadata(&db_path).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&db_path, perms).unwrap();
+
+        let result = open_with_tuning(&db_path, false, tuning_for_ram(1024));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_admin_conn_read_only() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("readonly_admin");
+        // Create a valid database file first.
+        {
+            let _ = SqliteManager::new(&db_path, false, None).unwrap();
+        }
+
+        let db_file = db_path.join("database.db");
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY;
+        let admin_conn = Connection::open_with_flags(&db_file, flags).unwrap();
+
+        let pool = Arc::new(SqlitePool {
+            path: db_file,
+            durability: false,
+            tuning: tuning_for_ram(1024),
+            max_size: 1,
+            state: Mutex::new(PoolState {
+                available: Vec::new(),
+                total: 0,
+            }),
+            condvar: Condvar::new(),
+        });
+
+        let mut manager = SqliteManager {
+            admin_conn: Arc::new(Mutex::new(admin_conn)),
+            pool,
+        };
+
+        assert!(manager.create_state("test", "test").is_err());
+        assert!(manager.create_collection("test", "test").is_err());
+        // `stop()` may succeed on a read-only connection because the
+        // PRAGMAs used are non-mutating or no-ops.
+        let _ = manager.stop();
+    }
+
+    #[test]
+    fn test_open_with_tuning_corrupt_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("corrupt.db");
+        fs::write(&db_path, b"THIS IS NOT A SQLITE DB").unwrap();
+
+        let result = open_with_tuning(&db_path, false, tuning_for_ram(1024));
+        assert!(result.is_err());
+    }
+
 }

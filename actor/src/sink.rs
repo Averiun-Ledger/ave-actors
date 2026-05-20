@@ -65,3 +65,5 @@ pub trait Subscriber<E: Event>: Send + Sync + 'static {
     /// Called for each event received from the actor's broadcast channel.
     async fn notify(&self, event: E);
 }
+
+
