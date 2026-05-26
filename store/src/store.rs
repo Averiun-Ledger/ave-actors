@@ -1053,6 +1053,8 @@ pub enum StoreCommand<P, E> {
     },
     /// Persist an event together with a snapshot of the supplied actor state.
     PersistLight(E, P),
+    /// Persist a batch of events atomically.
+    PersistBatch(Vec<E>),
     /// Snapshot the supplied actor state immediately.
     Snapshot(P),
     /// Remove event log entries already covered by the latest snapshot.
@@ -1229,6 +1231,16 @@ where
                     actor_store_error(StoreOperation::PersistLight, e)
                 })?;
                 debug!("Light persistence of event: {:?}", event);
+                Ok(StoreResponse::Persisted)
+            }
+            // Batch persistence of multiple events.
+            StoreCommand::PersistBatch(events) => {
+                for event in &events {
+                    self.persist(event).map_err(|e| {
+                        actor_store_error(StoreOperation::PersistBatch, e)
+                    })?;
+                }
+                debug!("Persisted batch of {} events", events.len());
                 Ok(StoreResponse::Persisted)
             }
             // Snapshot the state.

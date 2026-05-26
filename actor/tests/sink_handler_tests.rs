@@ -83,7 +83,7 @@ impl Handler<TestActor> for TestActor {
 // Test subscriber that collects events
 #[derive(Clone)]
 pub struct CollectingSubscriber {
-    pub events: Arc<Mutex<Vec<SinkTestEvent>>>,
+    pub events: Arc<Mutex<Vec<Arc<SinkTestEvent>>>>,
     pub should_fail: bool,
 }
 
@@ -103,13 +103,13 @@ impl CollectingSubscriber {
     }
 
     pub async fn get_events(&self) -> Vec<SinkTestEvent> {
-        self.events.lock().await.clone()
+        self.events.lock().await.iter().map(|e| (**e).clone()).collect()
     }
 }
 
 #[async_trait]
 impl Subscriber<SinkTestEvent> for CollectingSubscriber {
-    async fn notify(&self, event: SinkTestEvent) -> Result<(), Error> {
+    async fn notify(&self, event: Arc<SinkTestEvent>) -> Result<(), Error> {
         if self.should_fail {
             // Simulate subscriber failure
             return Err(Error::Functional {

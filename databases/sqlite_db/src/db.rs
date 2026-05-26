@@ -161,6 +161,21 @@ impl SqlitePool {
         drop(state);
         self.condvar.notify_one();
     }
+
+    /// Wait until all checked-out connections have been returned.
+    fn drain(&self) -> Result<(), Error> {
+        let mut state = self.state.lock().map_err(|e| Error::Store {
+            operation: StoreOperation::LockManagerData,
+            reason: format!("connection pool mutex poisoned: {}", e),
+        })?;
+        while state.total != state.available.len() {
+            state = self.condvar.wait(state).map_err(|e| Error::Store {
+                operation: StoreOperation::LockManagerData,
+                reason: format!("connection pool condvar poisoned: {}", e),
+            })?;
+        }
+        Ok(())
+    }
 }
 
 impl SqliteManager {
@@ -333,7 +348,11 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
     }
 
     fn stop(&mut self) -> Result<(), Error> {
-        debug!("Stopping SQLite manager, flushing WAL");
+        debug!("Stopping SQLite manager, draining pool and flushing WAL");
+        self.pool.drain().map_err(|e| {
+            error!(error = %e, "Failed to drain connection pool on stop");
+            e
+        })?;
         let conn = self.admin_conn.lock().map_err(|e| {
             error!(error = %e, "Failed to acquire connection lock on stop");
             Error::Store {

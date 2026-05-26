@@ -103,8 +103,8 @@ impl CollectingSubscriber {
 
 #[async_trait]
 impl Subscriber<TestEvent> for CollectingSubscriber {
-    async fn notify(&self, event: TestEvent) -> Result<(), Error> {
-        self.events.lock().await.push(event);
+    async fn notify(&self, event: Arc<TestEvent>) -> Result<(), Error> {
+        self.events.lock().await.push((*event).clone());
         Ok(())
     }
 }
@@ -116,7 +116,7 @@ struct SlowSubscriber {
 
 #[async_trait]
 impl Subscriber<TestEvent> for SlowSubscriber {
-    async fn notify(&self, _event: TestEvent) -> Result<(), Error> {
+    async fn notify(&self, _event: Arc<TestEvent>) -> Result<(), Error> {
         tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
         Ok(())
     }
@@ -139,7 +139,7 @@ impl FailingThenOkSubscriber {
 
 #[async_trait]
 impl Subscriber<TestEvent> for FailingThenOkSubscriber {
-    async fn notify(&self, _event: TestEvent) -> Result<(), Error> {
+    async fn notify(&self, _event: Arc<TestEvent>) -> Result<(), Error> {
         let current = self.fail_count.fetch_add(1, Ordering::SeqCst);
         if current < self.target_fails {
             Err(Error::Functional {
@@ -611,7 +611,7 @@ struct FailingSubscriber;
 
 #[async_trait]
 impl Subscriber<TestEvent> for FailingSubscriber {
-    async fn notify(&self, _event: TestEvent) -> Result<(), Error> {
+    async fn notify(&self, _event: Arc<TestEvent>) -> Result<(), Error> {
         Err(Error::Functional {
             description: "intentional failure".to_owned(),
         })
@@ -667,7 +667,7 @@ async fn test_sink_entry_remove_and_clear() {
     assert_eq!(removed.unwrap().id, "b");
     assert!(sink.remove_entry("b").is_none());
 
-    sink.send(TestEvent { id: 1 });
+    sink.send(Arc::new(TestEvent { id: 1 }));
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     assert_eq!(sub_a.drain().await.len(), 1);
@@ -676,7 +676,7 @@ async fn test_sink_entry_remove_and_clear() {
 
     // Clear all remaining entries.
     sink.clear();
-    sink.send(TestEvent { id: 2 });
+    sink.send(Arc::new(TestEvent { id: 2 }));
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     assert_eq!(sub_a.drain().await.len(), 0);

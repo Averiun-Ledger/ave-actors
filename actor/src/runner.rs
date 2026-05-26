@@ -279,7 +279,7 @@ where
                     self.drain_inner_actions(ctx).await;
 
                     // 4. Stop children.
-                    ctx.stop_childs().await;
+                    ctx.stop_children().await;
 
                     // Keep the actor registered while it restarts so lookups by path
                     // and pre-existing ActorRef handles remain valid.

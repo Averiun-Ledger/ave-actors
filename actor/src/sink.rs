@@ -32,7 +32,7 @@ pub trait Subscriber<E: Event>: Send + Sync + 'static {
     ///
     /// If this returns an error the sink applies the configured
     /// [`RetryPolicy`].
-    async fn notify(&self, event: E) -> Result<(), Error>;
+    async fn notify(&self, event: Arc<E>) -> Result<(), Error>;
 }
 
 /// Entry inside a [`Sink`] describing a single subscriber, its filter
@@ -138,14 +138,14 @@ impl<E: Event> Sink<E> {
     /// If a subscriber returns an error and has a retry policy, the sink
     /// retries with the configured backoff.  After exhausting retries (or if
     /// no retry is configured) the error is logged.
-    pub fn send(&self, event: E) {
+    pub fn send(&self, event: Arc<E>) {
         for entry in &self.entries {
             if !(entry.filter)(&event) {
                 continue;
             }
             let sink_name = self.name.clone();
             let entry = entry.clone();
-            let event = event.clone();
+            let event = Arc::clone(&event);
             tokio::spawn(async move {
                 match entry.retry {
                     RetryPolicy::None => {
@@ -161,7 +161,7 @@ impl<E: Event> Sink<E> {
                     RetryPolicy::AtMost { max, backoff } => {
                         let mut ok = false;
                         for attempt in 0..=max {
-                            match entry.subscriber.notify(event.clone()).await {
+                            match entry.subscriber.notify(Arc::clone(&event)).await {
                                 Ok(()) => {
                                     ok = true;
                                     break;

@@ -107,7 +107,7 @@ where
         self.system.get_actor(&self.path.parent()).await
     }
 
-    pub(crate) async fn stop_childs(&mut self) {
+    pub(crate) async fn stop_children(&mut self) {
         let child_count = self.child_senders.len();
         if child_count > 0 {
             tracing::debug!(child_count, "Stopping child actors");
@@ -170,7 +170,7 @@ where
     pub fn publish_to(&self, sink_name: impl AsRef<str>, event: A::Event) {
         let name = sink_name.as_ref();
         if let Some(entry) = self.sinks.get(name) {
-            entry.value().send(event);
+            entry.value().send(Arc::new(event));
         } else {
             tracing::debug!(sink = %name, "Sink not found, event dropped");
         }
@@ -179,8 +179,9 @@ where
     /// Send `event` to every registered sink (fire-and-forget).
     pub fn publish_all(&self, event: A::Event) {
         if !self.sinks.is_empty() {
+            let event = Arc::new(event);
             for entry in self.sinks.iter() {
-                entry.value().send(event.clone());
+                entry.value().send(Arc::clone(&event));
             }
         }
     }
@@ -192,9 +193,13 @@ where
         predicate: impl Fn(&str) -> bool,
         event: A::Event,
     ) {
+        if self.sinks.is_empty() {
+            return;
+        }
+        let event = Arc::new(event);
         for entry in self.sinks.iter() {
             if predicate(entry.key().as_str()) {
-                entry.value().send(event.clone());
+                entry.value().send(Arc::clone(&event));
             }
         }
     }
@@ -202,6 +207,7 @@ where
     /// Sends `event` to all registered sinks.
     ///
     /// This is an alias for [`Self::publish_all`].
+    #[deprecated(since = "0.6.0", note = "Use `publish_all` or `publish_to` instead")]
     pub fn publish_event(&self, event: A::Event) {
         self.publish_all(event);
     }
@@ -765,9 +771,9 @@ mod test {
 
     #[async_trait]
     impl Subscriber<TestEvent> for TestSubscriber {
-        async fn notify(&self, event: TestEvent) -> Result<(), Error> {
+        async fn notify(&self, event: Arc<TestEvent>) -> Result<(), Error> {
             assert!(event.0 > 0);
-            self.events.lock().await.push(event);
+            self.events.lock().await.push((*event).clone());
             Ok(())
         }
     }

@@ -241,8 +241,8 @@ impl CollectingChildSubscriber {
 
 #[async_trait]
 impl Subscriber<ChildEvent> for CollectingChildSubscriber {
-    async fn notify(&self, event: ChildEvent) -> Result<(), Error> {
-        self.events.lock().await.push(event);
+    async fn notify(&self, event: Arc<ChildEvent>) -> Result<(), Error> {
+        self.events.lock().await.push((*event).clone());
         Ok(())
     }
 }
@@ -262,8 +262,8 @@ impl CollectingParentSubscriber {
 
 #[async_trait]
 impl Subscriber<TestEvent> for CollectingParentSubscriber {
-    async fn notify(&self, event: TestEvent) -> Result<(), Error> {
-        self.events.lock().await.push(event);
+    async fn notify(&self, event: Arc<TestEvent>) -> Result<(), Error> {
+        self.events.lock().await.push((*event).clone());
         Ok(())
     }
 }

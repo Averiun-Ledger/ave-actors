@@ -79,7 +79,7 @@ impl RocksDbManager {
                 error!(path = %path.display(), error = %e, "Failed to create RocksDB directory");
                 Error::CreateStore {
                     reason: format!(
-                    "fail RockDB create directory: {}",
+                    "fail RocksDB create directory: {}",
                     e
                 ),
                 }
@@ -122,7 +122,7 @@ impl RocksDbManager {
         let db = DB::open_cf_descriptors(&options, path, cf_descriptors)
             .map_err(|e| {
                 error!(path = %path.display(), error = %e, "Failed to open RocksDB");
-                Error::CreateStore { reason: format!("Can not open RockDB: {}", e) }
+                Error::CreateStore { reason: format!("Can not open RocksDB: {}", e) }
             })?;
 
         debug!("RocksDB database manager created successfully");
