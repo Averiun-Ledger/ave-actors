@@ -68,7 +68,7 @@ impl Handler<TestActor> for TestActor {
         match msg {
             TestMessage::Emit(id, data) => {
                 self.counter += 1;
-                ctx.publish_event(SinkTestEvent { id, data }).await?;
+                ctx.publish_event(SinkTestEvent { id, data });
                 Ok(TestResponse {
                     value: self.counter,
                 })

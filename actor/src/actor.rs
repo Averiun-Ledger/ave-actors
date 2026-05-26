@@ -9,7 +9,7 @@ use crate::{
     system::SystemRef,
 };
 
-use tokio::sync::{broadcast::Receiver as EventReceiver, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
 use async_trait::async_trait;
 
@@ -35,7 +35,7 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     /// The error sender to send errors to the parent.
     error_sender: ChildErrorSender,
     /// Inner sender.
-    inner_sender: InnerSender<A>,
+    inner_sender: InnerSender,
     /// Child action senders.
     child_senders: HashMap<ActorPath, StopHandle>,
     /// Named sinks registered for this actor.
@@ -53,7 +53,7 @@ where
         path: ActorPath,
         system: SystemRef,
         error_sender: ChildErrorSender,
-        inner_sender: InnerSender<A>,
+        inner_sender: InnerSender,
         sinks: Arc<DashMap<String, Sink<A::Event>>>,
         span: Span,
     ) -> Self {
@@ -176,23 +176,13 @@ where
         }
     }
 
-    /// Send `event` to every registered sink (fire-and-forget) and also
-    /// broadcast it on the legacy event channel.
-    pub async fn publish_all(&self, event: A::Event) -> Result<(), Error> {
+    /// Send `event` to every registered sink (fire-and-forget).
+    pub fn publish_all(&self, event: A::Event) {
         if !self.sinks.is_empty() {
             for entry in self.sinks.iter() {
                 entry.value().send(event.clone());
             }
         }
-        self.inner_sender
-            .send(InnerAction::Event(event))
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to publish event");
-                Error::SendEvent {
-                    reason: e.to_string(),
-                }
-            })
     }
 
     /// Send `event` to sinks whose name satisfies `predicate`
@@ -209,13 +199,11 @@ where
         }
     }
 
-    /// Sends `event` to all registered sinks and the legacy broadcast
-    /// channel.
+    /// Sends `event` to all registered sinks.
     ///
-    /// This is an alias for [`Self::publish_all`] kept for backwards
-    /// compatibility.
-    pub async fn publish_event(&self, event: A::Event) -> Result<(), Error> {
-        self.publish_all(event).await
+    /// This is an alias for [`Self::publish_all`].
+    pub fn publish_event(&self, event: A::Event) {
+        self.publish_all(event);
     }
 
     /// Reports an error to this actor's parent so the parent can invoke `on_child_error`.
@@ -576,8 +564,6 @@ where
     path: ActorPath,
     /// The handle helper.
     sender: HandleHelper<A>,
-    /// The actor event receiver.
-    event_receiver: EventReceiver<<A as Actor>::Event>,
     /// The actor stop sender.
     stop_sender: StopSender,
     /// Named sinks registered for this actor.
@@ -592,14 +578,12 @@ where
         path: ActorPath,
         sender: HandleHelper<A>,
         stop_sender: StopSender,
-        event_receiver: EventReceiver<<A as Actor>::Event>,
         sinks: Arc<DashMap<String, Sink<A::Event>>>,
     ) -> Self {
         Self {
             path,
             sender,
             stop_sender,
-            event_receiver,
             sinks,
         }
     }
@@ -681,14 +665,7 @@ where
         self.sender.close().await;
     }
 
-    /// Returns a broadcast receiver for this actor's events.
-    ///
-    /// This is a legacy fallback; the preferred mechanism is to register a
-    /// [`Sink`](crate::Sink) and use [`ActorContext::publish_to`] or
-    /// [`ActorContext::publish_all`].
-    pub fn subscribe(&self) -> EventReceiver<<A as Actor>::Event> {
-        self.event_receiver.resubscribe()
-    }
+
 }
 
 impl<A> Clone for ActorRef<A>
@@ -700,7 +677,6 @@ where
             path: self.path.clone(),
             sender: self.sender.clone(),
             stop_sender: self.stop_sender.clone(),
-            event_receiver: self.event_receiver.resubscribe(),
             sinks: self.sinks.clone(),
         }
     }
@@ -715,7 +691,7 @@ mod test {
     use crate::sink::{Sink, Subscriber};
 
     use serde::{Deserialize, Serialize};
-    use tokio::sync::mpsc;
+    use tokio::sync::{Mutex, mpsc};
     use tokio_util::sync::CancellationToken;
     use tracing::info_span;
 
@@ -769,17 +745,29 @@ mod test {
 
             let value = msg.0;
             self.counter += value;
-            ctx.publish_event(TestEvent(self.counter)).await.unwrap();
+            ctx.publish_event(TestEvent(self.counter));
             Ok(TestResponse(self.counter))
         }
     }
 
-    pub struct TestSubscriber;
+    #[derive(Clone)]
+    pub struct TestSubscriber {
+        events: Arc<Mutex<Vec<TestEvent>>>,
+    }
+
+    impl TestSubscriber {
+        pub fn new() -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
 
     #[async_trait]
     impl Subscriber<TestEvent> for TestSubscriber {
         async fn notify(&self, event: TestEvent) -> Result<(), Error> {
             assert!(event.0 > 0);
+            self.events.lock().await.push(event);
             Ok(())
         }
     }
@@ -795,46 +783,22 @@ mod test {
         let actor = TestActor { counter: 0 };
         let actor_ref = system.create_root_actor("test", actor).await.unwrap();
 
+        let subscriber = TestSubscriber::new();
         let mut sink = Sink::new("test_sink");
-        sink.add("sub1", TestSubscriber);
+        sink.add("sub1", subscriber.clone());
         actor_ref.register_sink(sink);
 
         actor_ref.tell(TestMessage(10)).await.unwrap();
-        let mut recv = actor_ref.subscribe();
         let response = actor_ref.ask(TestMessage(10)).await.unwrap();
         assert_eq!(response.0, 20);
-        let event = recv.recv().await.unwrap();
-        assert_eq!(event.0, 10);
-        let event = recv.recv().await.unwrap();
-        assert_eq!(event.0, 20);
-        actor_ref.ask_stop().await.unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    }
 
-    #[test(tokio::test)]
-    async fn test_publish_event_after_stop() {
-        let (event_sender, _event_receiver) = mpsc::channel(100);
-        let system = SystemRef::new(
-            event_sender,
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
-        let (stop_sender, _stop_receiver) = mpsc::channel(1);
-        let (error_sender, _error_receiver) = mpsc::channel(1);
-        let (inner_sender, inner_receiver) = mpsc::channel(1);
-        drop(inner_receiver);
-        let ctx = ActorContext::<TestActor>::new(
-            stop_sender,
-            ActorPath::from("/user/test"),
-            system,
-            error_sender,
-            inner_sender,
-            Arc::new(DashMap::new()),
-            info_span!("test"),
-        );
-        let result = ctx.publish_event(TestEvent(1)).await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::SendEvent { .. }));
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let events = subscriber.events.lock().await;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, 10);
+        assert_eq!(events[1].0, 20);
+        actor_ref.ask_stop().await.unwrap();
     }
 
     #[test(tokio::test)]

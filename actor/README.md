@@ -188,11 +188,10 @@ processed in parallel.
 
 ```rust,ignore
 // Inside the actor:
-ctx.publish_event(MyEvent::SomethingHappened).await?;
+ctx.publish_event(MyEvent::SomethingHappened);
 
 // Legacy broadcast subscription (still available):
-let mut rx = actor_ref.subscribe();
-while let Ok(event) = rx.recv().await { .. }
+// Sinks are now the only event mechanism.
 
 // Modern sink API — register from outside the actor:
 use ave_actors_actor::{Sink, SinkEntry, Subscriber};

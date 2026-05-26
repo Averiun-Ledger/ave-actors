@@ -17,16 +17,13 @@ use dashmap::DashMap;
 use std::{sync::Arc, time::Duration};
 use tokio::{
     select,
-    sync::{
-        broadcast::{self, Sender as EventSender},
-        mpsc, oneshot,
-    },
+    sync::{mpsc, oneshot},
 };
 use tracing::{debug, error, warn};
 
 /// Inner sender and receiver types.
-pub type InnerSender<A> = mpsc::Sender<InnerAction<A>>;
-pub type InnerReceiver<A> = mpsc::Receiver<InnerAction<A>>;
+pub type InnerSender = mpsc::Sender<InnerAction>;
+pub type InnerReceiver = mpsc::Receiver<InnerAction>;
 
 pub type StopReceiver = mpsc::Receiver<Option<oneshot::Sender<()>>>;
 pub type StopSender = mpsc::Sender<Option<oneshot::Sender<()>>>;
@@ -64,8 +61,6 @@ pub struct ActorRunner<A: Actor> {
     supervision_strategy: SupervisionStrategy,
     receiver: MailboxReceiver<A>,
 
-    event_sender: EventSender<A::Event>,
-
     // Root actors are stopped by operators/system shutdown; children by their parent.
     stop_receiver: StopReceiver,
     // Shared with children so they can report errors/faults back to this actor.
@@ -75,8 +70,8 @@ pub struct ActorRunner<A: Actor> {
     // Receives error/fault notifications from child actors.
     error_receiver: ChildErrorReceiver,
 
-    inner_sender: InnerSender<A>,
-    inner_receiver: InnerReceiver<A>,
+    inner_sender: InnerSender,
+    inner_receiver: InnerReceiver,
     stop_signal: bool,
     sinks: Arc<DashMap<String, Sink<A::Event>>>,
 }
@@ -94,7 +89,6 @@ where
         let (sender, receiver) = mailbox();
         let (stop_sender, stop_receiver) = mpsc::channel(4);
         let (error_sender, error_receiver) = mpsc::channel(256);
-        let (event_sender, event_receiver) = broadcast::channel(1024);
         let (inner_sender, inner_receiver) = mpsc::channel(1024);
         let helper = HandleHelper::new(sender);
         let sinks = Arc::new(DashMap::<String, Sink<A::Event>>::new());
@@ -103,7 +97,6 @@ where
             path.clone(),
             helper,
             stop_sender.clone(),
-            event_receiver,
             sinks.clone(),
         );
         let runner: Self = Self {
@@ -113,7 +106,6 @@ where
             supervision_strategy: A::supervision_strategy(),
             receiver,
             stop_receiver,
-            event_sender,
             error_sender,
             parent_sender,
             error_receiver,
@@ -482,15 +474,10 @@ where
     /// Inner message handler.
     async fn inner_handle(
         &mut self,
-        event: InnerAction<A>,
+        event: InnerAction,
         ctx: &mut ActorContext<A>,
     ) {
         match event {
-            InnerAction::Event(event) => {
-                if self.event_sender.send(event).is_err() {
-                    error!("Failed to broadcast event");
-                }
-            }
             InnerAction::Error(error) => {
                 if let Some(parent_helper) = self.parent_sender.as_mut() {
                     if let Err(err) =
@@ -609,9 +596,7 @@ where
 
 /// Inner error.
 #[derive(Debug, Clone)]
-pub enum InnerAction<A: Actor> {
-    /// Event
-    Event(A::Event),
+pub enum InnerAction {
     /// Error
     Error(Error),
     /// Fail

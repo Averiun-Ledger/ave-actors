@@ -178,8 +178,7 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
                 ctx.publish_event(ConcurrentEvent {
                     action: "increment".to_string(),
                     value,
-                })
-                .await?;
+                });
 
                 Ok(ConcurrentResponse::Counter(value))
             }
@@ -192,8 +191,7 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
                 ctx.publish_event(ConcurrentEvent {
                     action: "decrement".to_string(),
                     value,
-                })
-                .await?;
+                });
 
                 Ok(ConcurrentResponse::Counter(value))
             }
