@@ -170,5 +170,4 @@ mod tests {
         assert!(spec.ram_mb > 0);
         assert!(spec.cpu_cores > 0);
     }
-
 }

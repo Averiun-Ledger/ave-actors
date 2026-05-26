@@ -4,6 +4,7 @@ use crate::{
     ActorPath, Error,
     handler::HandleHelper,
     runner::{InnerAction, InnerSender, StopHandle, StopSender},
+    sink::Sink,
     supervision::SupervisionStrategy,
     system::SystemRef,
 };
@@ -15,7 +16,8 @@ use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::Span;
 
-use std::{collections::HashMap, fmt::Debug, time::Duration};
+use dashmap::DashMap;
+use std::{collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
 
 /// Execution context passed to actors during message handling and lifecycle hooks.
 ///
@@ -36,6 +38,8 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     inner_sender: InnerSender<A>,
     /// Child action senders.
     child_senders: HashMap<ActorPath, StopHandle>,
+    /// Named sinks registered for this actor.
+    sinks: Arc<DashMap<String, Sink<A::Event>>>,
 
     span: tracing::Span,
 }
@@ -50,6 +54,7 @@ where
         system: SystemRef,
         error_sender: ChildErrorSender,
         inner_sender: InnerSender<A>,
+        sinks: Arc<DashMap<String, Sink<A::Event>>>,
         span: Span,
     ) -> Self {
         Self {
@@ -61,6 +66,7 @@ where
             error_sender,
             inner_sender,
             child_senders: HashMap::new(),
+            sinks,
         }
     }
 
@@ -145,10 +151,39 @@ where
         let _ = self.stop.send(sender).await;
     }
 
-    /// Broadcasts `event` to all current subscribers of this actor's event channel.
+    /// Register a named sink for this actor.
     ///
-    /// Returns an error if the broadcast channel is closed (i.e., the actor is stopping).
-    pub async fn publish_event(&self, event: A::Event) -> Result<(), Error> {
+    /// If a sink with the same name already exists it is replaced.
+    pub fn register_sink(&self, sink: Sink<A::Event>) {
+        self.sinks.insert(sink.name().to_string(), sink);
+    }
+
+    /// Remove the sink named `name` and return it, if present.
+    pub fn remove_sink(&self, name: &str) -> Option<Sink<A::Event>> {
+        self.sinks.remove(name).map(|(_, v)| v)
+    }
+
+    /// Send `event` to the sink named `sink_name`.
+    ///
+    /// If the sink does not exist a `debug!` log is emitted and the event
+    /// is silently dropped (no-op).
+    pub fn publish_to(&self, sink_name: impl AsRef<str>, event: A::Event) {
+        let name = sink_name.as_ref();
+        if let Some(entry) = self.sinks.get(name) {
+            entry.value().send(event);
+        } else {
+            tracing::debug!(sink = %name, "Sink not found, event dropped");
+        }
+    }
+
+    /// Send `event` to every registered sink (fire-and-forget) and also
+    /// broadcast it on the legacy event channel.
+    pub async fn publish_all(&self, event: A::Event) -> Result<(), Error> {
+        if !self.sinks.is_empty() {
+            for entry in self.sinks.iter() {
+                entry.value().send(event.clone());
+            }
+        }
         self.inner_sender
             .send(InnerAction::Event(event))
             .await
@@ -158,6 +193,29 @@ where
                     reason: e.to_string(),
                 }
             })
+    }
+
+    /// Send `event` to sinks whose name satisfies `predicate`
+    /// (fire-and-forget).
+    pub fn publish_filtered(
+        &self,
+        predicate: impl Fn(&str) -> bool,
+        event: A::Event,
+    ) {
+        for entry in self.sinks.iter() {
+            if predicate(entry.key().as_str()) {
+                entry.value().send(event.clone());
+            }
+        }
+    }
+
+    /// Sends `event` to all registered sinks and the legacy broadcast
+    /// channel.
+    ///
+    /// This is an alias for [`Self::publish_all`] kept for backwards
+    /// compatibility.
+    pub async fn publish_event(&self, event: A::Event) -> Result<(), Error> {
+        self.publish_all(event).await
     }
 
     /// Reports an error to this actor's parent so the parent can invoke `on_child_error`.
@@ -522,6 +580,8 @@ where
     event_receiver: EventReceiver<<A as Actor>::Event>,
     /// The actor stop sender.
     stop_sender: StopSender,
+    /// Named sinks registered for this actor.
+    sinks: Arc<DashMap<String, Sink<A::Event>>>,
 }
 
 impl<A> ActorRef<A>
@@ -533,12 +593,14 @@ where
         sender: HandleHelper<A>,
         stop_sender: StopSender,
         event_receiver: EventReceiver<<A as Actor>::Event>,
+        sinks: Arc<DashMap<String, Sink<A::Event>>>,
     ) -> Self {
         Self {
             path,
             sender,
             stop_sender,
             event_receiver,
+            sinks,
         }
     }
 
@@ -594,6 +656,16 @@ where
         let _ = self.stop_sender.send(None).await;
     }
 
+    /// Register a sink from external code.
+    pub fn register_sink(&self, sink: Sink<A::Event>) {
+        self.sinks.insert(sink.name().to_string(), sink);
+    }
+
+    /// Remove a sink from external code.
+    pub fn remove_sink(&self, name: &str) -> Option<Sink<A::Event>> {
+        self.sinks.remove(name).map(|(_, v)| v)
+    }
+
     /// Returns the hierarchical path of this actor.
     pub fn path(&self) -> ActorPath {
         self.path.clone()
@@ -611,8 +683,9 @@ where
 
     /// Returns a broadcast receiver for this actor's events.
     ///
-    /// Each subscriber receives every future event independently. Use this receiver
-    /// directly or wrap it in a [`Sink`](crate::Sink) to process events asynchronously.
+    /// This is a legacy fallback; the preferred mechanism is to register a
+    /// [`Sink`](crate::Sink) and use [`ActorContext::publish_to`] or
+    /// [`ActorContext::publish_all`].
     pub fn subscribe(&self) -> EventReceiver<<A as Actor>::Event> {
         self.event_receiver.resubscribe()
     }
@@ -628,6 +701,7 @@ where
             sender: self.sender.clone(),
             stop_sender: self.stop_sender.clone(),
             event_receiver: self.event_receiver.resubscribe(),
+            sinks: self.sinks.clone(),
         }
     }
 }
@@ -704,8 +778,9 @@ mod test {
 
     #[async_trait]
     impl Subscriber<TestEvent> for TestSubscriber {
-        async fn notify(&self, event: TestEvent) {
+        async fn notify(&self, event: TestEvent) -> Result<(), Error> {
             assert!(event.0 > 0);
+            Ok(())
         }
     }
 
@@ -720,8 +795,9 @@ mod test {
         let actor = TestActor { counter: 0 };
         let actor_ref = system.create_root_actor("test", actor).await.unwrap();
 
-        let sink = Sink::new(actor_ref.subscribe(), TestSubscriber);
-        system.run_sink(sink).await;
+        let mut sink = Sink::new("test_sink");
+        sink.add("sub1", TestSubscriber);
+        actor_ref.register_sink(sink);
 
         actor_ref.tell(TestMessage(10)).await.unwrap();
         let mut recv = actor_ref.subscribe();
@@ -753,6 +829,7 @@ mod test {
             system,
             error_sender,
             inner_sender,
+            Arc::new(DashMap::new()),
             info_span!("test"),
         );
         let result = ctx.publish_event(TestEvent(1)).await;
@@ -778,6 +855,7 @@ mod test {
             system,
             error_sender,
             inner_sender,
+            Arc::new(DashMap::new()),
             info_span!("test"),
         );
         let result = ctx
@@ -807,6 +885,7 @@ mod test {
             system,
             error_sender,
             inner_sender,
+            Arc::new(DashMap::new()),
             info_span!("test"),
         );
         let result = ctx
@@ -817,5 +896,4 @@ mod test {
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::Send { .. }));
     }
-
 }

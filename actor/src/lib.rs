@@ -21,7 +21,7 @@ pub use into_actor::{IntoActor, NotPersistentActor};
 pub use path::ActorPath;
 
 pub use helpers::encrypted_key::EncryptedKey;
-pub use sink::{Sink, Subscriber};
+pub use sink::{RetryPolicy, Sink, SinkEntry, Subscriber};
 
 pub use retries::{RetryActor, RetryMessage};
 pub use supervision::{

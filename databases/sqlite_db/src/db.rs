@@ -1215,5 +1215,4 @@ mod tests {
         let result = open_with_tuning(&db_path, false, tuning_for_ram(1024));
         assert!(result.is_err());
     }
-
 }

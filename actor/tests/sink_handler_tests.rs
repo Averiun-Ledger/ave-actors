@@ -109,13 +109,16 @@ impl CollectingSubscriber {
 
 #[async_trait]
 impl Subscriber<SinkTestEvent> for CollectingSubscriber {
-    async fn notify(&self, event: SinkTestEvent) {
+    async fn notify(&self, event: SinkTestEvent) -> Result<(), Error> {
         if self.should_fail {
-            // Simulate subscriber failure - this shouldn't crash the sink
-            panic!("Subscriber intentionally failed");
+            // Simulate subscriber failure
+            return Err(Error::Functional {
+                description: "Subscriber intentionally failed".to_owned(),
+            });
         }
         let mut events = self.events.lock().await;
         events.push(event);
+        Ok(())
     }
 }
 
@@ -133,9 +136,10 @@ async fn test_sink_basic_functionality() {
     let subscriber = CollectingSubscriber::new();
     let subscriber_clone = subscriber.clone();
 
-    // Create and run sink
-    let sink = Sink::new(actor_ref.subscribe(), subscriber);
-    system.run_sink(sink).await;
+    // Register sink on the actor
+    let mut sink = Sink::new("test_sink");
+    sink.add("sub1", subscriber);
+    actor_ref.register_sink(sink);
 
     // Give sink time to start
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -182,9 +186,10 @@ async fn test_sink_with_failing_subscriber() {
 
     let subscriber = CollectingSubscriber::new_failing();
 
-    // Create sink with failing subscriber
-    let sink = Sink::new(actor_ref.subscribe(), subscriber);
-    system.run_sink(sink).await;
+    // Register sink with failing subscriber
+    let mut sink = Sink::new("failing_sink");
+    sink.add("sub1", subscriber);
+    actor_ref.register_sink(sink);
 
     // Give sink time to start
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -201,7 +206,6 @@ async fn test_sink_with_failing_subscriber() {
     let response = actor_ref.ask(TestMessage::GetCounter).await.unwrap();
     assert_eq!(response.value, 1);
 }
-
 
 // Tests for Handler functionality and error scenarios
 

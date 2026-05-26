@@ -983,5 +983,4 @@ mod tests {
         let result = manager.ensure_cf("test\0name");
         assert!(result.is_err());
     }
-
 }

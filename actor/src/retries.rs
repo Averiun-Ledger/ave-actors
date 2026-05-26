@@ -813,5 +813,4 @@ mod tests {
             .await
             .expect("retry actor should stop after End");
     }
-
 }

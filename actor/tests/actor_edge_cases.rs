@@ -348,7 +348,6 @@ async fn test_actor_ref_operations() {
     assert!(actor_ref.is_closed());
 }
 
-
 #[test(tokio::test)]
 async fn test_child_actor_management() {
     let (system, mut runner) =
@@ -381,7 +380,6 @@ async fn test_child_actor_management() {
         assert_eq!(response, EdgeCaseResponse::Success);
     }
 }
-
 
 #[test(tokio::test)]
 async fn test_system_helpers() {

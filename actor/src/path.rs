@@ -351,5 +351,4 @@ mod tests {
         let decoded: ActorPath = serde_json::from_str(&json).unwrap();
         assert_eq!(path, decoded);
     }
-
 }

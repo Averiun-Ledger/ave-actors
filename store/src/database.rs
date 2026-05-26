@@ -346,7 +346,6 @@ mod tests {
         let result = mock.get_by_range(Some("b"), 2).unwrap();
         assert_eq!(result, vec![b"3".to_vec()]);
     }
-
 }
 
 #[macro_export]

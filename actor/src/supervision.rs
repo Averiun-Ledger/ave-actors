@@ -182,5 +182,4 @@ mod tests {
         assert!(strategy.next_backoff().is_some());
         assert!(strategy.next_backoff().is_none());
     }
-
 }

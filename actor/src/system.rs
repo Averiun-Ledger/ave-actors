@@ -1,10 +1,9 @@
 //! Actor system: creates, manages, and shuts down actors.
 
 use crate::{
-    Actor, ActorPath, ActorRef, Error, Event, Handler,
+    Actor, ActorPath, ActorRef, Error, Handler,
     actor::ChildErrorSender,
     runner::{ActorRunner, StopHandle, StopSender},
-    sink::Sink,
 };
 
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
@@ -428,16 +427,6 @@ impl SystemRef {
             .get(name)
             .and_then(|any| any.value().downcast_ref::<H>().cloned())
     }
-
-    /// Spawns a [`Sink`] in a background Tokio task so it processes actor events asynchronously.
-    pub async fn run_sink<E>(&self, mut sink: Sink<E>)
-    where
-        E: Event,
-    {
-        tokio::spawn(async move {
-            sink.run().await;
-        });
-    }
 }
 
 /// Drives the actor system event loop; block on [`SystemRunner::run`] to keep the system alive until shutdown.
@@ -478,7 +467,6 @@ impl SystemRunner {
 mod tests {
 
     use super::*;
-    use async_trait::async_trait;
     use test_log::test;
 
     #[test(tokio::test)]
@@ -500,19 +488,6 @@ mod tests {
         drop(event_sender);
         let reason = runner.run().await;
         assert_eq!(reason, ShutdownReason::Graceful);
-    }
-
-    #[test(tokio::test)]
-    async fn test_run_sink() {
-        let (system, _) = ActorSystem::create(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
-        let (tx, rx) = tokio::sync::broadcast::channel(1);
-        let sink = crate::sink::Sink::new(rx, DummySubscriber);
-        system.run_sink(sink).await;
-        let _ = tx.send(());
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
     #[test(tokio::test)]
@@ -553,14 +528,6 @@ mod tests {
         });
         let reason = runner.run().await;
         assert_eq!(reason, ShutdownReason::Crash);
-    }
-
-    #[derive(Clone)]
-    struct DummySubscriber;
-
-    #[async_trait]
-    impl crate::sink::Subscriber<()> for DummySubscriber {
-        async fn notify(&self, _event: ()) {}
     }
 
     #[derive(Debug, Clone, PartialEq)]

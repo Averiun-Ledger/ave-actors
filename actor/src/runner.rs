@@ -8,11 +8,13 @@ use crate::{
         ChildErrorReceiver, ChildErrorSender, Handler,
     },
     handler::{Envelope, HandleHelper, MailboxReceiver, mailbox},
+    sink::Sink,
     supervision::{RetryStrategy, SupervisionStrategy},
     system::{SystemEvent, SystemRef},
 };
 
-use std::time::Duration;
+use dashmap::DashMap;
+use std::{sync::Arc, time::Duration};
 use tokio::{
     select,
     sync::{
@@ -76,6 +78,7 @@ pub struct ActorRunner<A: Actor> {
     inner_sender: InnerSender<A>,
     inner_receiver: InnerReceiver<A>,
     stop_signal: bool,
+    sinks: Arc<DashMap<String, Sink<A::Event>>>,
 }
 
 impl<A> ActorRunner<A>
@@ -94,12 +97,14 @@ where
         let (event_sender, event_receiver) = broadcast::channel(1024);
         let (inner_sender, inner_receiver) = mpsc::channel(1024);
         let helper = HandleHelper::new(sender);
+        let sinks = Arc::new(DashMap::<String, Sink<A::Event>>::new());
 
         let actor_ref = ActorRef::new(
             path.clone(),
             helper,
             stop_sender.clone(),
             event_receiver,
+            sinks.clone(),
         );
         let runner: Self = Self {
             path,
@@ -115,6 +120,7 @@ where
             inner_sender,
             inner_receiver,
             stop_signal: false,
+            sinks,
         };
         (runner, actor_ref, stop_sender)
     }
@@ -134,6 +140,7 @@ where
             system.clone(),
             self.error_sender.clone(),
             self.inner_sender.clone(),
+            self.sinks.clone(),
             span,
         );
 
@@ -1303,6 +1310,7 @@ mod tests {
             system,
             runner.error_sender.clone(),
             runner.inner_sender.clone(),
+            runner.sinks.clone(),
             info_span!("test"),
         );
 
@@ -1353,6 +1361,7 @@ mod tests {
             system,
             runner.error_sender.clone(),
             runner.inner_sender.clone(),
+            runner.sinks.clone(),
             info_span!("test"),
         );
 
@@ -1392,6 +1401,7 @@ mod tests {
             system,
             runner.error_sender.clone(),
             runner.inner_sender.clone(),
+            runner.sinks.clone(),
             info_span!("test"),
         );
         runner

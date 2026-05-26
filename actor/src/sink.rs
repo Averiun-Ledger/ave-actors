@@ -1,69 +1,202 @@
-//! Event sink and subscriber pattern for forwarding actor broadcast events to user-defined callbacks.
+//! Named sinks with filtered subscribers and optional retry.
+//!
+//! A [`Sink`] is a lightweight router.  Code holding an [`ActorRef`] or
+//! [`ActorContext`](crate::ActorContext) registers named sinks; the actor
+//! then explicitly sends events to a sink by name and the sink distributes
+//! the event to every subscriber whose filter accepts it.
 
-use crate::Event;
+use crate::{Error, Event};
 
 use async_trait::async_trait;
-use tokio::sync::broadcast::{Receiver as EventReceiver, error::RecvError};
+use std::{sync::Arc, time::Duration};
+use tracing::{error, warn};
 
-use tracing::{debug, warn};
+/// Retry policy applied when a subscriber returns an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryPolicy {
+    /// If the subscriber fails it is ignored immediately.
+    None,
+    /// Retry up to `max` times waiting `backoff` between attempts.
+    AtMost {
+        /// Maximum number of retry attempts.
+        max: u32,
+        /// Fixed backoff duration between retries.
+        backoff: Duration,
+    },
+}
 
-/// Receives actor events from a broadcast channel and forwards them to a [`Subscriber`].
-///
-/// Create a `Sink` with [`Sink::new`] and run it in a background task via
-/// [`SystemRef::run_sink`]. The sink loop exits automatically when the actor's
-/// event channel closes.
+/// A subscriber that receives events from a [`Sink`].
+#[async_trait]
+pub trait Subscriber<E: Event>: Send + Sync + 'static {
+    /// Called for each event that passes the subscriber's filter.
+    ///
+    /// If this returns an error the sink applies the configured
+    /// [`RetryPolicy`].
+    async fn notify(&self, event: E) -> Result<(), Error>;
+}
+
+/// Entry inside a [`Sink`] describing a single subscriber, its filter
+/// and retry policy.
+pub struct SinkEntry<E: Event> {
+    /// Identifier for the subscriber.
+    pub id: String,
+    subscriber: Arc<dyn Subscriber<E>>,
+    filter: Arc<dyn Fn(&E) -> bool + Send + Sync>,
+    /// Retry policy for this subscriber.
+    pub retry: RetryPolicy,
+}
+
+impl<E: Event> Clone for SinkEntry<E> {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            subscriber: self.subscriber.clone(),
+            filter: self.filter.clone(),
+            retry: self.retry,
+        }
+    }
+}
+
+impl<E: Event> SinkEntry<E> {
+    /// Create a new entry for `subscriber` identified by `id`.
+    pub fn new(id: impl Into<String>, subscriber: impl Subscriber<E>) -> Self {
+        Self {
+            id: id.into(),
+            subscriber: Arc::new(subscriber),
+            filter: Arc::new(|_| true),
+            retry: RetryPolicy::None,
+        }
+    }
+
+    /// Set a filter so the subscriber only receives events for which
+    /// `f` returns `true`.
+    pub fn filter(
+        mut self,
+        f: impl Fn(&E) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.filter = Arc::new(f);
+        self
+    }
+
+    /// Set the retry policy for this subscriber.
+    pub const fn retry(mut self, policy: RetryPolicy) -> Self {
+        self.retry = policy;
+        self
+    }
+}
+
+/// Named sink that routes events to filtered subscribers.
+#[derive(Clone)]
 pub struct Sink<E: Event> {
-    /// The subscriber that will be notified of events.
-    subscriber: Box<dyn Subscriber<E>>,
-    /// The broadcast receiver for actor events.
-    event_receiver: EventReceiver<E>,
+    name: String,
+    entries: Vec<SinkEntry<E>>,
 }
 
 impl<E: Event> Sink<E> {
-    /// Creates a sink that will forward events from `event_receiver` to `subscriber`.
-    pub fn new(
-        event_receiver: EventReceiver<E>,
-        subscriber: impl Subscriber<E>,
-    ) -> Self {
+    /// Create a new sink with the given name.
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
-            subscriber: Box::new(subscriber),
-            event_receiver,
+            name: name.into(),
+            entries: Vec::new(),
         }
     }
 
-    /// Runs the event forwarding loop until the channel closes.
+    /// Return the sink's name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Add a subscriber entry to this sink.
+    pub fn add(
+        &mut self,
+        id: impl Into<String>,
+        subscriber: impl Subscriber<E>,
+    ) {
+        self.entries.push(SinkEntry::new(id, subscriber));
+    }
+
+    /// Add a pre-built [`SinkEntry`] to this sink.
+    pub fn add_entry(&mut self, entry: SinkEntry<E>) {
+        self.entries.push(entry);
+    }
+
+    /// Remove the subscriber entry with `id` and return it, if present.
+    pub fn remove_entry(&mut self, id: &str) -> Option<SinkEntry<E>> {
+        let pos = self.entries.iter().position(|e| e.id == id)?;
+        Some(self.entries.remove(pos))
+    }
+
+    /// Remove all subscriber entries from this sink.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Send `event` to every subscriber whose filter accepts it.
     ///
-    /// Calls [`Subscriber::notify`] for each event. If the receiver lags behind
-    /// (slow consumer), skipped events are logged as warnings and the loop continues.
-    /// Use [`SystemRef::run_sink`] to spawn this in a background task.
-    pub async fn run(&mut self) {
-        loop {
-            match self.event_receiver.recv().await {
-                Ok(event) => {
-                    self.subscriber.notify(event).await;
-                }
-                Err(RecvError::Closed) => {
-                    debug!("Event channel closed, sink stopping");
-                    break;
-                }
-                Err(RecvError::Lagged(skipped)) => {
-                    warn!(skipped, "Sink lagged, skipped events");
-                    continue;
-                }
+    /// Subscribers are processed concurrently in spawned tasks so the
+    /// caller never blocks waiting for slow or retrying subscribers.
+    /// If a subscriber returns an error and has a retry policy, the sink
+    /// retries with the configured backoff.  After exhausting retries (or if
+    /// no retry is configured) the error is logged.
+    pub fn send(&self, event: E) {
+        for entry in &self.entries {
+            if !(entry.filter)(&event) {
+                continue;
             }
+            let sink_name = self.name.clone();
+            let entry = entry.clone();
+            let event = event.clone();
+            tokio::spawn(async move {
+                match entry.retry {
+                    RetryPolicy::None => {
+                        if let Err(err) = entry.subscriber.notify(event).await {
+                            error!(
+                                subscriber = %entry.id,
+                                sink = %sink_name,
+                                error = %err,
+                                "Subscriber failed"
+                            );
+                        }
+                    }
+                    RetryPolicy::AtMost { max, backoff } => {
+                        let mut ok = false;
+                        for attempt in 0..=max {
+                            match entry.subscriber.notify(event.clone()).await {
+                                Ok(()) => {
+                                    ok = true;
+                                    break;
+                                }
+                                Err(err) => {
+                                    if attempt == max {
+                                        error!(
+                                            subscriber = %entry.id,
+                                            sink = %sink_name,
+                                            error = %err,
+                                            attempts = max,
+                                            "Subscriber exhausted retries"
+                                        );
+                                    } else {
+                                        warn!(
+                                            subscriber = %entry.id,
+                                            sink = %sink_name,
+                                            attempt,
+                                            "Subscriber failed, retrying"
+                                        );
+                                        tokio::time::sleep(backoff).await;
+                                    }
+                                }
+                            }
+                        }
+                        if !ok {
+                            error!(
+                                subscriber = %entry.id,
+                                sink = %sink_name,
+                                "Subscriber permanently failed"
+                            );
+                        }
+                    }
+                }
+            });
         }
     }
 }
-
-/// Callback interface invoked by a [`Sink`] for each received event.
-///
-/// Implement this trait to react to actor events asynchronously. The `notify`
-/// method is called once per event; it must be `Send + Sync + 'static` because
-/// it runs inside a spawned Tokio task.
-#[async_trait]
-pub trait Subscriber<E: Event>: Send + Sync + 'static {
-    /// Called for each event received from the actor's broadcast channel.
-    async fn notify(&self, event: E);
-}
-
-

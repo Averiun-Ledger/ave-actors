@@ -416,5 +416,3 @@ fn test_rocksdb_new_open_fails() {
     let result = RocksDbManager::new(&path, false, None);
     assert!(result.is_err());
 }
-
-

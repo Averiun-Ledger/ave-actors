@@ -2477,5 +2477,4 @@ mod tests {
         let result = actor_ref.ask(()).await;
         assert!(result.is_err());
     }
-
 }
