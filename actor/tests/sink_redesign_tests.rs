@@ -69,7 +69,7 @@ impl Handler<EmitterActor> for EmitterActor {
     ) -> Result<TestResponse, Error> {
         match msg {
             TestMsg::Emit(id) => {
-                ctx.publish_event(TestEvent { id });
+                ctx.publish_all(TestEvent { id });
                 Ok(TestResponse)
             }
             TestMsg::Fail => Err(Error::Functional {
@@ -224,7 +224,7 @@ async fn test_sink_survives_restart() {
         ) -> Result<TestResponse, Error> {
             match msg {
                 TestMsg::Emit(id) => {
-                    ctx.publish_event(TestEvent { id });
+                    ctx.publish_all(TestEvent { id });
                     if id == 1 {
                         return Err(Error::Functional {
                             description: "boom".to_owned(),

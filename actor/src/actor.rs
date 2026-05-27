@@ -204,14 +204,6 @@ where
         }
     }
 
-    /// Sends `event` to all registered sinks.
-    ///
-    /// This is an alias for [`Self::publish_all`].
-    #[deprecated(since = "0.6.0", note = "Use `publish_all` or `publish_to` instead")]
-    pub fn publish_event(&self, event: A::Event) {
-        self.publish_all(event);
-    }
-
     /// Reports an error to this actor's parent so the parent can invoke `on_child_error`.
     ///
     /// Returns an error if the parent channel is no longer reachable.
@@ -670,8 +662,6 @@ where
     pub async fn closed(&self) {
         self.sender.close().await;
     }
-
-
 }
 
 impl<A> Clone for ActorRef<A>
@@ -751,7 +741,7 @@ mod test {
 
             let value = msg.0;
             self.counter += value;
-            ctx.publish_event(TestEvent(self.counter));
+            ctx.publish_all(TestEvent(self.counter));
             Ok(TestResponse(self.counter))
         }
     }

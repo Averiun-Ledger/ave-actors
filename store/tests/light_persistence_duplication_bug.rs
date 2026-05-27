@@ -31,12 +31,16 @@ use tracing::info_span;
 static SHARED_MANAGER: OnceLock<Arc<TokioMutex<MemoryManager>>> =
     OnceLock::new();
 
-// Actor with a vector that accumulates numbers
-#[derive(
-    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
-struct VectorActor {
+// State struct
+#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
+struct VectorActorState {
     numbers: Vec<i32>,
+}
+
+// Actor with a vector that accumulates numbers
+#[derive(Debug)]
+struct VectorActor {
+    state_ptr: Arc<VectorActorState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,11 +104,11 @@ impl Handler<VectorActor> for VectorActor {
                 // Persist the event (this will apply it AND save the state)
                 self.persist(&NumberAdded(number), ctx).await?;
                 Ok(VectorResponse {
-                    numbers: self.numbers.clone(),
+                    numbers: self.state_ptr.numbers.clone(),
                 })
             }
             VectorMessage::Get => Ok(VectorResponse {
-                numbers: self.numbers.clone(),
+                numbers: self.state_ptr.numbers.clone(),
             }),
         }
     }
@@ -114,17 +118,29 @@ impl Handler<VectorActor> for VectorActor {
 impl PersistentActor for VectorActor {
     type Persistence = LightPersistence;
     type InitParams = ();
+    type State = VectorActorState;
 
     fn create_initial(_params: ()) -> Self {
         Self {
-            numbers: Vec::new(),
+            state_ptr: Arc::new(VectorActorState::default()),
         }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        // Apply the event by adding the number to the vector
-        self.numbers.push(event.0);
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).numbers.push(event.0);
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 

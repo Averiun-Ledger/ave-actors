@@ -19,11 +19,15 @@ use tracing::info_span;
 static SHARED_MANAGER_FIRST_STOP: OnceLock<Arc<TokioMutex<MemoryManager>>> =
     OnceLock::new();
 
-#[derive(
-    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
-struct TestActor {
+// State struct
+#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
+struct TestActorState {
     value: i32,
+}
+
+#[derive(Debug)]
+struct TestActor {
+    state_ptr: Arc<TestActorState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,9 +87,13 @@ impl Handler<TestActor> for TestActor {
         match msg {
             TestMessage::Add(delta) => {
                 self.persist(&AddEvent(delta), ctx).await?;
-                Ok(TestResponse { value: self.value })
+                Ok(TestResponse {
+                    value: self.state_ptr.value,
+                })
             }
-            TestMessage::Get => Ok(TestResponse { value: self.value }),
+            TestMessage::Get => Ok(TestResponse {
+                value: self.state_ptr.value,
+            }),
         }
     }
 }
@@ -94,21 +102,30 @@ impl Handler<TestActor> for TestActor {
 impl PersistentActor for TestActor {
     type Persistence = FullPersistence;
     type InitParams = ();
+    type State = TestActorState;
 
     fn create_initial(_params: ()) -> Self {
         println!("  [CREATE_INITIAL] Creating new actor with value=0");
-        Self { value: 0 }
+        Self {
+            state_ptr: Arc::new(TestActorState::default()),
+        }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        println!(
-            "  [APPLY] value: {} + {} = {}",
-            self.value,
-            event.0,
-            self.value + event.0
-        );
-        self.value += event.0;
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).value += event.0;
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
@@ -209,18 +226,18 @@ async fn test_investigate_stop_store_snapshot_creation() {
         "stop_investigation",
         memory_manager.clone(),
         None,
-        TestActor::create_initial(()),
+        Arc::new(TestActorState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     println!("📝 STEP 1: Persist 2 events");
     store_ref
-        .ask(StoreCommand::Persist(AddEvent(5)))
+        .ask(StoreCommand::Persist(Arc::new(AddEvent(5))))
         .await
         .unwrap();
     store_ref
-        .ask(StoreCommand::Persist(AddEvent(7)))
+        .ask(StoreCommand::Persist(Arc::new(AddEvent(7))))
         .await
         .unwrap();
 
@@ -238,7 +255,7 @@ async fn test_investigate_stop_store_snapshot_creation() {
         "stop_investigation",
         memory_manager.clone(),
         None,
-        TestActor::create_initial(()),
+        Arc::new(TestActorState::default()),
     )
     .unwrap();
     let store_ref2 = system.create_root_actor("store2", store2).await.unwrap();
@@ -274,11 +291,23 @@ async fn test_investigate_stop_store_snapshot_creation() {
             // Create an actor state to snapshot
             let mut actor = TestActor::create_initial(());
             // Apply events manually
-            actor.apply(&AddEvent(5)).unwrap();
-            actor.apply(&AddEvent(7)).unwrap();
+            let state =
+                TestActor::apply(Arc::clone(&actor.state_ptr), &AddEvent(5))
+                    .unwrap();
+            actor.set_state(state);
+            let state =
+                TestActor::apply(Arc::clone(&actor.state_ptr), &AddEvent(7))
+                    .unwrap();
+            actor.set_state(state);
 
-            println!("   Creating snapshot with value={}", actor.value);
-            store_ref2.ask(StoreCommand::Snapshot(actor)).await.unwrap();
+            println!(
+                "   Creating snapshot with value={}",
+                actor.state_ptr.value
+            );
+            store_ref2
+                .ask(StoreCommand::Snapshot(actor.state()))
+                .await
+                .unwrap();
             println!("   ✅ Snapshot created");
         } else {
             println!("   ❌ Condition NOT met: event_counter = 0");
@@ -294,7 +323,7 @@ async fn test_investigate_stop_store_snapshot_creation() {
         "stop_investigation",
         memory_manager.clone(),
         None,
-        TestActor::create_initial(()),
+        Arc::new(TestActorState::default()),
     )
     .unwrap();
     let store_ref3 = system.create_root_actor("store3", store3).await.unwrap();

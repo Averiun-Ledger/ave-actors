@@ -175,7 +175,7 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
                 let value = *counter;
                 drop(counter);
 
-                ctx.publish_event(ConcurrentEvent {
+                ctx.publish_all(ConcurrentEvent {
                     action: "increment".to_string(),
                     value,
                 });
@@ -188,7 +188,7 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
                 let value = *counter;
                 drop(counter);
 
-                ctx.publish_event(ConcurrentEvent {
+                ctx.publish_all(ConcurrentEvent {
                     action: "decrement".to_string(),
                     value,
                 });

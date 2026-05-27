@@ -417,7 +417,7 @@ where
 
     /// Drains pending inner actions on stop.
     ///
-    /// This keeps the publish_event pipeline alive long enough to flush
+    /// This keeps the publish_all pipeline alive long enough to flush
     /// inner actions already emitted by mailbox handlers. It only drains
     /// actions that are already queued; it does not wait for future actions
     /// on the still-open channel.

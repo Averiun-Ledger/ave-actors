@@ -5,10 +5,10 @@ use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
     Event, Handler, Message, Response, Sink, Subscriber,
 };
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use test_log::test;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
@@ -94,7 +94,7 @@ impl Handler<TestActor> for TestActor {
             }
             TestCommand::Decrement(value) => {
                 self.state -= value;
-                ctx.publish_event(TestEvent(self.state));
+                ctx.publish_all(TestEvent(self.state));
 
                 let child: ActorRef<ChildActor> =
                     ctx.get_child("child").await.unwrap();
@@ -120,7 +120,7 @@ impl Handler<TestActor> for TestActor {
                 description: "Value is too high".to_owned()
             }
         );
-        ctx.publish_event(TestEvent(0));
+        ctx.publish_all(TestEvent(0));
     }
 
     // Handles child fault.
@@ -135,7 +135,7 @@ impl Handler<TestActor> for TestActor {
                 description: "Value produces a fault".to_owned()
             }
         );
-        ctx.publish_event(TestEvent(100));
+        ctx.publish_all(TestEvent(100));
         ChildAction::Stop
     }
 }
@@ -203,7 +203,7 @@ impl Handler<ChildActor> for ChildActor {
             ChildCommand::SetState(value) => {
                 if value <= 10 {
                     self.state = value;
-                    ctx.publish_event(ChildEvent(self.state));
+                    ctx.publish_all(ChildEvent(self.state));
                     Ok(ChildResponse::None)
                 } else if value > 10 && value < 100 {
                     ctx.emit_error(Error::Functional {

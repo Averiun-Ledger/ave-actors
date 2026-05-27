@@ -68,7 +68,7 @@ impl Handler<TestActor> for TestActor {
         match msg {
             TestMessage::Emit(id, data) => {
                 self.counter += 1;
-                ctx.publish_event(SinkTestEvent { id, data });
+                ctx.publish_all(SinkTestEvent { id, data });
                 Ok(TestResponse {
                     value: self.counter,
                 })
@@ -103,7 +103,12 @@ impl CollectingSubscriber {
     }
 
     pub async fn get_events(&self) -> Vec<SinkTestEvent> {
-        self.events.lock().await.iter().map(|e| (**e).clone()).collect()
+        self.events
+            .lock()
+            .await
+            .iter()
+            .map(|e| (**e).clone())
+            .collect()
     }
 }
 

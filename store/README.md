@@ -28,7 +28,7 @@ tracing = "0.1"
 
 | Concept | Description |
 |---|---|
-| `PersistentActor` | Trait extending `Actor` with event sourcing — implement `apply` and call `persist` |
+| `PersistentActor` | Trait extending `Actor` with event sourcing — define `type State`, implement `apply`, `state()`, `set_state()`, and call `persist` |
 | `LightPersistence` | Strategy: stores event + state snapshot on every write (fast recovery) |
 | `FullPersistence` | Strategy: stores events only, replays on recovery (smaller footprint, full audit trail) |
 | `InitializedActor<A>` | Required wrapper returned by `PersistentActor::initial(params)` |
@@ -44,9 +44,9 @@ tracing = "0.1"
 |---|---|---|---|
 | `PersistentActor::create_initial` | `InitParams` | `Self` | Builds the base state used on first start and recovery without a snapshot |
 | `PersistentActor::initial` | `InitParams` | `InitializedActor<Self>` | Wraps the actor so the actor system accepts it as persistent |
-| `PersistentActor::apply` | `&Event` | `Result<(), ActorError>` | Applies one event to in-memory state |
+| `PersistentActor::apply` | `Arc<State>, &Event` | `Result<Arc<State>, ActorError>` | Pure function that applies one event to state and returns the new state |
 | `PersistentActor::start_store` | store `name`, optional `prefix`, `ActorContext`, backend manager, optional `EncryptedKey` | `Result<(), ActorError>` | Opens the backend and recovers persisted state into the actor |
-| `PersistentActor::persist` | `&Event`, `ActorContext` | `Result<(), ActorError>` | Applies and durably records one event, rolling back memory on failure |
+| `PersistentActor::persist` | `&Event`, `ActorContext` | `Result<(), ActorError>` | Calls `apply`, durably records the event, and updates `self` with the new state; rolls back on failure |
 | `PersistentActor::snapshot` | `ActorContext` | `Result<(), ActorError>` | Forces an immediate snapshot of the current actor state |
 
 ---
@@ -54,6 +54,8 @@ tracing = "0.1"
 ## Quick start
 
 ```rust,ignore
+use std::sync::Arc;
+
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, Error as ActorError, Event, Handler,
     Message, Response,
@@ -66,6 +68,11 @@ use async_trait::async_trait;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::info_span;
+
+// --- State ---
+
+#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
+struct CounterState { value: i32 }
 
 // --- Events ---
 
@@ -89,8 +96,8 @@ impl Response for CounterResp {}
 
 // --- Actor ---
 
-#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
-struct Counter { value: i32 }
+#[derive(Debug)]
+struct Counter { state: Arc<CounterState> }
 
 #[async_trait]
 impl Actor for Counter {
@@ -119,12 +126,12 @@ impl Handler<Counter> for Counter {
     ) -> Result<CounterResp, ActorError> {
         match msg {
             CounterMsg::Increment(n) => {
-                // persist applies the event to self and saves it durably.
+                // persist calls apply, saves the event durably, and updates self.state.
                 // If persistence fails, the in-memory state is rolled back.
                 self.persist(&CounterEvent::Incremented(n), ctx).await?;
                 Ok(CounterResp::Ok)
             }
-            CounterMsg::GetValue => Ok(CounterResp::Value(self.value)),
+            CounterMsg::GetValue => Ok(CounterResp::Value(self.state.value)),
         }
     }
 }
@@ -134,16 +141,29 @@ impl Handler<Counter> for Counter {
 impl PersistentActor for Counter {
     type Persistence = FullPersistence;
     type InitParams  = ();
+    type State       = CounterState;
 
     fn create_initial(_params: ()) -> Self {
-        Self::default()
+        Self { state: Arc::new(CounterState::default()) }
     }
 
-    fn apply(&mut self, event: &CounterEvent) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &CounterEvent,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut state = state;
         match event {
-            CounterEvent::Incremented(n) => self.value += n,
+            CounterEvent::Incremented(n) => Arc::make_mut(&mut state).value += n,
         }
-        Ok(())
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state = state;
     }
 }
 ```

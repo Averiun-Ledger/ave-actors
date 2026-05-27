@@ -18,22 +18,23 @@ use test_log::test;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
-// Test actor with encryption
+// State struct for encrypted actor
 #[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    borsh::BorshSerialize,
-    borsh::BorshDeserialize,
-    Default,
+    Debug, Clone, Default, borsh::BorshSerialize, borsh::BorshDeserialize,
 )]
-struct EncryptedActor {
+struct EncryptedActorState {
     pub counter: usize,
     pub data: String,
+}
+
+// Test actor with encryption
+#[derive(Debug)]
+struct EncryptedActor {
+    state_ptr: Arc<EncryptedActorState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,18 +107,30 @@ impl Actor for EncryptedActor {
 impl PersistentActor for EncryptedActor {
     type Persistence = FullPersistence;
     type InitParams = ();
+    type State = EncryptedActorState;
 
     fn create_initial(_: ()) -> Self {
         Self {
-            counter: 0,
-            data: String::new(),
+            state_ptr: Arc::new(EncryptedActorState::default()),
         }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        self.counter = event.counter;
-        self.data.clone_from(&event.data);
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).counter = event.counter;
+        Arc::make_mut(&mut new_state).data.clone_from(&event.data);
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
@@ -132,29 +145,29 @@ impl Handler<EncryptedActor> for EncryptedActor {
         match msg {
             EncryptedMessage::Increment(value) => {
                 let event = EncryptedEvent {
-                    counter: self.counter + value,
-                    data: self.data.clone(),
+                    counter: self.state_ptr.counter + value,
+                    data: self.state_ptr.data.clone(),
                 };
                 self.persist(&event, ctx).await?;
                 Ok(EncryptedResponse::Success)
             }
             EncryptedMessage::SetData(data) => {
                 let event = EncryptedEvent {
-                    counter: self.counter,
+                    counter: self.state_ptr.counter,
                     data: data.clone(),
                 };
                 self.persist(&event, ctx).await?;
                 Ok(EncryptedResponse::Success)
             }
             EncryptedMessage::GetState => Ok(EncryptedResponse::State {
-                counter: self.counter,
-                data: self.data.clone(),
+                counter: self.state_ptr.counter,
+                data: self.state_ptr.data.clone(),
             }),
             EncryptedMessage::TriggerRecovery => {
                 if let Ok(store) = ctx.get_child::<Store<Self>>("store").await {
                     let response = store.ask(StoreCommand::Recover).await?;
                     if let StoreResponse::State(Some(state)) = response {
-                        self.update(state);
+                        self.set_state(state);
                         Ok(EncryptedResponse::Success)
                     } else {
                         Ok(EncryptedResponse::Error(
@@ -185,18 +198,18 @@ impl Handler<EncryptedActor> for EncryptedActor {
     }
 }
 
-// Test actor with light persistence
+// State struct for light actor
 #[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    borsh::BorshSerialize,
-    borsh::BorshDeserialize,
-    Default,
+    Debug, Clone, Default, borsh::BorshSerialize, borsh::BorshDeserialize,
 )]
-struct LightActor {
+struct LightActorState {
     pub value: i32,
+}
+
+// Test actor with light persistence
+#[derive(Debug)]
+struct LightActor {
+    state_ptr: Arc<LightActorState>,
 }
 
 #[async_trait]
@@ -226,14 +239,29 @@ impl Actor for LightActor {
 impl PersistentActor for LightActor {
     type Persistence = LightPersistence;
     type InitParams = ();
+    type State = LightActorState;
 
     fn create_initial(_: ()) -> Self {
-        Self { value: 0 }
+        Self {
+            state_ptr: Arc::new(LightActorState::default()),
+        }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        self.value = event.counter as i32;
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).value = event.counter as i32;
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
@@ -248,14 +276,14 @@ impl Handler<LightActor> for LightActor {
         match msg {
             EncryptedMessage::Increment(value) => {
                 let event = EncryptedEvent {
-                    counter: self.value as usize + value,
+                    counter: self.state_ptr.value as usize + value,
                     data: "light".to_string(),
                 };
                 self.persist(&event, ctx).await?;
                 Ok(EncryptedResponse::Success)
             }
             EncryptedMessage::GetState => Ok(EncryptedResponse::State {
-                counter: self.value as usize,
+                counter: self.state_ptr.value as usize,
                 data: "light".to_string(),
             }),
             _ => Ok(EncryptedResponse::Success),
@@ -569,7 +597,7 @@ async fn test_store_error_scenarios() {
         "prefix",
         failing_manager,
         None,
-        EncryptedActor::create_initial(()),
+        Arc::new(EncryptedActorState::default()),
     );
     assert!(store_result.is_err());
 
@@ -584,7 +612,7 @@ async fn test_store_error_scenarios() {
         "prefix",
         failing_manager,
         None,
-        EncryptedActor::create_initial(()),
+        Arc::new(EncryptedActorState::default()),
     )
     .unwrap();
     let store_ref = system
@@ -598,16 +626,16 @@ async fn test_store_error_scenarios() {
         data: "test".to_string(),
     };
 
-    let result = store_ref.ask(StoreCommand::Persist(event)).await;
+    let result = store_ref.ask(StoreCommand::Persist(Arc::new(event))).await;
     assert!(matches!(result, Err(ActorError::StoreOperation { .. })));
 
     // Test snapshot failure
-    let actor = EncryptedActor {
+    let state = Arc::new(EncryptedActorState {
         counter: 1,
         data: "test".to_string(),
-    };
+    });
 
-    let result = store_ref.ask(StoreCommand::Snapshot(actor)).await;
+    let result = store_ref.ask(StoreCommand::Snapshot(state)).await;
     assert!(matches!(result, Err(ActorError::StoreOperation { .. })));
 
     // Test recover with no state
@@ -629,7 +657,7 @@ async fn test_store_commands_coverage() {
         "prefix",
         MemoryManager::default(),
         None,
-        EncryptedActor::create_initial(()),
+        Arc::new(EncryptedActorState::default()),
     )
     .unwrap();
     let store_ref = system
@@ -658,13 +686,19 @@ async fn test_store_commands_coverage() {
         counter: 1,
         data: "test1".to_string(),
     };
-    store_ref.ask(StoreCommand::Persist(event)).await.unwrap();
+    store_ref
+        .ask(StoreCommand::Persist(Arc::new(event)))
+        .await
+        .unwrap();
 
     let event = EncryptedEvent {
         counter: 2,
         data: "test2".to_string(),
     };
-    store_ref.ask(StoreCommand::Persist(event)).await.unwrap();
+    store_ref
+        .ask(StoreCommand::Persist(Arc::new(event)))
+        .await
+        .unwrap();
 
     // GetEvents
     let result = store_ref
@@ -706,16 +740,15 @@ async fn test_persist_actor_error_scenarios() {
 
     // Test actor without store child
     #[derive(
-        Debug,
-        Clone,
-        Serialize,
-        Deserialize,
-        borsh::BorshSerialize,
-        borsh::BorshDeserialize,
-        Default,
+        Debug, Clone, Default, borsh::BorshSerialize, borsh::BorshDeserialize,
     )]
-    struct NoStoreActor {
+    struct NoStoreActorState {
         value: i32,
+    }
+
+    #[derive(Debug)]
+    struct NoStoreActor {
+        state_ptr: Arc<NoStoreActorState>,
     }
 
     #[async_trait]
@@ -736,14 +769,29 @@ async fn test_persist_actor_error_scenarios() {
     impl PersistentActor for NoStoreActor {
         type Persistence = FullPersistence;
         type InitParams = ();
+        type State = NoStoreActorState;
 
         fn create_initial(_: ()) -> Self {
-            Self { value: 0 }
+            Self {
+                state_ptr: Arc::new(NoStoreActorState::default()),
+            }
         }
 
-        fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-            self.value = event.counter as i32;
-            Ok(())
+        fn apply(
+            state: Arc<Self::State>,
+            event: &Self::Event,
+        ) -> Result<Arc<Self::State>, ActorError> {
+            let mut new_state = state;
+            Arc::make_mut(&mut new_state).value = event.counter as i32;
+            Ok(new_state)
+        }
+
+        fn state(&self) -> Arc<Self::State> {
+            Arc::clone(&self.state_ptr)
+        }
+
+        fn set_state(&mut self, state: Arc<Self::State>) {
+            self.state_ptr = state;
         }
     }
 
@@ -804,7 +852,7 @@ async fn test_encryption_failure_scenarios() {
         "prefix",
         MemoryManager::default(),
         Some(encrypt_key),
-        EncryptedActor::create_initial(()),
+        Arc::new(EncryptedActorState::default()),
     )
     .unwrap();
     let store_ref = system
@@ -819,15 +867,15 @@ async fn test_encryption_failure_scenarios() {
     };
 
     store_ref
-        .ask(StoreCommand::Persist(event.clone()))
+        .ask(StoreCommand::Persist(Arc::new(event.clone())))
         .await
         .unwrap();
 
-    let actor = EncryptedActor {
+    let state = Arc::new(EncryptedActorState {
         counter: 0,
         data: "".to_string(),
-    };
-    store_ref.ask(StoreCommand::Snapshot(actor)).await.unwrap();
+    });
+    store_ref.ask(StoreCommand::Snapshot(state)).await.unwrap();
 
     let result = store_ref.ask(StoreCommand::Recover).await.unwrap();
     match result {

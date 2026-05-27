@@ -19,11 +19,15 @@ use tracing::info_span;
 static SHARED_MANAGER_FULL_RECOVERY: OnceLock<Arc<TokioMutex<MemoryManager>>> =
     OnceLock::new();
 
-#[derive(
-    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
-struct CounterActor {
+// State struct
+#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
+struct CounterActorState {
     count: i32,
+}
+
+#[derive(Debug)]
+struct CounterActor {
+    state_ptr: Arc<CounterActorState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,11 +88,13 @@ impl Handler<CounterActor> for CounterActor {
         match msg {
             CounterMessage::Increment => {
                 self.persist(&Incremented, ctx).await?;
-                Ok(CounterResponse { count: self.count })
+                Ok(CounterResponse {
+                    count: self.state_ptr.count,
+                })
             }
-            CounterMessage::GetCount => {
-                Ok(CounterResponse { count: self.count })
-            }
+            CounterMessage::GetCount => Ok(CounterResponse {
+                count: self.state_ptr.count,
+            }),
         }
     }
 }
@@ -97,19 +103,29 @@ impl Handler<CounterActor> for CounterActor {
 impl PersistentActor for CounterActor {
     type Persistence = FullPersistence;
     type InitParams = ();
+    type State = CounterActorState;
 
     fn create_initial(_params: ()) -> Self {
-        Self { count: 0 }
+        Self {
+            state_ptr: Arc::new(CounterActorState::default()),
+        }
     }
 
-    fn apply(&mut self, _event: &Self::Event) -> Result<(), ActorError> {
-        println!(
-            "  [APPLY] Incrementing count from {} to {}",
-            self.count,
-            self.count + 1
-        );
-        self.count += 1;
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        _event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).count += 1;
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 

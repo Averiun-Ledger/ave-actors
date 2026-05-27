@@ -161,7 +161,11 @@ impl<E: Event> Sink<E> {
                     RetryPolicy::AtMost { max, backoff } => {
                         let mut ok = false;
                         for attempt in 0..=max {
-                            match entry.subscriber.notify(Arc::clone(&event)).await {
+                            match entry
+                                .subscriber
+                                .notify(Arc::clone(&event))
+                                .await
+                            {
                                 Ok(()) => {
                                     ok = true;
                                     break;

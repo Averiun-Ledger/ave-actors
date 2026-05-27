@@ -24,6 +24,7 @@ use ave_actors_actor::{
 use ave_actors_store::store::{FullPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use test_log::test;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
@@ -32,17 +33,16 @@ use tracing::info_span;
 // Test Actors
 // ============================================================================
 
-// Persistent Actor
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    borsh::BorshSerialize,
-    borsh::BorshDeserialize,
-)]
-struct MyPersistentActor {
+// State struct for persistent actor
+#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
+struct MyPersistentActorState {
     counter: i32,
+}
+
+// Persistent Actor
+#[derive(Debug)]
+struct MyPersistentActor {
+    state_ptr: Arc<MyPersistentActorState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,18 +94,29 @@ impl Handler<MyPersistentActor> for MyPersistentActor {
 impl PersistentActor for MyPersistentActor {
     type Persistence = FullPersistence;
     type InitParams = i32;
+    type State = MyPersistentActorState;
 
     fn create_initial(initial_value: i32) -> Self {
         Self {
-            counter: initial_value,
+            state_ptr: Arc::new(MyPersistentActorState {
+                counter: initial_value,
+            }),
         }
     }
 
     fn apply(
-        &mut self,
+        state: Arc<Self::State>,
         _event: &Self::Event,
-    ) -> Result<(), ave_actors_actor::Error> {
-        Ok(())
+    ) -> Result<Arc<Self::State>, ave_actors_actor::Error> {
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
@@ -246,7 +257,7 @@ async fn test_create_root_actor_persistent_initial() {
 ///     let (system, _runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
 ///
 ///     // This WILL NOT compile because MyPersistentActor doesn't implement NotPersistentActor
-///     let actor = MyPersistentActor { counter: 42 };
+///     let actor = MyPersistentActor { state_ptr: Arc::new(MyPersistentActorState::default()) };
 ///     let _result = system.create_root_actor("persistent", actor).await;
 ///
 ///     // Error: the trait `NotPersistentActor` is not implemented for `MyPersistentActor`
@@ -302,7 +313,7 @@ async fn test_create_child_persistent_initial() {
 /// ```compile_fail
 /// async fn test_create_child_persistent_direct_fails(ctx: &mut ActorContext<ParentActor>) {
 ///     // This WILL NOT compile
-///     let actor = MyPersistentActor { counter: 42 };
+///     let actor = MyPersistentActor { state_ptr: Arc::new(MyPersistentActorState::default()) };
 ///     let _result = ctx.create_child("child", actor).await;
 ///
 ///     // Error: the trait `NotPersistentActor` is not implemented for `MyPersistentActor`
@@ -339,7 +350,7 @@ async fn test_all_valid_combinations() {
     );
 
     // ❌ Pattern 3: Persistent + Direct instance → COMPILE ERROR (prevented)
-    // let persistent = MyPersistentActor { counter: 1 };
+    // let persistent = MyPersistentActor { state_ptr: Arc::new(MyPersistentActorState::default()) };
     // system.create_root_actor("test3", persistent).await; // Won't compile!
 
     // ❌ Pattern 4: Non-persistent + initial() → N/A (doesn't have initial())
@@ -359,6 +370,7 @@ fn test_type_safety_documentation() {
     fn _assert_persistent_has_trait<T: PersistentActor>()
     where
         T::Event: BorshSerialize + BorshDeserialize,
+        T::State: BorshSerialize + BorshDeserialize,
     {
     }
     _assert_persistent_has_trait::<MyPersistentActor>();

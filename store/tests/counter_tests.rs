@@ -20,20 +20,20 @@ use ave_actors_actor::{
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    borsh::BorshSerialize,
-    borsh::BorshDeserialize,
-    Default,
+    Debug, Clone, Default, borsh::BorshSerialize, borsh::BorshDeserialize,
 )]
-struct CounterTestActor {
+struct CounterState {
     value: i32,
+}
+
+#[derive(Debug)]
+struct CounterTestActor {
+    state_ptr: Arc<CounterState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,14 +84,29 @@ impl Actor for CounterTestActor {
 impl PersistentActor for CounterTestActor {
     type Persistence = FullPersistence;
     type InitParams = ();
+    type State = CounterState;
 
     fn create_initial(_: ()) -> Self {
-        Self { value: 0 }
+        Self {
+            state_ptr: Arc::new(CounterState::default()),
+        }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        self.value += event.delta;
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).value += event.delta;
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
@@ -105,7 +120,9 @@ impl Handler<CounterTestActor> for CounterTestActor {
     ) -> Result<CounterResponse, ActorError> {
         match msg {
             CounterMessage::Add(_) => Ok(CounterResponse::Success),
-            CounterMessage::GetValue => Ok(CounterResponse::Value(self.value)),
+            CounterMessage::GetValue => {
+                Ok(CounterResponse::Value(self.state_ptr.value))
+            }
         }
     }
 }
@@ -122,7 +139,7 @@ async fn test_event_counter_starts_at_zero() {
         "test_zero",
         MemoryManager::default(),
         None,
-        CounterTestActor::create_initial(()),
+        Arc::new(CounterState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -150,14 +167,17 @@ async fn test_event_counter_after_first_event() {
         "test_first",
         MemoryManager::default(),
         None,
-        CounterTestActor::create_initial(()),
+        Arc::new(CounterState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     // Persist first event
     let event = CounterEvent { delta: 10 };
-    store_ref.ask(StoreCommand::Persist(event)).await.unwrap();
+    store_ref
+        .ask(StoreCommand::Persist(Arc::new(event)))
+        .await
+        .unwrap();
 
     // Check event_counter = 1
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
@@ -202,7 +222,7 @@ async fn test_event_counter_multiple_events() {
         "test_multiple",
         MemoryManager::default(),
         None,
-        CounterTestActor::create_initial(()),
+        Arc::new(CounterState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -210,7 +230,10 @@ async fn test_event_counter_multiple_events() {
     // Persist 5 events
     for i in 1..=5 {
         let event = CounterEvent { delta: i };
-        store_ref.ask(StoreCommand::Persist(event)).await.unwrap();
+        store_ref
+            .ask(StoreCommand::Persist(Arc::new(event)))
+            .await
+            .unwrap();
     }
 
     // Check event_counter = 5
@@ -254,13 +277,13 @@ async fn test_get_events_out_of_range_returns_empty() {
         "test_query_empty",
         MemoryManager::default(),
         None,
-        CounterTestActor::create_initial(()),
+        Arc::new(CounterState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     store_ref
-        .ask(StoreCommand::Persist(CounterEvent { delta: 10 }))
+        .ask(StoreCommand::Persist(Arc::new(CounterEvent { delta: 10 })))
         .await
         .unwrap();
 
@@ -288,17 +311,17 @@ async fn test_get_events_partial_overlap_returns_existing_suffix() {
         "test_query_partial",
         MemoryManager::default(),
         None,
-        CounterTestActor::create_initial(()),
+        Arc::new(CounterState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     store_ref
-        .ask(StoreCommand::Persist(CounterEvent { delta: 10 }))
+        .ask(StoreCommand::Persist(Arc::new(CounterEvent { delta: 10 })))
         .await
         .unwrap();
     store_ref
-        .ask(StoreCommand::Persist(CounterEvent { delta: 20 }))
+        .ask(StoreCommand::Persist(Arc::new(CounterEvent { delta: 20 })))
         .await
         .unwrap();
 
@@ -328,27 +351,32 @@ async fn test_state_counter_after_snapshot() {
         "test_snapshot",
         MemoryManager::default(),
         None,
-        CounterTestActor::create_initial(()),
+        Arc::new(CounterState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     // Persist 3 events
-    let mut actor = CounterTestActor { value: 0 };
+    let mut actor = CounterTestActor {
+        state_ptr: Arc::new(CounterState::default()),
+    };
     for i in 1..=3 {
         let event = CounterEvent { delta: i * 10 };
         store_ref
-            .ask(StoreCommand::Persist(event.clone()))
+            .ask(StoreCommand::Persist(Arc::new(event.clone())))
             .await
             .unwrap();
-        actor.apply(&event).unwrap();
+        let state =
+            CounterTestActor::apply(Arc::clone(&actor.state_ptr), &event)
+                .unwrap();
+        actor.set_state(state);
     }
 
     // At this point: event_counter = 3, value = 60
 
     // Take snapshot
     store_ref
-        .ask(StoreCommand::Snapshot(actor.clone()))
+        .ask(StoreCommand::Snapshot(actor.state()))
         .await
         .unwrap();
 
@@ -378,24 +406,29 @@ async fn test_recovery_with_events_after_snapshot() {
         "test_recovery",
         MemoryManager::default(),
         None,
-        CounterTestActor::create_initial(()),
+        Arc::new(CounterState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     // Persist 2 events and take snapshot
-    let mut actor = CounterTestActor { value: 0 };
+    let mut actor = CounterTestActor {
+        state_ptr: Arc::new(CounterState::default()),
+    };
     for i in 1..=2 {
         let event = CounterEvent { delta: i * 10 };
         store_ref
-            .ask(StoreCommand::Persist(event.clone()))
+            .ask(StoreCommand::Persist(Arc::new(event.clone())))
             .await
             .unwrap();
-        actor.apply(&event).unwrap();
+        let state =
+            CounterTestActor::apply(Arc::clone(&actor.state_ptr), &event)
+                .unwrap();
+        actor.set_state(state);
     }
     // value = 30, event_counter = 2
     store_ref
-        .ask(StoreCommand::Snapshot(actor.clone()))
+        .ask(StoreCommand::Snapshot(actor.state()))
         .await
         .unwrap();
     // state_counter = 2
@@ -404,10 +437,13 @@ async fn test_recovery_with_events_after_snapshot() {
     for i in 3..=5 {
         let event = CounterEvent { delta: i * 10 };
         store_ref
-            .ask(StoreCommand::Persist(event.clone()))
+            .ask(StoreCommand::Persist(Arc::new(event.clone())))
             .await
             .unwrap();
-        actor.apply(&event).unwrap();
+        let state =
+            CounterTestActor::apply(Arc::clone(&actor.state_ptr), &event)
+                .unwrap();
+        actor.set_state(state);
     }
     // value = 150, event_counter = 5
 
@@ -437,7 +473,7 @@ async fn test_recovery_without_snapshot() {
         "test_no_snapshot",
         MemoryManager::default(),
         None,
-        CounterTestActor::create_initial(()),
+        Arc::new(CounterState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -445,7 +481,10 @@ async fn test_recovery_without_snapshot() {
     // Persist events without snapshot
     for i in 1..=3 {
         let event = CounterEvent { delta: i * 10 };
-        store_ref.ask(StoreCommand::Persist(event)).await.unwrap();
+        store_ref
+            .ask(StoreCommand::Persist(Arc::new(event)))
+            .await
+            .unwrap();
     }
 
     // Recover should now replay events even without snapshot (bug fix)
@@ -478,17 +517,14 @@ async fn test_snapshot_at_zero() {
         "test_snap_zero",
         MemoryManager::default(),
         None,
-        CounterTestActor::create_initial(()),
+        Arc::new(CounterState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     // Take snapshot without any events
-    let actor = CounterTestActor { value: 0 };
-    store_ref
-        .ask(StoreCommand::Snapshot(actor.clone()))
-        .await
-        .unwrap();
+    let state = Arc::new(CounterState::default());
+    store_ref.ask(StoreCommand::Snapshot(state)).await.unwrap();
 
     // Verify event_counter is still 0
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
@@ -525,7 +561,7 @@ async fn test_last_events_from_positions() {
         "test_last_from",
         MemoryManager::default(),
         None,
-        CounterTestActor::create_initial(()),
+        Arc::new(CounterState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -533,7 +569,10 @@ async fn test_last_events_from_positions() {
     // Persist 5 events at positions 0-4
     for i in 1..=5 {
         let event = CounterEvent { delta: i * 10 };
-        store_ref.ask(StoreCommand::Persist(event)).await.unwrap();
+        store_ref
+            .ask(StoreCommand::Persist(Arc::new(event)))
+            .await
+            .unwrap();
     }
 
     // LastEventsFrom(0) should return all 5 events
@@ -601,25 +640,30 @@ async fn test_multiple_snapshots_and_recoveries() {
         "test_multi_snap",
         MemoryManager::default(),
         None,
-        CounterTestActor::create_initial(()),
+        Arc::new(CounterState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
-    let mut actor = CounterTestActor { value: 0 };
+    let mut actor = CounterTestActor {
+        state_ptr: Arc::new(CounterState::default()),
+    };
 
     // Cycle 1: 2 events + snapshot
     for i in 1..=2 {
         let event = CounterEvent { delta: i };
         store_ref
-            .ask(StoreCommand::Persist(event.clone()))
+            .ask(StoreCommand::Persist(Arc::new(event.clone())))
             .await
             .unwrap();
-        actor.apply(&event).unwrap();
+        let state =
+            CounterTestActor::apply(Arc::clone(&actor.state_ptr), &event)
+                .unwrap();
+        actor.set_state(state);
     }
     // value = 3, event_counter = 2
     store_ref
-        .ask(StoreCommand::Snapshot(actor.clone()))
+        .ask(StoreCommand::Snapshot(actor.state()))
         .await
         .unwrap();
     // state_counter = 2
@@ -628,14 +672,17 @@ async fn test_multiple_snapshots_and_recoveries() {
     for i in 3..=5 {
         let event = CounterEvent { delta: i };
         store_ref
-            .ask(StoreCommand::Persist(event.clone()))
+            .ask(StoreCommand::Persist(Arc::new(event.clone())))
             .await
             .unwrap();
-        actor.apply(&event).unwrap();
+        let state =
+            CounterTestActor::apply(Arc::clone(&actor.state_ptr), &event)
+                .unwrap();
+        actor.set_state(state);
     }
     // value = 15, event_counter = 5
     store_ref
-        .ask(StoreCommand::Snapshot(actor.clone()))
+        .ask(StoreCommand::Snapshot(actor.state()))
         .await
         .unwrap();
     // state_counter = 5
@@ -644,10 +691,13 @@ async fn test_multiple_snapshots_and_recoveries() {
     for i in 6..=7 {
         let event = CounterEvent { delta: i };
         store_ref
-            .ask(StoreCommand::Persist(event.clone()))
+            .ask(StoreCommand::Persist(Arc::new(event.clone())))
             .await
             .unwrap();
-        actor.apply(&event).unwrap();
+        let state =
+            CounterTestActor::apply(Arc::clone(&actor.state_ptr), &event)
+                .unwrap();
+        actor.set_state(state);
     }
     // value = 28, event_counter = 7
 
@@ -680,7 +730,7 @@ async fn test_event_counter_with_encryption() {
         "test_encrypted",
         MemoryManager::default(),
         Some(encrypt_key),
-        CounterTestActor::create_initial(()),
+        Arc::new(CounterState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -688,7 +738,10 @@ async fn test_event_counter_with_encryption() {
     // Persist 3 encrypted events
     for i in 1..=3 {
         let event = CounterEvent { delta: i * 10 };
-        store_ref.ask(StoreCommand::Persist(event)).await.unwrap();
+        store_ref
+            .ask(StoreCommand::Persist(Arc::new(event)))
+            .await
+            .unwrap();
     }
 
     // Verify event_counter = 3
