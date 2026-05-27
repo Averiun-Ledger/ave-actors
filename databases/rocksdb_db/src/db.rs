@@ -366,7 +366,7 @@ impl State for RocksDbStore {
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to put state");
                     Error::Store {
-                source: None,
+                        source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }

@@ -239,7 +239,7 @@ where
             }
             PersistenceType::Full => {
                 match store
-                    .ask(StoreCommand::PersistFullEvent {
+                    .ask(StoreCommand::PersistFull {
                         event: Arc::new(event),
                         state: Arc::clone(&new_state),
                         snapshot_every: Self::snapshot_every(),
@@ -561,7 +561,7 @@ where
     fn persist_state<E>(
         &mut self,
         event: &E,
-        state: &Arc<A::State>,
+        state: &A::State,
     ) -> Result<(), Error>
     where
         E: Event + BorshSerialize + BorshDeserialize,
@@ -691,13 +691,13 @@ where
         self.events(from, upper)
     }
 
-    fn snapshot(&mut self, state: &Arc<A::State>) -> Result<(), Error> {
+    fn snapshot(&mut self, state: &A::State) -> Result<(), Error> {
         debug!("Snapshotting state");
 
         let next_state_counter = self.event_counter;
 
-        let data = borsh::to_vec(&(state.as_ref(), next_state_counter))
-            .map_err(|e| {
+        let data =
+            borsh::to_vec(&(state, next_state_counter)).map_err(|e| {
                 error!("Can't encode state: {}", e);
                 store_error(StoreOperation::EncodeActor, e)
             })?;
@@ -786,7 +786,7 @@ where
 
             for (i, event) in events.iter().enumerate() {
                 debug!("Applying event {} of {}", i + 1, events.len());
-                state = A::apply(Arc::clone(&state), event).map_err(|e| {
+                state = A::apply(state, event).map_err(|e| {
                     store_error_with_source(
                         StoreOperation::ApplyEvent,
                         format!("{:?}", e),
@@ -796,7 +796,7 @@ where
             }
 
             debug!("Updating snapshot after applying {} events", events.len());
-            if let Err(e) = self.snapshot(&state) {
+            if let Err(e) = self.snapshot(state.as_ref()) {
                 warn!(
                     error = %e,
                     "Snapshot failed after recovery; state is \
@@ -848,7 +848,7 @@ where
         }
 
         debug!("Creating snapshot after replaying events");
-        if let Err(e) = self.snapshot(&state) {
+        if let Err(e) = self.snapshot(state.as_ref()) {
             warn!(
                 error = %e,
                 "Snapshot failed after recovery; state is reconstructed \
@@ -888,7 +888,7 @@ where
             })?;
         }
 
-        self.snapshot(&state)
+        self.snapshot(state.as_ref())
     }
 
     /// Deletes all events, snapshots, and metadata, then resets all counters
@@ -1032,15 +1032,6 @@ where
     /// Persist an event without forcing a snapshot.
     Persist(Arc<A::Event>),
     /// Persist an event and snapshot the supplied state if required.
-    PersistFullEvent {
-        /// Event to append to the event log.
-        event: Arc<A::Event>,
-        /// Current actor state, used when a snapshot is triggered.
-        state: Arc<A::State>,
-        /// Snapshot cadence for `FullPersistence`.
-        snapshot_every: Option<u64>,
-    },
-    /// Persist an event and snapshot the supplied state if required.
     PersistFull {
         /// Event to append to the event log.
         event: Arc<A::Event>,
@@ -1078,15 +1069,6 @@ where
     fn clone(&self) -> Self {
         match self {
             Self::Persist(e) => Self::Persist(Arc::clone(e)),
-            Self::PersistFullEvent {
-                event,
-                state,
-                snapshot_every,
-            } => Self::PersistFullEvent {
-                event: Arc::clone(event),
-                state: Arc::clone(state),
-                snapshot_every: *snapshot_every,
-            },
             Self::PersistFull {
                 event,
                 state,
@@ -1181,21 +1163,10 @@ where
 
     async fn pre_stop(
         &mut self,
-        ctx: &mut ActorContext<Self>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        if let Err(e) = self.snapshot_if_needed() {
-            error!(
-                error = %e,
-                "Failed to snapshot state during Store shutdown"
-            );
-            let _ = ctx
-                .emit_error(actor_store_error(
-                    StoreOperation::EmitPreStopError,
-                    e,
-                ))
-                .await;
-        }
-        Ok(())
+        self.snapshot_if_needed()
+            .map_err(|e| actor_store_error(StoreOperation::Snapshot, e))
     }
 }
 
@@ -1219,26 +1190,6 @@ where
                 debug!("Persisted event: {:?}", event);
                 Ok(StoreResponse::Persisted)
             }
-            StoreCommand::PersistFullEvent {
-                event,
-                state,
-                snapshot_every,
-            } => {
-                self.persist(event.as_ref()).map_err(|e| {
-                    actor_store_error(StoreOperation::PersistFull, e)
-                })?;
-
-                if snapshot_every.is_some_and(|every| {
-                    self.pending_events_since_snapshot() >= every
-                }) {
-                    self.snapshot(&state).map_err(|e| {
-                        actor_store_error(StoreOperation::Snapshot, e)
-                    })?;
-                }
-
-                debug!("Persisted full event: {:?}", event);
-                Ok(StoreResponse::Persisted)
-            }
             StoreCommand::PersistFull {
                 event,
                 state,
@@ -1251,7 +1202,7 @@ where
                 if snapshot_every.is_some_and(|every| {
                     self.pending_events_since_snapshot() >= every
                 }) {
-                    self.snapshot(&state).map_err(|e| {
+                    self.snapshot(state.as_ref()).map_err(|e| {
                         actor_store_error(StoreOperation::Snapshot, e)
                     })?;
                 }
@@ -1260,9 +1211,9 @@ where
                 Ok(StoreResponse::Persisted)
             }
             StoreCommand::PersistLight(event, state) => {
-                self.persist_state(event.as_ref(), &state).map_err(|e| {
-                    actor_store_error(StoreOperation::PersistLight, e)
-                })?;
+                self.persist_state(event.as_ref(), state.as_ref()).map_err(
+                    |e| actor_store_error(StoreOperation::PersistLight, e),
+                )?;
                 debug!("Light persistence of event: {:?}", event);
                 Ok(StoreResponse::Persisted)
             }
@@ -1276,7 +1227,7 @@ where
                 Ok(StoreResponse::Persisted)
             }
             StoreCommand::Snapshot(state) => {
-                self.snapshot(&state).map_err(|e| {
+                self.snapshot(state.as_ref()).map_err(|e| {
                     actor_store_error(StoreOperation::Snapshot, e)
                 })?;
                 debug!("Snapshotted state");

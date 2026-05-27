@@ -1294,7 +1294,7 @@ async fn test_persist_full_event_requests_snapshot_only_when_due() {
     // First event: no snapshot yet (event_counter will be 1, not multiple of 2)
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::PersistFullEvent {
+            .ask(StoreCommand::PersistFull {
                 event: Arc::new(ValueEvent(2)),
                 state: Arc::new(GapActorState { value: 2 }),
                 snapshot_every: Some(2),
@@ -1307,7 +1307,7 @@ async fn test_persist_full_event_requests_snapshot_only_when_due() {
     // Second event: snapshot is triggered inline (event_counter = 2, multiple of 2)
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::PersistFullEvent {
+            .ask(StoreCommand::PersistFull {
                 event: Arc::new(ValueEvent(3)),
                 state: Arc::new(GapActorState { value: 5 }),
                 snapshot_every: Some(2),

@@ -478,7 +478,7 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
 
 /// Application-defined values that an actor may publish, persist, or apply via `on_event`.
 pub trait Event:
-    Serialize + DeserializeOwned + Debug + Clone + Send + Sync + 'static
+    Serialize + DeserializeOwned + Debug + Send + Sync + 'static
 {
 }
 

@@ -139,19 +139,22 @@ impl<E: Event> Sink<E> {
     /// retries with the configured backoff.  After exhausting retries (or if
     /// no retry is configured) the error is logged.
     pub fn send(&self, event: Arc<E>) {
+        let sink_name = self.name.clone();
         for entry in &self.entries {
             if !(entry.filter)(&event) {
                 continue;
             }
-            let sink_name = self.name.clone();
-            let entry = entry.clone();
+            let subscriber = Arc::clone(&entry.subscriber);
+            let id = entry.id.clone();
+            let retry = entry.retry;
             let event = Arc::clone(&event);
+            let sink_name = sink_name.clone();
             tokio::spawn(async move {
-                match entry.retry {
+                match retry {
                     RetryPolicy::None => {
-                        if let Err(err) = entry.subscriber.notify(event).await {
+                        if let Err(err) = subscriber.notify(event).await {
                             error!(
-                                subscriber = %entry.id,
+                                subscriber = %id,
                                 sink = %sink_name,
                                 error = %err,
                                 "Subscriber failed"
@@ -161,11 +164,7 @@ impl<E: Event> Sink<E> {
                     RetryPolicy::AtMost { max, backoff } => {
                         let mut ok = false;
                         for attempt in 0..=max {
-                            match entry
-                                .subscriber
-                                .notify(Arc::clone(&event))
-                                .await
-                            {
+                            match subscriber.notify(Arc::clone(&event)).await {
                                 Ok(()) => {
                                     ok = true;
                                     break;
@@ -173,7 +172,7 @@ impl<E: Event> Sink<E> {
                                 Err(err) => {
                                     if attempt == max {
                                         error!(
-                                            subscriber = %entry.id,
+                                            subscriber = %id,
                                             sink = %sink_name,
                                             error = %err,
                                             attempts = max,
@@ -181,7 +180,7 @@ impl<E: Event> Sink<E> {
                                         );
                                     } else {
                                         warn!(
-                                            subscriber = %entry.id,
+                                            subscriber = %id,
                                             sink = %sink_name,
                                             attempt,
                                             "Subscriber failed, retrying"
@@ -193,7 +192,7 @@ impl<E: Event> Sink<E> {
                         }
                         if !ok {
                             error!(
-                                subscriber = %entry.id,
+                                subscriber = %id,
                                 sink = %sink_name,
                                 "Subscriber permanently failed"
                             );

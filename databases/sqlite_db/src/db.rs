@@ -107,7 +107,7 @@ impl SqlitePool {
     /// total number of connections (idle + checked-out) is below `max_size`.
     fn checkout(self: &Arc<Self>) -> Result<PooledConnection, Error> {
         let mut state = self.state.lock().map_err(|e| Error::Store {
-                source: None,
+            source: None,
             operation: StoreOperation::LockManagerData,
             reason: format!("connection pool mutex poisoned: {}", e),
         })?;
@@ -167,7 +167,7 @@ impl SqlitePool {
     /// Wait until all checked-out connections have been returned.
     fn drain(&self) -> Result<(), Error> {
         let mut state = self.state.lock().map_err(|e| Error::Store {
-                source: None,
+            source: None,
             operation: StoreOperation::LockManagerData,
             reason: format!("connection pool mutex poisoned: {}", e),
         })?;
@@ -371,7 +371,7 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
             .map_err(|e| {
                 error!(error = %e, "Failed to checkpoint WAL on stop");
                 Error::Store {
-                source: None,
+                    source: None,
                     operation: StoreOperation::WalCheckpoint,
                     reason: format!("{}", e),
                 }
@@ -730,7 +730,7 @@ impl State for SqliteCollection {
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to put state");
                 Error::Store {
-                source: None,
+                    source: None,
                     operation: StoreOperation::Insert,
                     reason: format!("{}", e),
                 }
@@ -1011,7 +1011,7 @@ fn open_with_tuning<P: AsRef<Path>>(
     .map_err(|e| {
         error!(error = %e, "Failed to execute SQLite PRAGMA statements");
         Error::Store {
-                source: None,
+            source: None,
             operation: StoreOperation::ExecuteBatch,
             reason: format!("{}", e),
         }
