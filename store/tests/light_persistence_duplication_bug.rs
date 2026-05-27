@@ -102,7 +102,7 @@ impl Handler<VectorActor> for VectorActor {
         match msg {
             VectorMessage::Add(number) => {
                 // Persist the event (this will apply it AND save the state)
-                self.persist(&NumberAdded(number), ctx).await?;
+                self.persist(NumberAdded(number), ctx).await?;
                 Ok(VectorResponse {
                     numbers: self.state_ptr.numbers.clone(),
                 })

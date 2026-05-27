@@ -88,7 +88,7 @@ impl Handler<VectorActorFull> for VectorActorFull {
     ) -> Result<VectorResponseFull, ActorError> {
         match msg {
             VectorMessageFull::Add(number) => {
-                self.persist(&NumberAddedFull(number), ctx).await?;
+                self.persist(NumberAddedFull(number), ctx).await?;
                 Ok(VectorResponseFull {
                     numbers: self.state_ptr.numbers.clone(),
                 })

@@ -148,7 +148,7 @@ impl Handler<EncryptedActor> for EncryptedActor {
                     counter: self.state_ptr.counter + value,
                     data: self.state_ptr.data.clone(),
                 };
-                self.persist(&event, ctx).await?;
+                self.persist(event, ctx).await?;
                 Ok(EncryptedResponse::Success)
             }
             EncryptedMessage::SetData(data) => {
@@ -156,7 +156,7 @@ impl Handler<EncryptedActor> for EncryptedActor {
                     counter: self.state_ptr.counter,
                     data: data.clone(),
                 };
-                self.persist(&event, ctx).await?;
+                self.persist(event, ctx).await?;
                 Ok(EncryptedResponse::Success)
             }
             EncryptedMessage::GetState => Ok(EncryptedResponse::State {
@@ -279,7 +279,7 @@ impl Handler<LightActor> for LightActor {
                     counter: self.state_ptr.value as usize + value,
                     data: "light".to_string(),
                 };
-                self.persist(&event, ctx).await?;
+                self.persist(event, ctx).await?;
                 Ok(EncryptedResponse::Success)
             }
             EncryptedMessage::GetState => Ok(EncryptedResponse::State {
@@ -328,6 +328,7 @@ impl Collection for FailingCollection {
             Err(StoreError::Store {
                 operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
+                source: None,
             })
         } else {
             Err(StoreError::EntryNotFound {
@@ -341,6 +342,7 @@ impl Collection for FailingCollection {
             Err(StoreError::Store {
                 operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
+                source: None,
             })
         } else {
             self.data.insert(key.to_string(), data.to_vec());
@@ -353,6 +355,7 @@ impl Collection for FailingCollection {
             Err(StoreError::Store {
                 operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
+                source: None,
             })
         } else {
             Ok(())
@@ -364,6 +367,7 @@ impl Collection for FailingCollection {
             Err(StoreError::Store {
                 operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
+                source: None,
             })
         } else {
             self.data.clear();
@@ -400,6 +404,7 @@ impl State for FailingCollection {
             Err(StoreError::Store {
                 operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
+                source: None,
             })
         } else {
             self.data.insert("state".to_string(), data.to_vec());
@@ -412,6 +417,7 @@ impl State for FailingCollection {
             Err(StoreError::Store {
                 operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
+                source: None,
             })
         } else {
             self.data.remove("state");
@@ -424,6 +430,7 @@ impl State for FailingCollection {
             Err(StoreError::Store {
                 operation: StoreOperation::Test,
                 reason: "Intentional failure".to_string(),
+                source: None,
             })
         } else {
             self.data.clear();
@@ -442,6 +449,7 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
             Err(StoreError::Store {
                 operation: StoreOperation::CreateCollection,
                 reason: "Failed to create collection".to_string(),
+                source: None,
             })
         } else {
             Ok(FailingCollection {
@@ -465,6 +473,7 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
             Err(StoreError::Store {
                 operation: StoreOperation::CreateState,
                 reason: "Failed to create state".to_string(),
+                source: None,
             })
         } else {
             Ok(FailingCollection {
@@ -810,7 +819,7 @@ async fn test_persist_actor_error_scenarios() {
                         data: "test".to_string(),
                     };
                     // This should fail because no store child exists
-                    match self.persist(&event, ctx).await {
+                    match self.persist(event, ctx).await {
                         Err(ActorError::NotFound { path }) => {
                             Ok(EncryptedResponse::Error(format!(
                                 "Not found: {}",

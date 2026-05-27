@@ -271,6 +271,7 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         self.db.flush_wal(true).map_err(|e| {
             error!(error = %e, "Failed to flush WAL on stop");
             Error::Store {
+                source: None,
                 operation: StoreOperation::FlushWal,
                 reason: format!("{:?}", e),
             }
@@ -281,6 +282,7 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         // WAL sync above already guarantees durability.
         let cf_names =
             DB::list_cf(&self.opts, &self.path).map_err(|e| Error::Store {
+                source: None,
                 operation: StoreOperation::ListCf,
                 reason: format!("{:?}", e),
             })?;
@@ -347,6 +349,7 @@ impl State for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for state get");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -363,6 +366,7 @@ impl State for RocksDbStore {
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to put state");
                     Error::Store {
+                source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
@@ -370,6 +374,7 @@ impl State for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for state put");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -402,6 +407,7 @@ impl State for RocksDbStore {
                 .map_err(|e| {
                     warn!(cf = %self.name, error = %e, "Failed to delete state");
                     Error::Store {
+                source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
@@ -409,6 +415,7 @@ impl State for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for state delete");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -426,6 +433,7 @@ impl State for RocksDbStore {
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to purge state");
                     Error::Store {
+                source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
@@ -433,6 +441,7 @@ impl State for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for state purge");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -470,6 +479,7 @@ impl Collection for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for collection get");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -487,6 +497,7 @@ impl Collection for RocksDbStore {
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to put collection entry");
                     Error::Store {
+                source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
@@ -494,6 +505,7 @@ impl Collection for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for collection put");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -526,6 +538,7 @@ impl Collection for RocksDbStore {
                 .map_err(|e| {
                     warn!(cf = %self.name, error = %e, "Failed to delete collection entry");
                     Error::Store {
+                source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
@@ -533,6 +546,7 @@ impl Collection for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for collection delete");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -555,6 +569,7 @@ impl Collection for RocksDbStore {
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to purge collection");
                     Error::Store {
+                source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
@@ -562,6 +577,7 @@ impl Collection for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for collection purge");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -579,6 +595,7 @@ impl Collection for RocksDbStore {
         let Some(_handle) = self.store.cf_handle(&self.name) else {
             error!(cf = %self.name, "Column family not found for collection iter");
             return Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -604,6 +621,7 @@ impl Collection for RocksDbStore {
         let Some(_handle) = self.store.cf_handle(&self.name) else {
             error!(cf = %self.name, "Column family not found for collection iter_range");
             return Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -631,6 +649,7 @@ impl Collection for RocksDbStore {
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to delete collection range");
                     Error::Store {
+                source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
@@ -638,6 +657,7 @@ impl Collection for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for collection del_range");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -664,6 +684,7 @@ impl<'a> RocksDbIterator<'a> {
 
         let Some(handle) = store.cf_handle(&name) else {
             return Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -740,6 +761,7 @@ impl<'a> RocksDbRangeIterator<'a> {
 
         let Some(handle) = store.cf_handle(&name) else {
             return Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -844,6 +866,7 @@ mod tests {
         assert!(matches!(
             State::get(&store),
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 ..
             })
@@ -851,6 +874,7 @@ mod tests {
         assert!(matches!(
             State::put(&mut store, b"x"),
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 ..
             })
@@ -858,6 +882,7 @@ mod tests {
         assert!(matches!(
             State::del(&mut store),
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 ..
             })
@@ -865,6 +890,7 @@ mod tests {
         assert!(matches!(
             State::purge(&mut store),
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 ..
             })
@@ -873,6 +899,7 @@ mod tests {
         assert!(matches!(
             Collection::last(&store),
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 ..
             })
@@ -880,6 +907,7 @@ mod tests {
         assert!(matches!(
             Collection::get(&store, "k"),
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 ..
             })
@@ -887,6 +915,7 @@ mod tests {
         assert!(matches!(
             Collection::put(&mut store, "k", b"v"),
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 ..
             })
@@ -894,6 +923,7 @@ mod tests {
         assert!(matches!(
             Collection::del(&mut store, "k"),
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 ..
             })
@@ -901,6 +931,7 @@ mod tests {
         assert!(matches!(
             Collection::purge(&mut store),
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 ..
             })
@@ -908,6 +939,7 @@ mod tests {
         assert!(matches!(
             Collection::iter(&store, false),
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 ..
             })
@@ -915,6 +947,7 @@ mod tests {
         assert!(matches!(
             Collection::iter_range(&store, "a", "z", false),
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 ..
             })
@@ -922,6 +955,7 @@ mod tests {
         assert!(matches!(
             Collection::del_range(&mut store, "a", "z"),
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 ..
             })

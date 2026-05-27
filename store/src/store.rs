@@ -34,6 +34,19 @@ fn store_error(operation: StoreOperation, reason: impl ToString) -> Error {
     Error::Store {
         operation,
         reason: reason.to_string(),
+        source: None,
+    }
+}
+
+fn store_error_with_source(
+    operation: StoreOperation,
+    reason: impl ToString,
+    source: ActorError,
+) -> Error {
+    Error::Store {
+        operation,
+        reason: reason.to_string(),
+        source: Some(source),
     }
 }
 
@@ -193,13 +206,13 @@ where
     /// On failure the in-memory state is rolled back to its pre-call value.
     async fn persist(
         &mut self,
-        event: &Self::Event,
+        event: Self::Event,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let store = ctx.get_child::<Store<Self>>("store").await?;
 
         let prev_state = self.state();
-        let new_state = match Self::apply(Arc::clone(&prev_state), event) {
+        let new_state = match Self::apply(Arc::clone(&prev_state), &event) {
             Ok(s) => s,
             Err(e) => {
                 self.set_state(prev_state);
@@ -211,10 +224,7 @@ where
             PersistenceType::Light => {
                 let state = Arc::clone(&new_state);
                 match store
-                    .ask(StoreCommand::PersistLight(
-                        Arc::new(event.clone()),
-                        state,
-                    ))
+                    .ask(StoreCommand::PersistLight(Arc::new(event), state))
                     .await
                 {
                     Ok(r) => r,
@@ -230,7 +240,7 @@ where
             PersistenceType::Full => {
                 match store
                     .ask(StoreCommand::PersistFullEvent {
-                        event: Arc::new(event.clone()),
+                        event: Arc::new(event),
                         state: Arc::clone(&new_state),
                         snapshot_every: Self::snapshot_every(),
                     })
@@ -777,7 +787,11 @@ where
             for (i, event) in events.iter().enumerate() {
                 debug!("Applying event {} of {}", i + 1, events.len());
                 state = A::apply(Arc::clone(&state), event).map_err(|e| {
-                    store_error(StoreOperation::ApplyEvent, format!("{:?}", e))
+                    store_error_with_source(
+                        StoreOperation::ApplyEvent,
+                        format!("{:?}", e),
+                        e,
+                    )
                 })?;
             }
 
@@ -825,7 +839,11 @@ where
         for (i, event) in events.iter().enumerate() {
             debug!("Applying event {} of {}", i + 1, events.len());
             state = A::apply(state, event).map_err(|e| {
-                store_error(StoreOperation::ApplyEvent, format!("{:?}", e))
+                store_error_with_source(
+                    StoreOperation::ApplyEvent,
+                    format!("{:?}", e),
+                    e,
+                )
             })?;
         }
 
@@ -907,6 +925,7 @@ where
                     "Invalid key length: expected 32 bytes, got {}",
                     key.len()
                 ),
+                source: None,
             });
         }
 
@@ -943,6 +962,7 @@ where
                     NONCE_SIZE + 16,
                     ciphertext.len()
                 ),
+                source: None,
             });
         }
 
@@ -1434,7 +1454,7 @@ mod tests {
         ) -> Result<CounterResponse, ActorError> {
             match msg {
                 CounterMessage::Add(v) => {
-                    self.persist(&CounterEvent(v), ctx).await?;
+                    self.persist(CounterEvent(v), ctx).await?;
                     Ok(CounterResponse::None)
                 }
                 CounterMessage::Get => {
@@ -1521,7 +1541,7 @@ mod tests {
         ) -> Result<CounterResponse, ActorError> {
             match msg {
                 CounterMessage::Add(v) => {
-                    self.persist(&CounterEvent(v), ctx).await?;
+                    self.persist(CounterEvent(v), ctx).await?;
                     Ok(CounterResponse::None)
                 }
                 CounterMessage::Get => {

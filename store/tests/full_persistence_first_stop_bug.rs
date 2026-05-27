@@ -86,7 +86,7 @@ impl Handler<TestActor> for TestActor {
     ) -> Result<TestResponse, ActorError> {
         match msg {
             TestMessage::Add(delta) => {
-                self.persist(&AddEvent(delta), ctx).await?;
+                self.persist(AddEvent(delta), ctx).await?;
                 Ok(TestResponse {
                     value: self.state_ptr.value,
                 })

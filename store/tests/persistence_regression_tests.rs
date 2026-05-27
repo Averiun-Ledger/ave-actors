@@ -42,6 +42,7 @@ impl State for FailingStateStore {
         Err(StoreError::Store {
             operation: StoreOperation::Test,
             reason: "forced snapshot failure".to_owned(),
+            source: None,
         })
     }
 
@@ -107,6 +108,7 @@ impl Collection for FailingCompactionCollection {
         Err(StoreError::Store {
             operation: StoreOperation::Test,
             reason: "forced compaction failure".to_owned(),
+            source: None,
         })
     }
 
@@ -247,6 +249,7 @@ impl Collection for RangeCollection {
             return Err(StoreError::Store {
                 operation: StoreOperation::Test,
                 reason: "forced last failure".to_owned(),
+                source: None,
             });
         }
         Ok(self
@@ -298,6 +301,7 @@ impl Collection for RangeCollection {
             return Err(StoreError::Store {
                 operation: StoreOperation::Test,
                 reason: "forced iter failure".to_owned(),
+                source: None,
             });
         }
 
@@ -458,10 +462,12 @@ impl Handler<RollbackLightActor> for RollbackLightActor {
     ) -> Result<ValueResponse, ActorError> {
         match msg {
             ValueMessage::Increment(delta) => {
-                self.persist(&ValueEvent(delta), ctx).await?;
+                self.persist(ValueEvent(delta), ctx).await?;
                 Ok(ValueResponse::Ack)
             }
-            ValueMessage::GetValue => Ok(ValueResponse::Value(self.state_ptr.value)),
+            ValueMessage::GetValue => {
+                Ok(ValueResponse::Value(self.state_ptr.value))
+            }
         }
     }
 }
@@ -535,7 +541,9 @@ impl Handler<GapActor> for GapActor {
                 self.state_ptr = new_state;
                 Ok(ValueResponse::Ack)
             }
-            ValueMessage::GetValue => Ok(ValueResponse::Value(self.state_ptr.value)),
+            ValueMessage::GetValue => {
+                Ok(ValueResponse::Value(self.state_ptr.value))
+            }
         }
     }
 }
@@ -613,7 +621,9 @@ impl Handler<CompactingActor> for CompactingActor {
                 self.state_ptr = new_state;
                 Ok(ValueResponse::Ack)
             }
-            ValueMessage::GetValue => Ok(ValueResponse::Value(self.state_ptr.value)),
+            ValueMessage::GetValue => {
+                Ok(ValueResponse::Value(self.state_ptr.value))
+            }
         }
     }
 }
@@ -1311,7 +1321,10 @@ async fn test_persist_full_event_requests_snapshot_only_when_due() {
     let recovered = store_ref.ask(StoreCommand::Recover).await.unwrap();
     match recovered {
         StoreResponse::State(Some(state)) => {
-            assert_eq!(state.value, 5, "snapshot should have been created inline");
+            assert_eq!(
+                state.value, 5,
+                "snapshot should have been created inline"
+            );
         }
         _ => panic!("expected recovered state after inline snapshot"),
     }

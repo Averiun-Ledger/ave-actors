@@ -88,7 +88,7 @@ impl Handler<SingleEventActor> for SingleEventActor {
         match msg {
             Msg::SetData(new_data) => {
                 println!("  [HANDLER] Setting data: '{}'", new_data);
-                self.persist(&DataSet(new_data), ctx).await?;
+                self.persist(DataSet(new_data), ctx).await?;
                 Ok(Resp {
                     data: self.state_ptr.data.clone(),
                 })

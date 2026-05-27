@@ -84,7 +84,7 @@ impl Handler<PathActor> for PathActor {
         msg: PathMsg,
         ctx: &mut ActorContext<PathActor>,
     ) -> Result<PathResp, ActorError> {
-        self.persist(&PathEvent(msg.0), ctx).await?;
+        self.persist(PathEvent(msg.0), ctx).await?;
         Ok(PathResp(self.state_ptr.value))
     }
 }
@@ -227,7 +227,7 @@ async fn test_explicit_prefix_usage() {
             msg: PathMsg,
             ctx: &mut ActorContext<PrefixActor>,
         ) -> Result<PathResp, ActorError> {
-            self.persist(&PathEvent(msg.0), ctx).await?;
+            self.persist(PathEvent(msg.0), ctx).await?;
             Ok(PathResp(self.state_ptr.value))
         }
     }

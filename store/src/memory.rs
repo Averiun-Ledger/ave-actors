@@ -31,6 +31,7 @@ impl MemoryManager {
         prefix: &str,
     ) -> Result<MemoryStore, Error> {
         let mut data_lock = self.data.write().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockManagerData,
             reason: e.to_string(),
         })?;
@@ -95,6 +96,7 @@ impl State for MemoryStore {
 
     fn get(&self) -> Result<Vec<u8>, Error> {
         let lock = self.data.read().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -113,6 +115,7 @@ impl State for MemoryStore {
         self.data
             .write()
             .map_err(|e| Error::Store {
+                source: None,
                 operation: StoreOperation::LockData,
                 reason: e.to_string(),
             })?
@@ -123,6 +126,7 @@ impl State for MemoryStore {
 
     fn del(&mut self) -> Result<(), Error> {
         let mut lock = self.data.write().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -138,6 +142,7 @@ impl State for MemoryStore {
         self.data
             .write()
             .map_err(|e| Error::Store {
+                source: None,
                 operation: StoreOperation::LockData,
                 reason: e.to_string(),
             })?
@@ -159,6 +164,7 @@ impl Collection for MemoryStore {
     fn get(&self, key: &str) -> Result<Vec<u8>, Error> {
         let key = format!("{}.{}", self.prefix, key);
         let lock = self.data.read().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -174,6 +180,7 @@ impl Collection for MemoryStore {
         self.data
             .write()
             .map_err(|e| Error::Store {
+                source: None,
                 operation: StoreOperation::LockData,
                 reason: e.to_string(),
             })?
@@ -185,6 +192,7 @@ impl Collection for MemoryStore {
     fn del(&mut self, key: &str) -> Result<(), Error> {
         let key = format!("{}.{}", self.prefix, key);
         let mut lock = self.data.write().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -196,6 +204,7 @@ impl Collection for MemoryStore {
 
     fn purge(&mut self) -> Result<(), Error> {
         let mut lock = self.data.write().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -221,6 +230,7 @@ impl Collection for MemoryStore {
         Error,
     > {
         let lock = self.data.read().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -259,6 +269,7 @@ impl Collection for MemoryStore {
         Error,
     > {
         let lock = self.data.read().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;

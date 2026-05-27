@@ -87,7 +87,7 @@ impl Handler<CounterActor> for CounterActor {
     ) -> Result<CounterResponse, ActorError> {
         match msg {
             CounterMessage::Increment => {
-                self.persist(&Incremented, ctx).await?;
+                self.persist(Incremented, ctx).await?;
                 Ok(CounterResponse {
                     count: self.state_ptr.count,
                 })
