@@ -39,7 +39,7 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     /// Child action senders.
     child_senders: HashMap<ActorPath, StopHandle>,
     /// Named sinks registered for this actor.
-    sinks: Arc<DashMap<String, Sink<A::Event>>>,
+    sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
 
     span: tracing::Span,
 }
@@ -54,7 +54,7 @@ where
         system: SystemRef,
         error_sender: ChildErrorSender,
         inner_sender: InnerSender,
-        sinks: Arc<DashMap<String, Sink<A::Event>>>,
+        sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
         span: Span,
     ) -> Self {
         Self {
@@ -153,13 +153,14 @@ where
 
     /// Register a named sink for this actor.
     ///
-    /// If a sink with the same name already exists it is replaced.
-    pub fn register_sink(&self, sink: Sink<A::Event>) {
-        self.sinks.insert(sink.name().to_string(), sink);
+    /// If a sink with the same name already exists it is replaced and the
+    /// previous sink is returned.
+    pub fn register_sink(&self, sink: Sink<A::SinkEvent>) -> Option<Sink<A::SinkEvent>> {
+        self.sinks.insert(sink.name().to_string(), sink)
     }
 
     /// Remove the sink named `name` and return it, if present.
-    pub fn remove_sink(&self, name: &str) -> Option<Sink<A::Event>> {
+    pub fn remove_sink(&self, name: &str) -> Option<Sink<A::SinkEvent>> {
         self.sinks.remove(name).map(|(_, v)| v)
     }
 
@@ -167,7 +168,7 @@ where
     ///
     /// If the sink does not exist a `debug!` log is emitted and the event
     /// is silently dropped (no-op).
-    pub fn publish_to(&self, sink_name: impl AsRef<str>, event: A::Event) {
+    pub fn publish_to(&self, sink_name: impl AsRef<str>, event: A::SinkEvent) {
         let name = sink_name.as_ref();
         if let Some(entry) = self.sinks.get(name) {
             entry.value().send(Arc::new(event));
@@ -177,7 +178,7 @@ where
     }
 
     /// Send `event` to every registered sink (fire-and-forget).
-    pub fn publish_all(&self, event: A::Event) {
+    pub fn publish_all(&self, event: A::SinkEvent) {
         if !self.sinks.is_empty() {
             let event = Arc::new(event);
             for entry in self.sinks.iter() {
@@ -191,7 +192,7 @@ where
     pub fn publish_filtered(
         &self,
         predicate: impl Fn(&str) -> bool,
-        event: A::Event,
+        event: A::SinkEvent,
     ) {
         if self.sinks.is_empty() {
             return;
@@ -388,6 +389,9 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
     /// The type of events this actor can broadcast to subscribers.
     type Event: Event;
 
+    /// The type of events this actor sends to its sinks.
+    type SinkEvent: Event;
+
     /// The type returned by the actor in response to each message.
     type Response: Response;
 
@@ -565,7 +569,7 @@ where
     /// The actor stop sender.
     stop_sender: StopSender,
     /// Named sinks registered for this actor.
-    sinks: Arc<DashMap<String, Sink<A::Event>>>,
+    sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
 }
 
 impl<A> ActorRef<A>
@@ -576,7 +580,7 @@ where
         path: ActorPath,
         sender: HandleHelper<A>,
         stop_sender: StopSender,
-        sinks: Arc<DashMap<String, Sink<A::Event>>>,
+        sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
     ) -> Self {
         Self {
             path,
@@ -639,12 +643,15 @@ where
     }
 
     /// Register a sink from external code.
-    pub fn register_sink(&self, sink: Sink<A::Event>) {
-        self.sinks.insert(sink.name().to_string(), sink);
+    ///
+    /// If a sink with the same name already exists it is replaced and the
+    /// previous sink is returned.
+    pub fn register_sink(&self, sink: Sink<A::SinkEvent>) -> Option<Sink<A::SinkEvent>> {
+        self.sinks.insert(sink.name().to_string(), sink)
     }
 
     /// Remove a sink from external code.
-    pub fn remove_sink(&self, name: &str) -> Option<Sink<A::Event>> {
+    pub fn remove_sink(&self, name: &str) -> Option<Sink<A::SinkEvent>> {
         self.sinks.remove(name).map(|(_, v)| v)
     }
 
@@ -717,6 +724,7 @@ mod test {
     impl Actor for TestActor {
         type Message = TestMessage;
         type Event = TestEvent;
+    type SinkEvent = Self::Event;
         type Response = TestResponse;
 
         fn get_span(

@@ -52,6 +52,7 @@ impl Actor for SingleEventActor {
     type Message = Msg;
     type Response = Resp;
     type Event = DataSet;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,

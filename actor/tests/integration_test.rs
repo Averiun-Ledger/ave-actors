@@ -54,6 +54,7 @@ impl Actor for TestActor {
     type Message = TestCommand;
     type Response = TestResponse;
     type Event = TestEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -181,6 +182,7 @@ impl Actor for ChildActor {
     type Message = ChildCommand;
     type Response = ChildResponse;
     type Event = ChildEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,

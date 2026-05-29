@@ -16,9 +16,11 @@ use tracing::{error, warn};
 pub enum RetryPolicy {
     /// If the subscriber fails it is ignored immediately.
     None,
-    /// Retry up to `max` times waiting `backoff` between attempts.
+    /// Retry up to `max` **additional** times waiting `backoff` between
+    /// attempts.  The total number of delivery attempts is `max + 1`
+    /// (one initial attempt plus `max` retries).
     AtMost {
-        /// Maximum number of retry attempts.
+        /// Maximum number of retry attempts *after* the first try.
         max: u32,
         /// Fixed backoff duration between retries.
         backoff: Duration,
@@ -126,6 +128,16 @@ impl<E: Event> Sink<E> {
         Some(self.entries.remove(pos))
     }
 
+    /// Returns the number of subscriber entries in this sink.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns `true` if this sink has no subscribers.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Remove all subscriber entries from this sink.
     pub fn clear(&mut self) {
         self.entries.clear();
@@ -139,7 +151,6 @@ impl<E: Event> Sink<E> {
     /// retries with the configured backoff.  After exhausting retries (or if
     /// no retry is configured) the error is logged.
     pub fn send(&self, event: Arc<E>) {
-        let sink_name = self.name.clone();
         for entry in &self.entries {
             if !(entry.filter)(&event) {
                 continue;
@@ -148,7 +159,7 @@ impl<E: Event> Sink<E> {
             let id = entry.id.clone();
             let retry = entry.retry;
             let event = Arc::clone(&event);
-            let sink_name = sink_name.clone();
+            let sink_name = self.name.clone();
             tokio::spawn(async move {
                 match retry {
                     RetryPolicy::None => {
@@ -162,27 +173,23 @@ impl<E: Event> Sink<E> {
                         }
                     }
                     RetryPolicy::AtMost { max, backoff } => {
-                        let mut ok = false;
                         for attempt in 0..=max {
                             match subscriber.notify(Arc::clone(&event)).await {
-                                Ok(()) => {
-                                    ok = true;
-                                    break;
-                                }
+                                Ok(()) => break,
                                 Err(err) => {
                                     if attempt == max {
                                         error!(
                                             subscriber = %id,
                                             sink = %sink_name,
                                             error = %err,
-                                            attempts = max,
+                                            attempts = max + 1,
                                             "Subscriber exhausted retries"
                                         );
                                     } else {
                                         warn!(
                                             subscriber = %id,
                                             sink = %sink_name,
-                                            attempt,
+                                            attempt = attempt + 1,
                                             "Subscriber failed, retrying"
                                         );
                                         tokio::time::sleep(backoff).await;
@@ -190,16 +197,15 @@ impl<E: Event> Sink<E> {
                                 }
                             }
                         }
-                        if !ok {
-                            error!(
-                                subscriber = %id,
-                                sink = %sink_name,
-                                "Subscriber permanently failed"
-                            );
-                        }
                     }
                 }
             });
         }
+    }
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self::None
     }
 }

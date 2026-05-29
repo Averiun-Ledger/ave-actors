@@ -54,6 +54,7 @@ impl Actor for EdgeCaseActor {
     type Message = EdgeCaseCommand;
     type Response = EdgeCaseResponse;
     type Event = EdgeCaseEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -219,6 +220,7 @@ impl Actor for FailingActor {
     type Message = EdgeCaseCommand;
     type Response = EdgeCaseResponse;
     type Event = EdgeCaseEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,

@@ -67,6 +67,7 @@ impl Actor for VectorActor {
     type Message = VectorMessage;
     type Response = VectorResponse;
     type Event = NumberAdded;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,

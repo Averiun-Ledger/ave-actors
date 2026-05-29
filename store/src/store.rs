@@ -1153,6 +1153,7 @@ where
     type Message = StoreCommand<A>;
     type Response = StoreResponse<A>;
     type Event = ();
+    type SinkEvent = ();
 
     fn get_span(
         id: &str,
@@ -1345,6 +1346,7 @@ mod tests {
     impl Actor for CounterActor {
         type Message = CounterMessage;
         type Event = CounterEvent;
+    type SinkEvent = Self::Event;
         type Response = CounterResponse;
 
         fn get_span(
@@ -1428,6 +1430,7 @@ mod tests {
     impl Actor for FullCounterActor {
         type Message = CounterMessage;
         type Event = CounterEvent;
+    type SinkEvent = Self::Event;
         type Response = CounterResponse;
 
         fn get_span(

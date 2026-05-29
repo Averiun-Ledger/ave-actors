@@ -48,6 +48,7 @@ impl Actor for TestActor {
     type Message = TestMessage;
     type Response = TestResponse;
     type Event = SinkTestEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -228,6 +229,7 @@ impl Actor for FailingHandlerActor {
     type Message = TestMessage;
     type Response = TestResponse;
     type Event = SinkTestEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -313,6 +315,7 @@ async fn test_message_serialization_edge_cases() {
         type Message = ComplexMessage;
         type Response = TestResponse;
         type Event = SinkTestEvent;
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -387,6 +390,7 @@ async fn test_message_ordering_and_mailbox() {
         type Message = OrderedMessage;
         type Response = TestResponse;
         type Event = SinkTestEvent;
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -464,6 +468,7 @@ async fn test_handler_context_operations() {
         type Message = ContextMessage;
         type Response = TestResponse;
         type Event = SinkTestEvent;
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,

@@ -67,6 +67,7 @@ impl Actor for DebugActor {
     type Message = DebugMessage;
     type Response = DebugResponse;
     type Event = DebugEvent;
+    type SinkEvent = Self::Event;
     fn get_span(
         id: &str,
         _parent_span: Option<tracing::Span>,

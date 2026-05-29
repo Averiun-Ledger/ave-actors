@@ -45,6 +45,7 @@ impl Actor for AlwaysFailStartActor {
     type Message = StartMessage;
     type Response = StartResponse;
     type Event = StartEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -89,6 +90,7 @@ impl Actor for HealthyActor {
     type Message = StartMessage;
     type Response = StartResponse;
     type Event = StartEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -155,6 +157,7 @@ impl Actor for RuntimeRestartActor {
     type Message = RestartMessage;
     type Response = RestartResponse;
     type Event = RestartEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -226,6 +229,7 @@ impl Actor for CountingTarget {
     type Message = CountMessage;
     type Response = ();
     type Event = CountEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -278,6 +282,7 @@ impl Actor for RootErrorActor {
     type Message = RootErrorMessage;
     type Response = RootErrorResponse;
     type Event = RootErrorEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -320,6 +325,7 @@ impl Actor for HangingStartActor {
     type Message = StartMessage;
     type Response = StartResponse;
     type Event = StartEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -378,6 +384,7 @@ impl Actor for BlockingChild {
     type Message = StopControl;
     type Response = ();
     type Event = StopEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -417,6 +424,7 @@ impl Actor for ParentWithBlockingChild {
     type Message = StopControl;
     type Response = ();
     type Event = StopEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -468,6 +476,7 @@ impl Actor for BlockingRootActor {
     type Message = StopControl;
     type Response = ();
     type Event = StopEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,

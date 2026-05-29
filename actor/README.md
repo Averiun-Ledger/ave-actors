@@ -46,12 +46,11 @@ tracing = "0.1"
 | `ActorRef::ask_timeout` | one message and a `Duration` | `Result<Response, Error>` | Same as `ask`, but fails with `Error::Timeout` |
 | `ActorRef::ask_stop` | nothing | `Result<(), Error>` | Requests graceful shutdown and waits for confirmation |
 | `ActorRef::tell_stop` | nothing | `()` | Requests shutdown without waiting |
-| `ActorRef::subscribe` | nothing | `broadcast::Receiver<Event>` | Legacy broadcast subscription to actor events |
-| `ActorRef::register_sink` | `Sink<Event>` | `()` | Registers a named sink from external code |
-| `ActorRef::remove_sink` | `&str` | `Option<Sink<Event>>` | Removes a previously registered sink |
-| `ActorContext::publish_to` | `&str` + `Event` | `()` | Publishes an event to a specific sink (fire-and-forget) |
-| `ActorContext::publish_all` | `Event` | `Result<(), Error>` | Publishes an event to all registered sinks and legacy broadcast |
-| `ActorContext::publish_filtered` | `Fn(&str) -> bool` + `Event` | `()` | Publishes to sinks whose name matches a predicate (fire-and-forget) |
+| `ActorRef::register_sink` | `Sink<SinkEvent>` | `()` | Registers a named sink from external code |
+| `ActorRef::remove_sink` | `&str` | `Option<Sink<SinkEvent>>` | Removes a previously registered sink |
+| `ActorContext::publish_to` | `&str` + `SinkEvent` | `()` | Publishes an event to a specific sink (fire-and-forget) |
+| `ActorContext::publish_all` | `SinkEvent` | `Result<(), Error>` | Publishes an event to all registered sinks |
+| `ActorContext::publish_filtered` | `Fn(&str) -> bool` + `SinkEvent` | `()` | Publishes to sinks whose name matches a predicate (fire-and-forget) |
 
 ---
 

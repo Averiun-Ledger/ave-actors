@@ -151,6 +151,7 @@ impl Actor for ConcurrentActor {
     type Message = ConcurrentMessage;
     type Response = ConcurrentResponse;
     type Event = ConcurrentEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,

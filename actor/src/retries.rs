@@ -250,6 +250,7 @@ where
     type Message = RetryMessage;
     type Response = ();
     type Event = ();
+    type SinkEvent = ();
 
     fn get_span(
         id: &str,
@@ -347,6 +348,7 @@ mod tests {
         type Message = SourceMessage;
         type Response = ();
         type Event = ();
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -424,6 +426,7 @@ mod tests {
         type Message = ParentMsg;
         type Response = ();
         type Event = ();
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -488,6 +491,7 @@ mod tests {
         type Message = PassiveMessage;
         type Response = ();
         type Event = ();
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -525,6 +529,7 @@ mod tests {
         type Message = CountMessage;
         type Response = ();
         type Event = ();
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -566,6 +571,7 @@ mod tests {
         type Message = TargetMessage;
         type Response = ();
         type Event = ();
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -635,6 +641,7 @@ mod tests {
         type Message = StopAfterFirstMessage;
         type Response = ();
         type Event = ();
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,

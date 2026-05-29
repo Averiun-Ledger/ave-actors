@@ -73,7 +73,7 @@ pub struct ActorRunner<A: Actor> {
     inner_sender: InnerSender,
     inner_receiver: InnerReceiver,
     stop_signal: bool,
-    sinks: Arc<DashMap<String, Sink<A::Event>>>,
+    sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
 }
 
 impl<A> ActorRunner<A>
@@ -91,7 +91,7 @@ where
         let (error_sender, error_receiver) = mpsc::channel(256);
         let (inner_sender, inner_receiver) = mpsc::channel(1024);
         let helper = HandleHelper::new(sender);
-        let sinks = Arc::new(DashMap::<String, Sink<A::Event>>::new());
+        let sinks = Arc::new(DashMap::<String, Sink<A::SinkEvent>>::new());
 
         let actor_ref = ActorRef::new(
             path.clone(),
@@ -656,6 +656,7 @@ mod tests {
         type Message = TestMessage;
         type Response = ();
         type Event = TestEvent;
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -807,6 +808,7 @@ mod tests {
     impl Actor for DrainActor {
         type Message = DrainMsg;
         type Event = DrainEvent;
+    type SinkEvent = Self::Event;
         type Response = ();
 
         fn get_span(id: &str, _parent: Option<tracing::Span>) -> tracing::Span {
@@ -868,6 +870,7 @@ mod tests {
     impl Actor for SlowActor {
         type Message = SlowMsg;
         type Event = SlowEvent;
+    type SinkEvent = Self::Event;
         type Response = ();
 
         fn get_span(id: &str, _parent: Option<tracing::Span>) -> tracing::Span {
@@ -1056,6 +1059,7 @@ mod tests {
         type Message = ();
         type Response = ();
         type Event = TestEvent;
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -1133,6 +1137,7 @@ mod tests {
         type Message = ();
         type Response = ();
         type Event = TestEvent;
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -1210,6 +1215,7 @@ mod tests {
         type Message = ();
         type Response = ();
         type Event = TestEvent;
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -1413,6 +1419,7 @@ mod tests {
         type Message = ();
         type Response = ();
         type Event = TestEvent;
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -1503,6 +1510,7 @@ mod tests {
         type Message = ();
         type Response = ();
         type Event = TestEvent;
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,

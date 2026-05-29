@@ -75,6 +75,7 @@ impl Actor for StressActor {
     type Message = StressMessage;
     type Response = StressResponse;
     type Event = StressEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,

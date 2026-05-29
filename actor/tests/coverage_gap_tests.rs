@@ -65,6 +65,7 @@ impl Actor for EventEmitterActor {
     type Message = SimpleMsg;
     type Response = ();
     type Event = SimpleEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -136,6 +137,7 @@ impl Actor for MinimalActor {
     type Message = SimpleMsg;
     type Response = SimpleResponse;
     type Event = SimpleEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -187,6 +189,7 @@ async fn test_ask_timeout_hits_deadline() {
         type Message = SimpleMsg;
         type Response = ();
         type Event = SimpleEvent;
+    type SinkEvent = Self::Event;
         fn get_span(
             id: &str,
             _parent_span: Option<tracing::Span>,
@@ -271,6 +274,7 @@ impl Actor for ParentOfFaultyChild {
     type Message = ParentMsg;
     type Response = ParentResponse;
     type Event = ParentEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -356,6 +360,7 @@ impl Actor for FaultyChildActor {
     type Message = FaultyChildMsg;
     type Response = FaultyChildResponse;
     type Event = FaultyChildEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -407,6 +412,7 @@ impl Actor for ErrorChildActor {
     type Message = ErrorChildMsg;
     type Response = ErrorChildResponse;
     type Event = ErrorChildEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -551,6 +557,7 @@ impl Actor for ChildCreatorActor {
     type Message = CreatorMsg;
     type Response = CreatorResponse;
     type Event = CreatorEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -635,6 +642,7 @@ impl Actor for RootFailActor {
     type Message = RootFailMsg;
     type Response = RootFailResponse;
     type Event = RootFailEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -718,6 +726,7 @@ impl Actor for WatchingParent {
     type Message = WatchMsg;
     type Response = WatchResponse;
     type Event = WatchEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -805,6 +814,7 @@ impl Actor for AlwaysFailActor {
     type Message = SimpleMsg;
     type Response = ();
     type Event = SimpleEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -880,6 +890,7 @@ impl Actor for NotifyParentTarget {
     type Message = NotifyTargetMsg;
     type Response = NotifyTargetResponse;
     type Event = NotifyTargetEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -931,6 +942,7 @@ impl Actor for RetryNotifyParent {
     type Message = RetryNotifyMsg;
     type Response = RetryNotifyResponse;
     type Event = RetryNotifyEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -1040,6 +1052,7 @@ impl Actor for DrainTestActor {
     type Message = DrainTestMsg;
     type Response = DrainTestResponse;
     type Event = DrainTestEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -1136,6 +1149,7 @@ impl Actor for ErrorPublisherActor {
     type Message = ErrorPublisherMsg;
     type Response = ErrorPublisherResponse;
     type Event = ErrorPublisherEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -1228,6 +1242,7 @@ impl Actor for DefaultBehaviorActor {
     type Message = DefaultBehaviorMsg;
     type Response = DefaultBehaviorResponse;
     type Event = DefaultBehaviorEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -1427,6 +1442,7 @@ impl Actor for SelfStopActor {
     type Message = SelfStopMsg;
     type Response = SelfStopResponse;
     type Event = SelfStopEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,

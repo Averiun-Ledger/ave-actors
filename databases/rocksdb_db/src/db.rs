@@ -706,35 +706,33 @@ impl Iterator for RocksDbIterator<'_> {
     type Item = Result<(String, Vec<u8>), Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        for item in self.iter.by_ref() {
-            match item {
-                Ok((key, value)) => {
-                    if !key.starts_with(&self.prefix_dot) {
-                        return None;
+        let item = self.iter.next()?;
+        match item {
+            Ok((key, value)) => {
+                if !key.starts_with(&self.prefix_dot) {
+                    return None;
+                }
+                let suffix = &key[self.prefix_dot.len()..];
+                let key_str = match std::str::from_utf8(suffix) {
+                    Ok(s) => s.to_owned(),
+                    Err(error) => {
+                        return Some(Err(Error::Get {
+                            key: String::from_utf8_lossy(&key).into_owned(),
+                            reason: format!("{}", error),
+                        }));
                     }
-                    let suffix = &key[self.prefix_dot.len()..];
-                    let key_str = match std::str::from_utf8(suffix) {
-                        Ok(s) => s.to_owned(),
-                        Err(error) => {
-                            return Some(Err(Error::Get {
-                                key: String::from_utf8_lossy(&key).into_owned(),
-                                reason: format!("{}", error),
-                            }));
-                        }
-                    };
-                    return Some(Ok((key_str, value.to_vec())));
-                }
-                Err(e) => {
-                    error!(error = %e, "RocksDB iteration error");
-                    return Some(Err(Error::Get {
-                        key: String::from_utf8_lossy(&self.prefix_dot)
-                            .into_owned(),
-                        reason: format!("{}", e),
-                    }));
-                }
+                };
+                Some(Ok((key_str, value.to_vec())))
+            }
+            Err(e) => {
+                error!(error = %e, "RocksDB iteration error");
+                Some(Err(Error::Get {
+                    key: String::from_utf8_lossy(&self.prefix_dot)
+                        .into_owned(),
+                    reason: format!("{}", e),
+                }))
             }
         }
-        None
     }
 }
 
@@ -789,42 +787,39 @@ impl Iterator for RocksDbRangeIterator<'_> {
     type Item = Result<(String, Vec<u8>), Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        for item in self.iter.by_ref() {
-            match item {
-                Ok((key, value)) => {
-                    if !key.starts_with(&self.prefix_dot) {
-                        return None;
-                    }
-                    if !self.reverse && key.as_ref() > self.end_key.as_slice() {
-                        return None;
-                    }
-                    if self.reverse && key.as_ref() < self.start_key.as_slice()
-                    {
-                        return None;
-                    }
-                    let suffix = &key[self.prefix_dot.len()..];
-                    let key_str = match std::str::from_utf8(suffix) {
-                        Ok(s) => s.to_owned(),
-                        Err(error) => {
-                            return Some(Err(Error::Get {
-                                key: String::from_utf8_lossy(&key).into_owned(),
-                                reason: format!("{}", error),
-                            }));
-                        }
-                    };
-                    return Some(Ok((key_str, value.to_vec())));
+        let item = self.iter.next()?;
+        match item {
+            Ok((key, value)) => {
+                if !key.starts_with(&self.prefix_dot) {
+                    return None;
                 }
-                Err(e) => {
-                    error!(error = %e, "RocksDB range iteration error");
-                    return Some(Err(Error::Get {
-                        key: String::from_utf8_lossy(&self.prefix_dot)
-                            .into_owned(),
-                        reason: format!("{}", e),
-                    }));
+                if !self.reverse && key.as_ref() > self.end_key.as_slice() {
+                    return None;
                 }
+                if self.reverse && key.as_ref() < self.start_key.as_slice() {
+                    return None;
+                }
+                let suffix = &key[self.prefix_dot.len()..];
+                let key_str = match std::str::from_utf8(suffix) {
+                    Ok(s) => s.to_owned(),
+                    Err(error) => {
+                        return Some(Err(Error::Get {
+                            key: String::from_utf8_lossy(&key).into_owned(),
+                            reason: format!("{}", error),
+                        }));
+                    }
+                };
+                Some(Ok((key_str, value.to_vec())))
+            }
+            Err(e) => {
+                error!(error = %e, "RocksDB range iteration error");
+                Some(Err(Error::Get {
+                    key: String::from_utf8_lossy(&self.prefix_dot)
+                        .into_owned(),
+                    reason: format!("{}", e),
+                }))
             }
         }
-        None
     }
 }
 

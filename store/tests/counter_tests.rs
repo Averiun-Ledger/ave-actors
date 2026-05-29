@@ -71,6 +71,7 @@ impl Actor for CounterTestActor {
     type Message = CounterMessage;
     type Response = CounterResponse;
     type Event = CounterEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,

@@ -47,6 +47,7 @@ impl Actor for PathActor {
     type Message = PathMsg;
     type Response = PathResp;
     type Event = PathEvent;
+    type SinkEvent = Self::Event;
     fn get_span(
         id: &str,
         _parent_span: Option<tracing::Span>,
@@ -189,6 +190,7 @@ async fn test_explicit_prefix_usage() {
         type Message = PathMsg;
         type Response = PathResp;
         type Event = PathEvent;
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,

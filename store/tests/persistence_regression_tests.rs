@@ -399,6 +399,7 @@ impl Actor for RollbackLightActor {
     type Message = ValueMessage;
     type Response = ValueResponse;
     type Event = ValueEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -487,6 +488,7 @@ impl Actor for GapActor {
     type Message = ValueMessage;
     type Response = ValueResponse;
     type Event = ValueEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -563,6 +565,7 @@ impl Actor for CompactingActor {
     type Message = ValueMessage;
     type Response = ValueResponse;
     type Event = ValueEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,

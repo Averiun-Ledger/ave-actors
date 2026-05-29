@@ -50,6 +50,7 @@ impl Actor for EmitterActor {
     type Message = TestMsg;
     type Response = TestResponse;
     type Event = TestEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -199,6 +200,7 @@ async fn test_sink_survives_restart() {
         type Message = TestMsg;
         type Response = TestResponse;
         type Event = TestEvent;
+    type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -319,6 +321,7 @@ impl Actor for FilteredActor {
     type Message = FilteredMsg;
     type Response = TestResponse;
     type Event = TestEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -393,6 +396,7 @@ impl Actor for NoopActor {
     type Message = NoopMsg;
     type Response = TestResponse;
     type Event = TestEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -544,6 +548,7 @@ impl Actor for RoutingActor {
     type Message = RouteMsg;
     type Response = TestResponse;
     type Event = TestEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,

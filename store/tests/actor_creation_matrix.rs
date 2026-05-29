@@ -69,6 +69,7 @@ impl Actor for MyPersistentActor {
     type Message = PersistentMessage;
     type Response = PersistentResponse;
     type Event = PersistentEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -146,6 +147,7 @@ impl Actor for MyNonPersistentActor {
     type Message = NonPersistentMessage;
     type Response = NonPersistentResponse;
     type Event = NonPersistentEvent;
+    type SinkEvent = Self::Event;
 
     fn get_span(
         id: &str,
@@ -182,6 +184,7 @@ impl Actor for ParentActor {
     type Message = ParentMessage;
     type Response = ();
     type Event = ();
+    type SinkEvent = Self::Event;
     fn get_span(
         id: &str,
         _parent_span: Option<tracing::Span>,
