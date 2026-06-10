@@ -68,12 +68,12 @@ impl Actor for TestActor {
 }
 
 #[async_trait]
-impl Handler<TestActor> for TestActor {
+impl Handler<Self> for TestActor {
     async fn handle_message(
         &mut self,
         _sender: ave_actors_actor::ActorPath,
         _msg: TestMessage,
-        _ctx: &mut ActorContext<TestActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, ActorError> {
         Ok(TestResponse)
     }
@@ -281,7 +281,7 @@ async fn test_full_persistence_recovery_logic_investigation() {
 
     let result = store_ref2.ask(StoreCommand::Recover).await.unwrap();
 
-    if let StoreResponse::State(None) = result {
+    if matches!(result, StoreResponse::State(None)) {
         println!(
             "\n❌ CONFIRMED: recover() returned None even though events exist"
         );

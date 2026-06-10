@@ -3,9 +3,8 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
-    Event, IntervalStrategy, Handler, Message, NoIntervalStrategy,
-    Response, RetryActor, RetryMessage, ShutdownReason, Strategy,
-    SupervisionStrategy,
+    Event, Handler, IntervalStrategy, Message, NoIntervalStrategy, Response,
+    RetryActor, RetryMessage, ShutdownReason, Strategy, SupervisionStrategy,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -76,12 +75,12 @@ impl Actor for EventEmitterActor {
 }
 
 #[async_trait]
-impl Handler<EventEmitterActor> for EventEmitterActor {
+impl Handler<Self> for EventEmitterActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: SimpleMsg,
-        ctx: &mut ActorContext<EventEmitterActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         ctx.emit_error(Error::Functional {
             description: "root error".to_owned(),
@@ -148,17 +147,17 @@ impl Actor for MinimalActor {
 }
 
 #[async_trait]
-impl Handler<MinimalActor> for MinimalActor {
+impl Handler<Self> for MinimalActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: SimpleMsg,
-        ctx: &mut ActorContext<MinimalActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<SimpleResponse, Error> {
         // Use reference() to cover that path
         let _me = ctx.reference().await?;
         // Use get_child on non-existent child
-        let _ = ctx.get_child::<MinimalActor>("nope").await;
+        let _ = ctx.get_child::<Self>("nope").await;
         Ok(SimpleResponse(1))
     }
 }
@@ -189,7 +188,7 @@ async fn test_ask_timeout_hits_deadline() {
         type Message = SimpleMsg;
         type Response = ();
         type Event = SimpleEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
         fn get_span(
             id: &str,
             _parent_span: Option<tracing::Span>,
@@ -199,12 +198,12 @@ async fn test_ask_timeout_hits_deadline() {
     }
 
     #[async_trait]
-    impl Handler<SlowActor> for SlowActor {
+    impl Handler<Self> for SlowActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             _msg: SimpleMsg,
-            _ctx: &mut ActorContext<SlowActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             tokio::time::sleep(Duration::from_secs(10)).await;
             Ok(())
@@ -284,19 +283,20 @@ impl Actor for ParentOfFaultyChild {
     }
 
     fn supervision_strategy() -> SupervisionStrategy {
-        SupervisionStrategy::Retry(Strategy::Interval(
-            IntervalStrategy::new(3, Duration::from_millis(10)),
-        ))
+        SupervisionStrategy::Retry(Strategy::Interval(IntervalStrategy::new(
+            3,
+            Duration::from_millis(10),
+        )))
     }
 }
 
 #[async_trait]
-impl Handler<ParentOfFaultyChild> for ParentOfFaultyChild {
+impl Handler<Self> for ParentOfFaultyChild {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: ParentMsg,
-        ctx: &mut ActorContext<ParentOfFaultyChild>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<ParentResponse, Error> {
         match msg {
             ParentMsg::CreateFaultyChild => {
@@ -319,7 +319,7 @@ impl Handler<ParentOfFaultyChild> for ParentOfFaultyChild {
     async fn on_child_error(
         &mut self,
         _error: Error,
-        _ctx: &mut ActorContext<ParentOfFaultyChild>,
+        _ctx: &mut ActorContext<Self>,
     ) {
         self.child_error_count.fetch_add(1, Ordering::SeqCst);
     }
@@ -327,7 +327,7 @@ impl Handler<ParentOfFaultyChild> for ParentOfFaultyChild {
     async fn on_child_fault(
         &mut self,
         _error: Error,
-        _ctx: &mut ActorContext<ParentOfFaultyChild>,
+        _ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         self.child_fault_count.fetch_add(1, Ordering::SeqCst);
         self.action_to_return.clone()
@@ -371,12 +371,12 @@ impl Actor for FaultyChildActor {
 }
 
 #[async_trait]
-impl Handler<FaultyChildActor> for FaultyChildActor {
+impl Handler<Self> for FaultyChildActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: FaultyChildMsg,
-        ctx: &mut ActorContext<FaultyChildActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<FaultyChildResponse, Error> {
         ctx.emit_fail(Error::Functional {
             description: "child fault".to_owned(),
@@ -423,12 +423,12 @@ impl Actor for ErrorChildActor {
 }
 
 #[async_trait]
-impl Handler<ErrorChildActor> for ErrorChildActor {
+impl Handler<Self> for ErrorChildActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: ErrorChildMsg,
-        ctx: &mut ActorContext<ErrorChildActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<ErrorChildResponse, Error> {
         ctx.emit_error(Error::Functional {
             description: "child error".to_owned(),
@@ -568,12 +568,12 @@ impl Actor for ChildCreatorActor {
 }
 
 #[async_trait]
-impl Handler<ChildCreatorActor> for ChildCreatorActor {
+impl Handler<Self> for ChildCreatorActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: CreatorMsg,
-        ctx: &mut ActorContext<ChildCreatorActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<CreatorResponse, Error> {
         match msg {
             CreatorMsg::CreateChild => {
@@ -657,12 +657,12 @@ impl Actor for RootFailActor {
 }
 
 #[async_trait]
-impl Handler<RootFailActor> for RootFailActor {
+impl Handler<Self> for RootFailActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: RootFailMsg,
-        ctx: &mut ActorContext<RootFailActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<RootFailResponse, Error> {
         ctx.emit_fail(Error::Functional {
             description: "root fail".to_owned(),
@@ -737,12 +737,12 @@ impl Actor for WatchingParent {
 }
 
 #[async_trait]
-impl Handler<WatchingParent> for WatchingParent {
+impl Handler<Self> for WatchingParent {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: WatchMsg,
-        ctx: &mut ActorContext<WatchingParent>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<WatchResponse, Error> {
         match msg {
             WatchMsg::SpawnChild => {
@@ -768,7 +768,7 @@ impl Handler<WatchingParent> for WatchingParent {
     async fn on_child_error(
         &mut self,
         _error: Error,
-        _ctx: &mut ActorContext<WatchingParent>,
+        _ctx: &mut ActorContext<Self>,
     ) {
         // Default logs error; we override to do nothing extra.
     }
@@ -838,12 +838,12 @@ impl Actor for AlwaysFailActor {
 }
 
 #[async_trait]
-impl Handler<AlwaysFailActor> for AlwaysFailActor {
+impl Handler<Self> for AlwaysFailActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: SimpleMsg,
-        _ctx: &mut ActorContext<AlwaysFailActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         Ok(())
     }
@@ -901,12 +901,12 @@ impl Actor for NotifyParentTarget {
 }
 
 #[async_trait]
-impl Handler<NotifyParentTarget> for NotifyParentTarget {
+impl Handler<Self> for NotifyParentTarget {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: NotifyTargetMsg,
-        _ctx: &mut ActorContext<NotifyParentTarget>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<NotifyTargetResponse, Error> {
         Ok(NotifyTargetResponse)
     }
@@ -955,7 +955,7 @@ impl Actor for RetryNotifyParent {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
-        let retry = RetryActor::new_with_parent_message::<RetryNotifyParent>(
+        let retry = RetryActor::new_with_parent_message::<Self>(
             NotifyParentTarget,
             NotifyTargetMsg,
             Strategy::NoInterval(NoIntervalStrategy::new(2)),
@@ -969,18 +969,15 @@ impl Actor for RetryNotifyParent {
 }
 
 #[async_trait]
-impl Handler<RetryNotifyParent> for RetryNotifyParent {
+impl Handler<Self> for RetryNotifyParent {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: RetryNotifyMsg,
-        _ctx: &mut ActorContext<RetryNotifyParent>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<RetryNotifyResponse, Error> {
-        match msg {
-            RetryNotifyMsg::Done => {
-                self.completions.fetch_add(1, Ordering::SeqCst);
-            }
-            _ => {}
+        if let RetryNotifyMsg::Done = msg {
+            self.completions.fetch_add(1, Ordering::SeqCst);
         }
         Ok(RetryNotifyResponse)
     }
@@ -1033,7 +1030,7 @@ enum DrainTestMsg {
 
 impl Message for DrainTestMsg {
     fn is_critical(&self) -> bool {
-        matches!(self, DrainTestMsg::Block)
+        matches!(self, Self::Block)
     }
 }
 
@@ -1063,12 +1060,12 @@ impl Actor for DrainTestActor {
 }
 
 #[async_trait]
-impl Handler<DrainTestActor> for DrainTestActor {
+impl Handler<Self> for DrainTestActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: DrainTestMsg,
-        _ctx: &mut ActorContext<DrainTestActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<DrainTestResponse, Error> {
         match msg {
             DrainTestMsg::Block => {
@@ -1160,12 +1157,12 @@ impl Actor for ErrorPublisherActor {
 }
 
 #[async_trait]
-impl Handler<ErrorPublisherActor> for ErrorPublisherActor {
+impl Handler<Self> for ErrorPublisherActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: ErrorPublisherMsg,
-        ctx: &mut ActorContext<ErrorPublisherActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<ErrorPublisherResponse, Error> {
         ctx.emit_error(Error::Functional {
             description: "published".to_owned(),
@@ -1252,9 +1249,10 @@ impl Actor for DefaultBehaviorActor {
     }
 
     fn supervision_strategy() -> SupervisionStrategy {
-        SupervisionStrategy::Retry(Strategy::Interval(
-            IntervalStrategy::new(1, Duration::from_millis(10)),
-        ))
+        SupervisionStrategy::Retry(Strategy::Interval(IntervalStrategy::new(
+            1,
+            Duration::from_millis(10),
+        )))
     }
 
     async fn pre_start(
@@ -1273,12 +1271,12 @@ impl Actor for DefaultBehaviorActor {
 }
 
 #[async_trait]
-impl Handler<DefaultBehaviorActor> for DefaultBehaviorActor {
+impl Handler<Self> for DefaultBehaviorActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: DefaultBehaviorMsg,
-        ctx: &mut ActorContext<DefaultBehaviorActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<DefaultBehaviorResponse, Error> {
         match msg {
             DefaultBehaviorMsg::SpawnErrorChild => {
@@ -1309,7 +1307,7 @@ impl Handler<DefaultBehaviorActor> for DefaultBehaviorActor {
     async fn on_child_error(
         &mut self,
         _error: Error,
-        _ctx: &mut ActorContext<DefaultBehaviorActor>,
+        _ctx: &mut ActorContext<Self>,
     ) {
         self.child_error_count.fetch_add(1, Ordering::SeqCst);
     }
@@ -1317,7 +1315,7 @@ impl Handler<DefaultBehaviorActor> for DefaultBehaviorActor {
     async fn on_child_fault(
         &mut self,
         _error: Error,
-        _ctx: &mut ActorContext<DefaultBehaviorActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         self.child_fault_count.fetch_add(1, Ordering::SeqCst);
         ChildAction::Stop
@@ -1453,12 +1451,12 @@ impl Actor for SelfStopActor {
 }
 
 #[async_trait]
-impl Handler<SelfStopActor> for SelfStopActor {
+impl Handler<Self> for SelfStopActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: SelfStopMsg,
-        ctx: &mut ActorContext<SelfStopActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<SelfStopResponse, Error> {
         ctx.stop(None).await;
         Ok(SelfStopResponse)

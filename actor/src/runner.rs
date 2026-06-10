@@ -268,6 +268,12 @@ where
                     // 3. Stop children.
                     ctx.stop_children().await;
 
+                    // 4. Drain sinks: give them a grace period to finish
+                    // pending events.
+                    if !restarting {
+                        self.drain_sinks().await;
+                    }
+
                     // Keep the actor registered while it restarts so lookups by path
                     // and pre-existing ActorRef handles remain valid.
                     if !restarting {
@@ -350,8 +356,7 @@ where
             self.receiver.close();
         }
 
-        let mut critical: Vec<Envelope<A>> =
-            Vec::with_capacity(self.receiver.len().min(64));
+        let mut critical: Vec<Envelope<A>> = Vec::new();
 
         while let Ok(mut msg) = self.receiver.try_recv() {
             if msg.is_critical() {
@@ -394,6 +399,36 @@ where
                 msg.respond_stopped();
             }
         }
+    }
+
+    /// Gracefully drain all registered sinks.
+    ///
+    /// Closes each sink's channel and waits up to
+    /// `A::event_drain_timeout()` for the worker to finish pending
+    /// events.  All sinks are shut down concurrently; each gets its own
+    /// independent deadline so one slow sink does not steal time from
+    /// the others.
+    async fn drain_sinks(&self) {
+        // Collect sinks first so we release DashMap shards before awaiting.
+        let sinks: Vec<Sink<A::SinkEvent>> =
+            self.sinks.iter().map(|e| e.value().clone()).collect();
+
+        let mut set = tokio::task::JoinSet::new();
+        for sink in sinks {
+            let deadline =
+                std::time::Instant::now() + A::event_drain_timeout();
+            set.spawn(async move {
+                if !sink.shutdown(deadline).await {
+                    warn!(
+                        sink = %sink.name(),
+                        timeout_ms = A::event_drain_timeout().as_millis(),
+                        "Sink drain timed out, aborting worker"
+                    );
+                }
+            });
+        }
+
+        while set.join_next().await.is_some() {}
     }
 
     /// Apply supervision strategy.
@@ -469,8 +504,7 @@ mod tests {
         Error,
         actor::{Actor, ActorContext, Event, Handler, Message},
         supervision::{
-            IntervalStrategy, NoIntervalStrategy, Strategy,
-            SupervisionStrategy,
+            IntervalStrategy, NoIntervalStrategy, Strategy, SupervisionStrategy,
         },
         system::SystemRef,
     };
@@ -511,7 +545,7 @@ mod tests {
         type Message = TestMessage;
         type Response = ();
         type Event = TestEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -560,7 +594,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<TestActor> for TestActor {
+    impl Handler<Self> for TestActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
@@ -581,12 +615,8 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_actor_root_failed() {
-
-
-        let system = SystemRef::new(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let system =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
 
         let actor = TestActor { failed: false };
         let (mut runner, actor_ref, stop_sender) =
@@ -662,7 +692,7 @@ mod tests {
     impl Actor for DrainActor {
         type Message = DrainMsg;
         type Event = DrainEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
         type Response = ();
 
         fn get_span(id: &str, _parent: Option<tracing::Span>) -> tracing::Span {
@@ -671,12 +701,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<DrainActor> for DrainActor {
+    impl Handler<Self> for DrainActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: DrainMsg,
-            _ctx: &mut ActorContext<DrainActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             match msg {
                 DrainMsg::Block => {
@@ -724,7 +754,7 @@ mod tests {
     impl Actor for SlowActor {
         type Message = SlowMsg;
         type Event = SlowEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
         type Response = ();
 
         fn get_span(id: &str, _parent: Option<tracing::Span>) -> tracing::Span {
@@ -737,12 +767,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<SlowActor> for SlowActor {
+    impl Handler<Self> for SlowActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: SlowMsg,
-            _ctx: &mut ActorContext<SlowActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             match msg {
                 SlowMsg::Block => {
@@ -763,10 +793,8 @@ mod tests {
     /// tell/ask to a fully stopped actor must return Error::ActorStopped.
     #[test(tokio::test)]
     async fn test_send_to_stopped_actor_returns_actor_stopped() {
-        let system = SystemRef::new(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let system =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
 
         let actor = DrainActor {
             started: Arc::new(Notify::new()),
@@ -801,10 +829,8 @@ mod tests {
     ///     drain runs → Normal discarded, Critical processed.
     #[test(tokio::test)]
     async fn test_drain_critical_processed_normal_stopped() {
-        let system = SystemRef::new(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let system =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
 
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -858,10 +884,8 @@ mod tests {
     /// callers receive Error::ActorStopped.
     #[test(tokio::test)]
     async fn test_mailbox_drain_timeout_drops_slow_critical() {
-        let system = SystemRef::new(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let system =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
 
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -907,7 +931,7 @@ mod tests {
         type Message = ();
         type Response = ();
         type Event = TestEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -933,12 +957,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<MaxRetriesActor> for MaxRetriesActor {
+    impl Handler<Self> for MaxRetriesActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             _msg: (),
-            _ctx: &mut ActorContext<MaxRetriesActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             Ok(())
         }
@@ -946,11 +970,8 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_max_retries_exceeded() {
-
-        let system = SystemRef::new(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let system =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
             ActorPath::from("/user/max_retries"),
             MaxRetriesActor,
@@ -984,7 +1005,7 @@ mod tests {
         type Message = ();
         type Response = ();
         type Event = TestEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -1010,12 +1031,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<StopStrategyActor> for StopStrategyActor {
+    impl Handler<Self> for StopStrategyActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             _msg: (),
-            _ctx: &mut ActorContext<StopStrategyActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             Ok(())
         }
@@ -1023,11 +1044,8 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_apply_stop_strategy() {
-
-        let system = SystemRef::new(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let system =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
             ActorPath::from("/user/stop_strategy"),
             StopStrategyActor,
@@ -1061,7 +1079,7 @@ mod tests {
         type Message = ();
         type Response = ();
         type Event = TestEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -1072,12 +1090,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<SimpleRunningActor> for SimpleRunningActor {
+    impl Handler<Self> for SimpleRunningActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             _msg: (),
-            _ctx: &mut ActorContext<SimpleRunningActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             Ok(())
         }
@@ -1085,11 +1103,8 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_mailbox_closed_stops_actor() {
-
-        let system = SystemRef::new(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let system =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
             ActorPath::from("/user/simple"),
             SimpleRunningActor,
@@ -1126,7 +1141,7 @@ mod tests {
         type Message = ();
         type Response = ();
         type Event = TestEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -1162,12 +1177,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<PreRestartErrorActor> for PreRestartErrorActor {
+    impl Handler<Self> for PreRestartErrorActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             _msg: (),
-            _ctx: &mut ActorContext<PreRestartErrorActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             Ok(())
         }
@@ -1175,11 +1190,8 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_pre_restart_error() {
-
-        let system = SystemRef::new(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let system =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
             ActorPath::from("/user/pre_restart_err"),
             PreRestartErrorActor,
@@ -1216,7 +1228,7 @@ mod tests {
         type Message = ();
         type Response = ();
         type Event = TestEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -1248,12 +1260,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<RetryOnceActor> for RetryOnceActor {
+    impl Handler<Self> for RetryOnceActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             _msg: (),
-            _ctx: &mut ActorContext<RetryOnceActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             Ok(())
         }
@@ -1261,11 +1273,8 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_apply_retry_strategy_success() {
-
-        let system = SystemRef::new(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let system =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let actor = RetryOnceActor {
             failed: Arc::new(Mutex::new(true)),
         };

@@ -80,12 +80,12 @@ impl Actor for MyPersistentActor {
 }
 
 #[async_trait]
-impl Handler<MyPersistentActor> for MyPersistentActor {
+impl Handler<Self> for MyPersistentActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: PersistentMessage,
-        _ctx: &mut ActorContext<MyPersistentActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<PersistentResponse, ave_actors_actor::Error> {
         Ok(PersistentResponse)
     }
@@ -158,12 +158,12 @@ impl Actor for MyNonPersistentActor {
 }
 
 #[async_trait]
-impl Handler<MyNonPersistentActor> for MyNonPersistentActor {
+impl Handler<Self> for MyNonPersistentActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: NonPersistentMessage,
-        _ctx: &mut ActorContext<MyNonPersistentActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<NonPersistentResponse, ave_actors_actor::Error> {
         Ok(NonPersistentResponse)
     }
@@ -201,12 +201,12 @@ impl Actor for ParentActor {
 }
 
 #[async_trait]
-impl Handler<ParentActor> for ParentActor {
+impl Handler<Self> for ParentActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: ParentMessage,
-        _ctx: &mut ActorContext<ParentActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<(), ave_actors_actor::Error> {
         Ok(())
     }

@@ -32,7 +32,7 @@ pub enum TestCommand {
 impl Message for TestCommand {}
 
 // Defines parent response.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TestResponse {
     State(usize),
     None,
@@ -75,12 +75,12 @@ impl Actor for TestActor {
 
 // Implements handler for parent actor.
 #[async_trait]
-impl Handler<TestActor> for TestActor {
+impl Handler<Self> for TestActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         message: TestCommand,
-        ctx: &mut ActorContext<TestActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, Error> {
         match message {
             TestCommand::Increment(value) => {
@@ -113,7 +113,7 @@ impl Handler<TestActor> for TestActor {
     async fn on_child_error(
         &mut self,
         error: Error,
-        ctx: &mut ActorContext<TestActor>,
+        ctx: &mut ActorContext<Self>,
     ) {
         assert_eq!(
             error,
@@ -128,7 +128,7 @@ impl Handler<TestActor> for TestActor {
     async fn on_child_fault(
         &mut self,
         error: Error,
-        ctx: &mut ActorContext<TestActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         assert_eq!(
             error,
@@ -160,7 +160,7 @@ pub enum ChildCommand {
 impl Message for ChildCommand {}
 
 // Defines child response.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChildResponse {
     State(usize),
     None,
@@ -194,12 +194,12 @@ impl Actor for ChildActor {
 
 // Implements handler for child actor.
 #[async_trait]
-impl Handler<ChildActor> for ChildActor {
+impl Handler<Self> for ChildActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         message: ChildCommand,
-        ctx: &mut ActorContext<ChildActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<ChildResponse, Error> {
         match message {
             ChildCommand::SetState(value) => {
@@ -289,7 +289,7 @@ async fn test_actor() {
         .unwrap();
 
     let child_sub = CollectingChildSubscriber::new();
-    let mut sink = Sink::new("child_events");
+    let mut sink = Sink::new("child_events", None);
     sink.add("sub1", child_sub.clone());
     child_actor.register_sink(sink);
 
@@ -334,7 +334,7 @@ async fn test_actor_error() {
     let parent_ref = system.create_root_actor("parent", parent).await.unwrap();
 
     let parent_sub = CollectingParentSubscriber::new();
-    let mut sink = Sink::new("parent_events");
+    let mut sink = Sink::new("parent_events", None);
     sink.add("sub1", parent_sub.clone());
     parent_ref.register_sink(sink);
 
@@ -365,7 +365,7 @@ async fn test_actor_fault() {
     assert!(child_ref.is_ok());
 
     let parent_sub = CollectingParentSubscriber::new();
-    let mut sink = Sink::new("parent_events");
+    let mut sink = Sink::new("parent_events", None);
     sink.add("sub1", parent_sub.clone());
     parent_ref.register_sink(sink);
 

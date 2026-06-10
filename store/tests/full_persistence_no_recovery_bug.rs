@@ -79,12 +79,12 @@ impl Actor for CounterActor {
 }
 
 #[async_trait]
-impl Handler<CounterActor> for CounterActor {
+impl Handler<Self> for CounterActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: CounterMessage,
-        ctx: &mut ActorContext<CounterActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<CounterResponse, ActorError> {
         match msg {
             CounterMessage::Increment => {

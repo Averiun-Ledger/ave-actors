@@ -206,148 +206,6 @@ pub trait Collection: Sync + Send + 'static {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::error::Error;
-
-    /// Mock collection where `del` returns `EntryNotFound` for key "b".
-    struct DelRangeMock {
-        data: Vec<(String, Vec<u8>)>,
-    }
-
-    impl Collection for DelRangeMock {
-        fn name(&self) -> &str {
-            "mock"
-        }
-        fn get(&self, _key: &str) -> Result<Vec<u8>, Error> {
-            unimplemented!()
-        }
-        fn put(&mut self, _key: &str, _data: &[u8]) -> Result<(), Error> {
-            unimplemented!()
-        }
-        fn del(&mut self, key: &str) -> Result<(), Error> {
-            if key == "b" {
-                Err(Error::EntryNotFound {
-                    key: key.to_string(),
-                })
-            } else {
-                Ok(())
-            }
-        }
-        fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
-            unimplemented!()
-        }
-        fn purge(&mut self) -> Result<(), Error> {
-            unimplemented!()
-        }
-        fn iter(&self, _reverse: bool) -> Result<CollectionIter<'_>, Error> {
-            unimplemented!()
-        }
-        fn iter_range(
-            &self,
-            _start: &str,
-            _end: &str,
-            _reverse: bool,
-        ) -> Result<CollectionIter<'_>, Error> {
-            Ok(Box::new(self.data.clone().into_iter().map(Ok)))
-        }
-    }
-
-    #[test]
-    fn test_del_range_skips_not_found() {
-        let mut mock = DelRangeMock {
-            data: vec![
-                ("a".to_string(), vec![]),
-                ("b".to_string(), vec![]),
-                ("c".to_string(), vec![]),
-            ],
-        };
-        assert!(mock.del_range("a", "c").is_ok());
-    }
-
-    /// Mock collection for testing `get_by_range` edge cases.
-    struct GetByRangeMock {
-        items: Vec<(String, Vec<u8>)>,
-    }
-
-    impl Collection for GetByRangeMock {
-        fn name(&self) -> &str {
-            "mock"
-        }
-        fn get(&self, _key: &str) -> Result<Vec<u8>, Error> {
-            unimplemented!()
-        }
-        fn put(&mut self, _key: &str, _data: &[u8]) -> Result<(), Error> {
-            unimplemented!()
-        }
-        fn del(&mut self, _key: &str) -> Result<(), Error> {
-            unimplemented!()
-        }
-        fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
-            unimplemented!()
-        }
-        fn purge(&mut self) -> Result<(), Error> {
-            unimplemented!()
-        }
-        fn iter(&self, reverse: bool) -> Result<CollectionIter<'_>, Error> {
-            let items = if reverse {
-                self.items.clone().into_iter().rev().collect::<Vec<_>>()
-            } else {
-                self.items.clone()
-            };
-            Ok(Box::new(items.into_iter().map(Ok)))
-        }
-        fn iter_range(
-            &self,
-            _start: &str,
-            _end: &str,
-            _reverse: bool,
-        ) -> Result<CollectionIter<'_>, Error> {
-            unimplemented!()
-        }
-    }
-
-    #[test]
-    fn test_get_by_range_none_negative_quantity() {
-        let mock = GetByRangeMock {
-            items: vec![
-                ("a".to_string(), b"1".to_vec()),
-                ("b".to_string(), b"2".to_vec()),
-            ],
-        };
-        let result = mock.get_by_range(None, -2).unwrap();
-        assert_eq!(result, vec![b"2".to_vec(), b"1".to_vec()]);
-    }
-
-    #[test]
-    fn test_get_by_range_from_not_found() {
-        let mock = GetByRangeMock {
-            items: vec![("a".to_string(), b"1".to_vec())],
-        };
-        assert_eq!(
-            mock.get_by_range(Some("z"), 1),
-            Err(Error::EntryNotFound {
-                key: "z".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn test_get_by_range_from_found() {
-        let mock = GetByRangeMock {
-            items: vec![
-                ("a".to_string(), b"1".to_vec()),
-                ("b".to_string(), b"2".to_vec()),
-                ("c".to_string(), b"3".to_vec()),
-            ],
-        };
-        // get_by_range uses an exclusive from, so starting at "b" skips it.
-        let result = mock.get_by_range(Some("b"), 2).unwrap();
-        assert_eq!(result, vec![b"3".to_vec()]);
-    }
-}
-
 #[macro_export]
 macro_rules! test_store_trait {
     ($name:ident: $type:ty: $type2:ty) => {
@@ -655,4 +513,146 @@ macro_rules! test_store_trait {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Error;
+
+    /// Mock collection where `del` returns `EntryNotFound` for key "b".
+    struct DelRangeMock {
+        data: Vec<(String, Vec<u8>)>,
+    }
+
+    impl Collection for DelRangeMock {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn get(&self, _key: &str) -> Result<Vec<u8>, Error> {
+            unimplemented!()
+        }
+        fn put(&mut self, _key: &str, _data: &[u8]) -> Result<(), Error> {
+            unimplemented!()
+        }
+        fn del(&mut self, key: &str) -> Result<(), Error> {
+            if key == "b" {
+                Err(Error::EntryNotFound {
+                    key: key.to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+        fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
+            unimplemented!()
+        }
+        fn purge(&mut self) -> Result<(), Error> {
+            unimplemented!()
+        }
+        fn iter(&self, _reverse: bool) -> Result<CollectionIter<'_>, Error> {
+            unimplemented!()
+        }
+        fn iter_range(
+            &self,
+            _start: &str,
+            _end: &str,
+            _reverse: bool,
+        ) -> Result<CollectionIter<'_>, Error> {
+            Ok(Box::new(self.data.clone().into_iter().map(Ok)))
+        }
+    }
+
+    #[test]
+    fn test_del_range_skips_not_found() {
+        let mut mock = DelRangeMock {
+            data: vec![
+                ("a".to_string(), vec![]),
+                ("b".to_string(), vec![]),
+                ("c".to_string(), vec![]),
+            ],
+        };
+        assert!(mock.del_range("a", "c").is_ok());
+    }
+
+    /// Mock collection for testing `get_by_range` edge cases.
+    struct GetByRangeMock {
+        items: Vec<(String, Vec<u8>)>,
+    }
+
+    impl Collection for GetByRangeMock {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn get(&self, _key: &str) -> Result<Vec<u8>, Error> {
+            unimplemented!()
+        }
+        fn put(&mut self, _key: &str, _data: &[u8]) -> Result<(), Error> {
+            unimplemented!()
+        }
+        fn del(&mut self, _key: &str) -> Result<(), Error> {
+            unimplemented!()
+        }
+        fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
+            unimplemented!()
+        }
+        fn purge(&mut self) -> Result<(), Error> {
+            unimplemented!()
+        }
+        fn iter(&self, reverse: bool) -> Result<CollectionIter<'_>, Error> {
+            let items = if reverse {
+                self.items.clone().into_iter().rev().collect::<Vec<_>>()
+            } else {
+                self.items.clone()
+            };
+            Ok(Box::new(items.into_iter().map(Ok)))
+        }
+        fn iter_range(
+            &self,
+            _start: &str,
+            _end: &str,
+            _reverse: bool,
+        ) -> Result<CollectionIter<'_>, Error> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn test_get_by_range_none_negative_quantity() {
+        let mock = GetByRangeMock {
+            items: vec![
+                ("a".to_string(), b"1".to_vec()),
+                ("b".to_string(), b"2".to_vec()),
+            ],
+        };
+        let result = mock.get_by_range(None, -2).unwrap();
+        assert_eq!(result, vec![b"2".to_vec(), b"1".to_vec()]);
+    }
+
+    #[test]
+    fn test_get_by_range_from_not_found() {
+        let mock = GetByRangeMock {
+            items: vec![("a".to_string(), b"1".to_vec())],
+        };
+        assert_eq!(
+            mock.get_by_range(Some("z"), 1),
+            Err(Error::EntryNotFound {
+                key: "z".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_get_by_range_from_found() {
+        let mock = GetByRangeMock {
+            items: vec![
+                ("a".to_string(), b"1".to_vec()),
+                ("b".to_string(), b"2".to_vec()),
+                ("c".to_string(), b"3".to_vec()),
+            ],
+        };
+        // get_by_range uses an exclusive from, so starting at "b" skips it.
+        let result = mock.get_by_range(Some("b"), 2).unwrap();
+        assert_eq!(result, vec![b"3".to_vec()]);
+    }
 }

@@ -454,7 +454,7 @@ impl PersistentActor for RollbackLightActor {
 }
 
 #[async_trait]
-impl Handler<RollbackLightActor> for RollbackLightActor {
+impl Handler<Self> for RollbackLightActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -529,7 +529,7 @@ impl PersistentActor for GapActor {
 }
 
 #[async_trait]
-impl Handler<GapActor> for GapActor {
+impl Handler<Self> for GapActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -610,7 +610,7 @@ impl PersistentActor for CompactingActor {
 }
 
 #[async_trait]
-impl Handler<CompactingActor> for CompactingActor {
+impl Handler<Self> for CompactingActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,

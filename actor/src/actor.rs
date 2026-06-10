@@ -155,7 +155,10 @@ where
     ///
     /// If a sink with the same name already exists it is replaced and the
     /// previous sink is returned.
-    pub fn register_sink(&self, sink: Sink<A::SinkEvent>) -> Option<Sink<A::SinkEvent>> {
+    pub fn register_sink(
+        &self,
+        sink: Sink<A::SinkEvent>,
+    ) -> Option<Sink<A::SinkEvent>> {
         self.sinks.insert(sink.name().to_string(), sink)
     }
 
@@ -216,12 +219,11 @@ where
                     }
                 })
         } else {
-            self.system.publish_system_event(
-                crate::SystemEvent::ActorError {
+            self.system
+                .publish_system_event(crate::SystemEvent::ActorError {
                     path: self.path.clone(),
                     error,
-                },
-            );
+                });
             Ok(())
         }
     }
@@ -646,7 +648,10 @@ where
     ///
     /// If a sink with the same name already exists it is replaced and the
     /// previous sink is returned.
-    pub fn register_sink(&self, sink: Sink<A::SinkEvent>) -> Option<Sink<A::SinkEvent>> {
+    pub fn register_sink(
+        &self,
+        sink: Sink<A::SinkEvent>,
+    ) -> Option<Sink<A::SinkEvent>> {
         self.sinks.insert(sink.name().to_string(), sink)
     }
 
@@ -724,7 +729,7 @@ mod test {
     impl Actor for TestActor {
         type Message = TestMessage;
         type Event = TestEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
         type Response = TestResponse;
 
         fn get_span(
@@ -736,14 +741,14 @@ mod test {
     }
 
     #[async_trait]
-    impl Handler<TestActor> for TestActor {
+    impl Handler<Self> for TestActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: TestMessage,
-            ctx: &mut ActorContext<TestActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<TestResponse, Error> {
-            if ctx.get_parent::<TestActor>().await.is_ok() {
+            if ctx.get_parent::<Self>().await.is_ok() {
                 panic!("Is not a root actor");
             }
 
@@ -778,15 +783,13 @@ mod test {
 
     #[test(tokio::test)]
     async fn test_actor() {
-        let system = SystemRef::new(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let system =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let actor = TestActor { counter: 0 };
         let actor_ref = system.create_root_actor("test", actor).await.unwrap();
 
         let subscriber = TestSubscriber::new();
-        let mut sink = Sink::new("test_sink");
+        let mut sink = Sink::new("test_sink", None);
         sink.add("sub1", subscriber.clone());
         actor_ref.register_sink(sink);
 
@@ -805,10 +808,8 @@ mod test {
 
     #[test(tokio::test)]
     async fn test_emit_error_channel_closed() {
-        let system = SystemRef::new(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let system =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let (stop_sender, _stop_receiver) = mpsc::channel(1);
         let (error_sender, _error_receiver) = mpsc::channel(1);
         let (parent_sender, parent_receiver) = mpsc::channel::<ChildError>(1);
@@ -833,10 +834,8 @@ mod test {
 
     #[test(tokio::test)]
     async fn test_emit_fail_stores_error() {
-        let system = SystemRef::new(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let system =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let (stop_sender, _stop_receiver) = mpsc::channel(1);
         let (error_sender, _error_receiver) = mpsc::channel(1);
         let mut ctx = ActorContext::<TestActor>::new(

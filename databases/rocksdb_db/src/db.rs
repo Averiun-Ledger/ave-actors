@@ -287,11 +287,10 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
                 reason: format!("{:?}", e),
             })?;
         for name in &cf_names {
-            if let Some(handle) = self.db.cf_handle(name) {
-                if let Err(e) = self.db.flush_cf(&handle) {
+            if let Some(handle) = self.db.cf_handle(name)
+                && let Err(e) = self.db.flush_cf(&handle) {
                     warn!(cf = name, error = %e, "Failed to flush column family on stop");
                 }
-            }
         }
 
         debug!("RocksDB stop complete");
@@ -727,8 +726,7 @@ impl Iterator for RocksDbIterator<'_> {
             Err(e) => {
                 error!(error = %e, "RocksDB iteration error");
                 Some(Err(Error::Get {
-                    key: String::from_utf8_lossy(&self.prefix_dot)
-                        .into_owned(),
+                    key: String::from_utf8_lossy(&self.prefix_dot).into_owned(),
                     reason: format!("{}", e),
                 }))
             }
@@ -814,8 +812,7 @@ impl Iterator for RocksDbRangeIterator<'_> {
             Err(e) => {
                 error!(error = %e, "RocksDB range iteration error");
                 Some(Err(Error::Get {
-                    key: String::from_utf8_lossy(&self.prefix_dot)
-                        .into_owned(),
+                    key: String::from_utf8_lossy(&self.prefix_dot).into_owned(),
                     reason: format!("{}", e),
                 }))
             }
@@ -837,7 +834,7 @@ mod tests {
                 .expect("Can not create temporal directory.");
             let path = dir.path().to_path_buf();
             TEMP_DIRS.lock().unwrap().push(dir);
-            RocksDbManager::new(&path, false, None)
+            Self::new(&path, false, None)
                 .expect("Can not create the database.")
         }
     }
@@ -854,7 +851,7 @@ mod tests {
         let mut store = RocksDbStore {
             name: "no_such_cf".to_owned(),
             prefix: "pref".to_owned(),
-            store: manager.db.clone(),
+            store: manager.db,
             strong_durability: false,
         };
 
@@ -960,7 +957,7 @@ mod tests {
     #[test]
     fn test_missing_cf_iterators() {
         let manager = RocksDbManager::default();
-        let db = manager.db.clone();
+        let db = manager.db;
         assert!(
             RocksDbIterator::new(
                 &db,

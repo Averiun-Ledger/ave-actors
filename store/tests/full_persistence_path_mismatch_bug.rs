@@ -78,12 +78,12 @@ impl Actor for PathActor {
 }
 
 #[async_trait]
-impl Handler<PathActor> for PathActor {
+impl Handler<Self> for PathActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: PathMsg,
-        ctx: &mut ActorContext<PathActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<PathResp, ActorError> {
         self.persist(PathEvent(msg.0), ctx).await?;
         Ok(PathResp(self.state_ptr.value))
@@ -190,7 +190,7 @@ async fn test_explicit_prefix_usage() {
         type Message = PathMsg;
         type Response = PathResp;
         type Event = PathEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -222,12 +222,12 @@ async fn test_explicit_prefix_usage() {
     }
 
     #[async_trait]
-    impl Handler<PrefixActor> for PrefixActor {
+    impl Handler<Self> for PrefixActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: PathMsg,
-            ctx: &mut ActorContext<PrefixActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<PathResp, ActorError> {
             self.persist(PathEvent(msg.0), ctx).await?;
             Ok(PathResp(self.state_ptr.value))

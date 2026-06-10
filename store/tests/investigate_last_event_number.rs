@@ -67,12 +67,12 @@ impl Actor for TestActor {
 }
 
 #[async_trait]
-impl Handler<TestActor> for TestActor {
+impl Handler<Self> for TestActor {
     async fn handle_message(
         &mut self,
         _sender: ave_actors_actor::ActorPath,
         _msg: TestMessage,
-        _ctx: &mut ActorContext<TestActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, ActorError> {
         Ok(TestResponse)
     }

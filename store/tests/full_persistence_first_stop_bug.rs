@@ -78,12 +78,12 @@ impl Actor for TestActor {
 }
 
 #[async_trait]
-impl Handler<TestActor> for TestActor {
+impl Handler<Self> for TestActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: TestMessage,
-        ctx: &mut ActorContext<TestActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, ActorError> {
         match msg {
             TestMessage::Add(delta) => {
@@ -149,7 +149,7 @@ async fn test_full_persistence_first_stop_no_previous_snapshot() {
     println!("   - Persist some events");
     println!("   - Stop GRACEFULLY with stop()");
     println!("   - Restart and try to recover");
-    println!("");
+    println!();
 
     // FIRST LIFECYCLE: Brand new actor, no previous snapshot
     println!("🔷 LIFECYCLE 1: Brand new actor");

@@ -36,7 +36,7 @@ pub enum TestMessage {
 
 impl Message for TestMessage {}
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestResponse {
     pub value: u32,
 }
@@ -59,12 +59,12 @@ impl Actor for TestActor {
 }
 
 #[async_trait]
-impl Handler<TestActor> for TestActor {
+impl Handler<Self> for TestActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: TestMessage,
-        ctx: &mut ActorContext<TestActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, Error> {
         match msg {
             TestMessage::Emit(id, data) => {
@@ -86,6 +86,12 @@ impl Handler<TestActor> for TestActor {
 pub struct CollectingSubscriber {
     pub events: Arc<Mutex<Vec<Arc<SinkTestEvent>>>>,
     pub should_fail: bool,
+}
+
+impl Default for CollectingSubscriber {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CollectingSubscriber {
@@ -143,7 +149,7 @@ async fn test_sink_basic_functionality() {
     let subscriber_clone = subscriber.clone();
 
     // Register sink on the actor
-    let mut sink = Sink::new("test_sink");
+    let mut sink = Sink::new("test_sink", None);
     sink.add("sub1", subscriber);
     actor_ref.register_sink(sink);
 
@@ -193,7 +199,7 @@ async fn test_sink_with_failing_subscriber() {
     let subscriber = CollectingSubscriber::new_failing();
 
     // Register sink with failing subscriber
-    let mut sink = Sink::new("failing_sink");
+    let mut sink = Sink::new("failing_sink", None);
     sink.add("sub1", subscriber);
     actor_ref.register_sink(sink);
 
@@ -240,12 +246,12 @@ impl Actor for FailingHandlerActor {
 }
 
 #[async_trait]
-impl Handler<FailingHandlerActor> for FailingHandlerActor {
+impl Handler<Self> for FailingHandlerActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: TestMessage,
-        _ctx: &mut ActorContext<FailingHandlerActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, Error> {
         if self.fail_on_message {
             return Err(Error::Functional {
@@ -315,7 +321,7 @@ async fn test_message_serialization_edge_cases() {
         type Message = ComplexMessage;
         type Response = TestResponse;
         type Event = SinkTestEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -326,12 +332,12 @@ async fn test_message_serialization_edge_cases() {
     }
 
     #[async_trait]
-    impl Handler<ComplexHandlerActor> for ComplexHandlerActor {
+    impl Handler<Self> for ComplexHandlerActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: ComplexMessage,
-            _ctx: &mut ActorContext<ComplexHandlerActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<TestResponse, Error> {
             // Verify message was properly deserialized
             assert!(!msg.nested.is_empty());
@@ -390,7 +396,7 @@ async fn test_message_ordering_and_mailbox() {
         type Message = OrderedMessage;
         type Response = TestResponse;
         type Event = SinkTestEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -401,12 +407,12 @@ async fn test_message_ordering_and_mailbox() {
     }
 
     #[async_trait]
-    impl Handler<OrderingActor> for OrderingActor {
+    impl Handler<Self> for OrderingActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: OrderedMessage,
-            _ctx: &mut ActorContext<OrderingActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<TestResponse, Error> {
             self.received_order.push(msg.sequence);
             Ok(TestResponse {
@@ -468,7 +474,7 @@ async fn test_handler_context_operations() {
         type Message = ContextMessage;
         type Response = TestResponse;
         type Event = SinkTestEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -479,12 +485,12 @@ async fn test_handler_context_operations() {
     }
 
     #[async_trait]
-    impl Handler<ContextActor> for ContextActor {
+    impl Handler<Self> for ContextActor {
         async fn handle_message(
             &mut self,
             sender: ActorPath,
             msg: ContextMessage,
-            ctx: &mut ActorContext<ContextActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<TestResponse, Error> {
             match msg {
                 ContextMessage::CheckPath => {

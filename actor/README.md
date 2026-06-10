@@ -195,7 +195,7 @@ ctx.publish_event(MyEvent::SomethingHappened);
 // Modern sink API — register from outside the actor:
 use ave_actors_actor::{Sink, SinkEntry, Subscriber};
 
-let mut sink = Sink::new("analytics");
+let mut sink = Sink::new("analytics", None);
 sink.add("logger", my_subscriber);
 sink.add_entry(
     SinkEntry::new("filter", my_filtered_subscriber)

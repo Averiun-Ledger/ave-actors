@@ -53,7 +53,8 @@ impl ActorSystem {
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
     ) -> (SystemRef, SystemRunner) {
-        let system = SystemRef::new(graceful_token.clone(), crash_token.clone());
+        let system =
+            SystemRef::new(graceful_token.clone(), crash_token.clone());
         let runner = SystemRunner::new(graceful_token, crash_token);
         (system, runner)
     }
@@ -510,7 +511,7 @@ mod tests {
         assert_eq!(reason, ShutdownReason::Crash);
     }
 
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct TestHelper {
         pub value: i32,
     }

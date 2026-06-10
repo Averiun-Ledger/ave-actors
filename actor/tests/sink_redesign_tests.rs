@@ -61,12 +61,12 @@ impl Actor for EmitterActor {
 }
 
 #[async_trait]
-impl Handler<EmitterActor> for EmitterActor {
+impl Handler<Self> for EmitterActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: TestMsg,
-        ctx: &mut ActorContext<EmitterActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, Error> {
         match msg {
             TestMsg::Emit(id) => {
@@ -168,7 +168,7 @@ async fn test_external_sink_registration() {
         .unwrap();
 
     let subscriber = CollectingSubscriber::new();
-    let mut sink = Sink::new("ext_sink");
+    let mut sink = Sink::new("ext_sink", None);
     sink.add("sub1", subscriber.clone());
     actor_ref.register_sink(sink);
 
@@ -200,7 +200,7 @@ async fn test_sink_survives_restart() {
         type Message = TestMsg;
         type Response = TestResponse;
         type Event = TestEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -217,12 +217,12 @@ async fn test_sink_survives_restart() {
     }
 
     #[async_trait]
-    impl Handler<FailingEmitter> for FailingEmitter {
+    impl Handler<Self> for FailingEmitter {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: TestMsg,
-            ctx: &mut ActorContext<FailingEmitter>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<TestResponse, Error> {
             match msg {
                 TestMsg::Emit(id) => {
@@ -249,7 +249,7 @@ async fn test_sink_survives_restart() {
         .unwrap();
 
     let subscriber = CollectingSubscriber::new();
-    let mut sink = Sink::new("survivor");
+    let mut sink = Sink::new("survivor", None);
     sink.add("sub1", subscriber.clone());
     actor_ref.register_sink(sink);
 
@@ -286,7 +286,7 @@ async fn test_parallel_dispatch() {
         .await
         .unwrap();
 
-    let mut sink = Sink::new("parallel_sink");
+    let mut sink = Sink::new("parallel_sink", None);
     sink.add("slow1", SlowSubscriber { delay_ms: 200 });
     sink.add("slow2", SlowSubscriber { delay_ms: 200 });
     sink.add("slow3", SlowSubscriber { delay_ms: 200 });
@@ -332,12 +332,12 @@ impl Actor for FilteredActor {
 }
 
 #[async_trait]
-impl Handler<FilteredActor> for FilteredActor {
+impl Handler<Self> for FilteredActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: FilteredMsg,
-        ctx: &mut ActorContext<FilteredActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, Error> {
         let _ = ctx.publish_filtered(
             |name: &str| name.starts_with("audit"),
@@ -361,11 +361,11 @@ async fn test_publish_filtered() {
     let audit_sub = CollectingSubscriber::new();
     let metrics_sub = CollectingSubscriber::new();
 
-    let mut audit_sink = Sink::new("audit");
+    let mut audit_sink = Sink::new("audit", None);
     audit_sink.add("sub1", audit_sub.clone());
     actor_ref.register_sink(audit_sink);
 
-    let mut metrics_sink = Sink::new("metrics");
+    let mut metrics_sink = Sink::new("metrics", None);
     metrics_sink.add("sub1", metrics_sub.clone());
     actor_ref.register_sink(metrics_sink);
 
@@ -407,12 +407,12 @@ impl Actor for NoopActor {
 }
 
 #[async_trait]
-impl Handler<NoopActor> for NoopActor {
+impl Handler<Self> for NoopActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: NoopMsg,
-        ctx: &mut ActorContext<NoopActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, Error> {
         // No sink registered with this name.
         let _ = ctx.publish_to("ghost_sink", TestEvent { id: 0 });
@@ -448,7 +448,7 @@ async fn test_sink_entry_filter() {
     let all_sub = CollectingSubscriber::new();
     let high_sub = CollectingSubscriber::new();
 
-    let mut sink = Sink::new("filter_sink");
+    let mut sink = Sink::new("filter_sink", None);
     sink.add("all", all_sub.clone());
     sink.add_entry(
         SinkEntry::new("high", high_sub.clone())
@@ -481,7 +481,7 @@ async fn test_remove_sink() {
         .unwrap();
 
     let subscriber = CollectingSubscriber::new();
-    let mut sink = Sink::new("tmp");
+    let mut sink = Sink::new("tmp", None);
     sink.add("sub1", subscriber.clone());
     actor_ref.register_sink(sink);
 
@@ -508,7 +508,7 @@ async fn test_retry_policy_delivers_after_failures() {
         .unwrap();
 
     let subscriber = FailingThenOkSubscriber::new(2);
-    let mut sink = Sink::new("retry_sink");
+    let mut sink = Sink::new("retry_sink", None);
     sink.add_entry(SinkEntry::new("fragile", subscriber.clone()).retry(
         ave_actors_actor::RetryPolicy::AtMost {
             max: 3,
@@ -559,12 +559,12 @@ impl Actor for RoutingActor {
 }
 
 #[async_trait]
-impl Handler<RoutingActor> for RoutingActor {
+impl Handler<Self> for RoutingActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: RouteMsg,
-        ctx: &mut ActorContext<RoutingActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, Error> {
         ctx.publish_to(&msg.sink_name, TestEvent { id: msg.id });
         Ok(TestResponse)
@@ -585,11 +585,11 @@ async fn test_actor_routes_to_named_sink() {
     let sink_a_sub = CollectingSubscriber::new();
     let sink_b_sub = CollectingSubscriber::new();
 
-    let mut sink_a = Sink::new("sink_a");
+    let mut sink_a = Sink::new("sink_a", None);
     sink_a.add("sub", sink_a_sub.clone());
     actor_ref.register_sink(sink_a);
 
-    let mut sink_b = Sink::new("sink_b");
+    let mut sink_b = Sink::new("sink_b", None);
     sink_b.add("sub", sink_b_sub.clone());
     actor_ref.register_sink(sink_b);
 
@@ -638,7 +638,7 @@ async fn test_one_subscriber_fails_others_ok() {
     let ok_sub_b = CollectingSubscriber::new();
     let failing_sub = CollectingSubscriber::new();
 
-    let mut sink = Sink::new("fanout_sink");
+    let mut sink = Sink::new("fanout_sink", None);
     sink.add("ok_a", ok_sub_a.clone());
     sink.add("failing", FailingSubscriber);
     sink.add("ok_b", ok_sub_b.clone());
@@ -661,7 +661,7 @@ async fn test_sink_entry_remove_and_clear() {
     let sub_b = CollectingSubscriber::new();
     let sub_c = CollectingSubscriber::new();
 
-    let mut sink = Sink::new("mutable_sink");
+    let mut sink = Sink::new("mutable_sink", None);
     sink.add("a", sub_a.clone());
     sink.add("b", sub_b.clone());
     sink.add("c", sub_c.clone());

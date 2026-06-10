@@ -136,12 +136,12 @@ impl PersistentActor for EncryptedActor {
 }
 
 #[async_trait]
-impl Handler<EncryptedActor> for EncryptedActor {
+impl Handler<Self> for EncryptedActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: EncryptedMessage,
-        ctx: &mut ActorContext<EncryptedActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<EncryptedResponse, ActorError> {
         match msg {
             EncryptedMessage::Increment(value) => {
@@ -268,12 +268,12 @@ impl PersistentActor for LightActor {
 }
 
 #[async_trait]
-impl Handler<LightActor> for LightActor {
+impl Handler<Self> for LightActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: EncryptedMessage,
-        ctx: &mut ActorContext<LightActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<EncryptedResponse, ActorError> {
         match msg {
             EncryptedMessage::Increment(value) => {
@@ -295,19 +295,12 @@ impl Handler<LightActor> for LightActor {
 
 // Failing database manager for testing error scenarios
 #[derive(Clone)]
+#[derive(Default)]
 struct FailingManager {
     fail_create: bool,
     fail_operations: bool,
 }
 
-impl Default for FailingManager {
-    fn default() -> Self {
-        Self {
-            fail_create: false,
-            fail_operations: false,
-        }
-    }
-}
 
 struct FailingCollection {
     name: String,
@@ -767,7 +760,7 @@ async fn test_persist_actor_error_scenarios() {
         type Message = EncryptedMessage;
         type Response = EncryptedResponse;
         type Event = EncryptedEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -808,12 +801,12 @@ async fn test_persist_actor_error_scenarios() {
     }
 
     #[async_trait]
-    impl Handler<NoStoreActor> for NoStoreActor {
+    impl Handler<Self> for NoStoreActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: EncryptedMessage,
-            ctx: &mut ActorContext<NoStoreActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<EncryptedResponse, ActorError> {
             match msg {
                 EncryptedMessage::Increment(value) => {

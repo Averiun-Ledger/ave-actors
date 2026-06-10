@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, Error, Event,
-    IntervalStrategy, Handler, Message, NoIntervalStrategy,
-    NotPersistentActor, Response, RetryActor, RetryMessage, ShutdownReason,
-    Strategy, SupervisionStrategy, SystemEvent,
+    Handler, IntervalStrategy, Message, NoIntervalStrategy, NotPersistentActor,
+    Response, RetryActor, RetryMessage, ShutdownReason, Strategy,
+    SupervisionStrategy, SystemEvent,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -69,7 +69,7 @@ impl Actor for AlwaysFailStartActor {
 }
 
 #[async_trait]
-impl Handler<AlwaysFailStartActor> for AlwaysFailStartActor {
+impl Handler<Self> for AlwaysFailStartActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -101,7 +101,7 @@ impl Actor for HealthyActor {
 }
 
 #[async_trait]
-impl Handler<HealthyActor> for HealthyActor {
+impl Handler<Self> for HealthyActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -145,7 +145,7 @@ struct RuntimeRestartActor {
 }
 
 impl RuntimeRestartActor {
-    fn new(hooks: Arc<RestartHooks>) -> Self {
+    const fn new(hooks: Arc<RestartHooks>) -> Self {
         Self { hooks }
     }
 }
@@ -167,9 +167,10 @@ impl Actor for RuntimeRestartActor {
     }
 
     fn supervision_strategy() -> SupervisionStrategy {
-        SupervisionStrategy::Retry(Strategy::Interval(
-            IntervalStrategy::new(4, Duration::from_millis(10)),
-        ))
+        SupervisionStrategy::Retry(Strategy::Interval(IntervalStrategy::new(
+            4,
+            Duration::from_millis(10),
+        )))
     }
 
     async fn pre_restart(
@@ -183,7 +184,7 @@ impl Actor for RuntimeRestartActor {
 }
 
 #[async_trait]
-impl Handler<RuntimeRestartActor> for RuntimeRestartActor {
+impl Handler<Self> for RuntimeRestartActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -240,7 +241,7 @@ impl Actor for CountingTarget {
 }
 
 #[async_trait]
-impl Handler<CountingTarget> for CountingTarget {
+impl Handler<Self> for CountingTarget {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -293,7 +294,7 @@ impl Actor for RootErrorActor {
 }
 
 #[async_trait]
-impl Handler<RootErrorActor> for RootErrorActor {
+impl Handler<Self> for RootErrorActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -349,7 +350,7 @@ impl Actor for HangingStartActor {
 }
 
 #[async_trait]
-impl Handler<HangingStartActor> for HangingStartActor {
+impl Handler<Self> for HangingStartActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -399,7 +400,7 @@ impl Actor for BlockingChild {
 }
 
 #[async_trait]
-impl Handler<BlockingChild> for BlockingChild {
+impl Handler<Self> for BlockingChild {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -447,7 +448,7 @@ impl Actor for ParentWithBlockingChild {
 }
 
 #[async_trait]
-impl Handler<ParentWithBlockingChild> for ParentWithBlockingChild {
+impl Handler<Self> for ParentWithBlockingChild {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -491,7 +492,7 @@ impl Actor for BlockingRootActor {
 }
 
 #[async_trait]
-impl Handler<BlockingRootActor> for BlockingRootActor {
+impl Handler<Self> for BlockingRootActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,

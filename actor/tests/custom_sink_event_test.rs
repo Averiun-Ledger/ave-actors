@@ -1,10 +1,10 @@
-use ave_actors_actor::*;
 use async_trait::async_trait;
-use serde::{Serialize, Deserialize};
+use ave_actors_actor::*;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::info_span;
 use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InternalEvent(usize);
@@ -33,7 +33,7 @@ impl Actor for CustomSinkActor {
 }
 
 #[async_trait]
-impl Handler<CustomSinkActor> for CustomSinkActor {
+impl Handler<Self> for CustomSinkActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -42,10 +42,13 @@ impl Handler<CustomSinkActor> for CustomSinkActor {
     ) -> Result<(), Error> {
         self.counter += 1;
         // Internal event (could be for persistence, though this actor is not persistent)
-        // ctx.on_event(InternalEvent(self.counter), ctx).await; 
-        
+        // ctx.on_event(InternalEvent(self.counter), ctx).await;
+
         // External notification to sink
-        ctx.publish_all(ExternalNotification(format!("Counter is now {}", self.counter)));
+        ctx.publish_all(ExternalNotification(format!(
+            "Counter is now {}",
+            self.counter
+        )));
         Ok(())
     }
 }
@@ -56,7 +59,10 @@ struct TestSubscriber {
 
 #[async_trait]
 impl Subscriber<ExternalNotification> for TestSubscriber {
-    async fn notify(&self, event: Arc<ExternalNotification>) -> Result<(), Error> {
+    async fn notify(
+        &self,
+        event: Arc<ExternalNotification>,
+    ) -> Result<(), Error> {
         self.notifications.lock().await.push(event.0.clone());
         Ok(())
     }
@@ -64,18 +70,21 @@ impl Subscriber<ExternalNotification> for TestSubscriber {
 
 #[tokio::test]
 async fn test_custom_sink_event() {
-    let (system, _) = ActorSystem::create(
-        CancellationToken::new(),
-        CancellationToken::new(),
-    );
+    let (system, _) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
 
     let actor = CustomSinkActor { counter: 0 };
-    let actor_ref = system.create_root_actor("custom_sink", actor).await.unwrap();
+    let actor_ref = system
+        .create_root_actor("custom_sink", actor)
+        .await
+        .unwrap();
 
     let notifications = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = TestSubscriber { notifications: notifications.clone() };
-    
-    let mut sink = Sink::new("notifications");
+    let subscriber = TestSubscriber {
+        notifications: notifications.clone(),
+    };
+
+    let mut sink = Sink::new("notifications", None);
     sink.add("sub1", subscriber);
     actor_ref.register_sink(sink);
 

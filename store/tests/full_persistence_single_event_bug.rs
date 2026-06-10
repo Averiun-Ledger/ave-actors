@@ -79,12 +79,12 @@ impl Actor for SingleEventActor {
 }
 
 #[async_trait]
-impl Handler<SingleEventActor> for SingleEventActor {
+impl Handler<Self> for SingleEventActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: Msg,
-        ctx: &mut ActorContext<SingleEventActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<Resp, ActorError> {
         match msg {
             Msg::SetData(new_data) => {

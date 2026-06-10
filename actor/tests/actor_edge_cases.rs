@@ -2,9 +2,9 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, ChildAction,
-    CustomIntervalStrategy, Error, Event, IntervalStrategy, Handler,
-    Message, NoIntervalStrategy, Response, RetryActor, RetryMessage,
-    RetryStrategy, Strategy, SupervisionStrategy,
+    CustomIntervalStrategy, Error, Event, Handler, IntervalStrategy, Message,
+    NoIntervalStrategy, Response, RetryActor, RetryMessage, RetryStrategy,
+    Strategy, SupervisionStrategy,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, time::Duration};
@@ -35,7 +35,7 @@ pub enum EdgeCaseCommand {
 
 impl Message for EdgeCaseCommand {}
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EdgeCaseResponse {
     Success,
     Value(i32),
@@ -64,9 +64,10 @@ impl Actor for EdgeCaseActor {
     }
 
     fn supervision_strategy() -> SupervisionStrategy {
-        SupervisionStrategy::Retry(Strategy::Interval(
-            IntervalStrategy::new(2, Duration::from_millis(50)),
-        ))
+        SupervisionStrategy::Retry(Strategy::Interval(IntervalStrategy::new(
+            2,
+            Duration::from_millis(50),
+        )))
     }
 
     async fn pre_start(
@@ -125,12 +126,12 @@ impl Actor for EdgeCaseActor {
 }
 
 #[async_trait]
-impl Handler<EdgeCaseActor> for EdgeCaseActor {
+impl Handler<Self> for EdgeCaseActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: EdgeCaseCommand,
-        ctx: &mut ActorContext<EdgeCaseActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<EdgeCaseResponse, Error> {
         if self.fail_on_message {
             return Err(Error::Functional {
@@ -156,14 +157,14 @@ impl Handler<EdgeCaseActor> for EdgeCaseActor {
             EdgeCaseCommand::GetValue => Ok(EdgeCaseResponse::Value(42)),
             EdgeCaseCommand::TestParent => {
                 // Test parent access
-                if ctx.get_parent::<EdgeCaseActor>().await.is_ok() {
+                if ctx.get_parent::<Self>().await.is_ok() {
                     Ok(EdgeCaseResponse::Success)
                 } else {
                     Ok(EdgeCaseResponse::Error("No parent".to_string()))
                 }
             }
             EdgeCaseCommand::CreateChild => {
-                let child = EdgeCaseActor {
+                let child = Self {
                     fail_on_start: false,
                     fail_on_restart: false,
                     fail_on_stop: false,
@@ -182,7 +183,7 @@ impl Handler<EdgeCaseActor> for EdgeCaseActor {
     async fn on_event(
         &mut self,
         _event: EdgeCaseEvent,
-        _ctx: &mut ActorContext<EdgeCaseActor>,
+        _ctx: &mut ActorContext<Self>,
     ) {
         // Test internal event handling
     }
@@ -190,7 +191,7 @@ impl Handler<EdgeCaseActor> for EdgeCaseActor {
     async fn on_child_error(
         &mut self,
         _error: Error,
-        _ctx: &mut ActorContext<EdgeCaseActor>,
+        _ctx: &mut ActorContext<Self>,
     ) {
         // Test error handling from child
     }
@@ -198,7 +199,7 @@ impl Handler<EdgeCaseActor> for EdgeCaseActor {
     async fn on_child_fault(
         &mut self,
         error: Error,
-        _ctx: &mut ActorContext<EdgeCaseActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
         // Return different actions based on error type
         match error {
@@ -244,12 +245,12 @@ impl Actor for FailingActor {
 }
 
 #[async_trait]
-impl Handler<FailingActor> for FailingActor {
+impl Handler<Self> for FailingActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: EdgeCaseCommand,
-        _ctx: &mut ActorContext<FailingActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<EdgeCaseResponse, Error> {
         Ok(EdgeCaseResponse::Success)
     }
@@ -448,10 +449,8 @@ async fn test_retry_actor_functionality() {
         fail_on_message: false,
     };
 
-    let retry_strategy = Strategy::Interval(IntervalStrategy::new(
-        3,
-        Duration::from_millis(10),
-    ));
+    let retry_strategy =
+        Strategy::Interval(IntervalStrategy::new(3, Duration::from_millis(10)));
 
     let retry_actor =
         RetryActor::new(target, EdgeCaseCommand::GetValue, retry_strategy);

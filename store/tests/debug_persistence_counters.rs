@@ -77,12 +77,12 @@ impl Actor for DebugActor {
 }
 
 #[async_trait]
-impl Handler<DebugActor> for DebugActor {
+impl Handler<Self> for DebugActor {
     async fn handle_message(
         &mut self,
         _sender: ave_actors_actor::ActorPath,
         msg: DebugMessage,
-        _ctx: &mut ActorContext<DebugActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<DebugResponse, ActorError> {
         match msg {
             DebugMessage::Add(_) => Ok(DebugResponse::Success),

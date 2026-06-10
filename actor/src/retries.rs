@@ -348,7 +348,7 @@ mod tests {
         type Message = SourceMessage;
         type Response = ();
         type Event = ();
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -359,7 +359,7 @@ mod tests {
 
         async fn pre_start(
             &mut self,
-            ctx: &mut ActorContext<SourceActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             println!("SourceActor pre_start");
             let target = TargetActor { counter: 0 };
@@ -386,12 +386,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<SourceActor> for SourceActor {
+    impl Handler<Self> for SourceActor {
         async fn handle_message(
             &mut self,
             _path: ActorPath,
             message: SourceMessage,
-            ctx: &mut ActorContext<SourceActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             println!("Message: {:?}", message);
             assert_eq!(message.0, "Hello from child");
@@ -426,7 +426,7 @@ mod tests {
         type Message = ParentMsg;
         type Response = ();
         type Event = ();
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -439,7 +439,7 @@ mod tests {
             &mut self,
             ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
-            let retry = RetryActor::new_with_parent_message::<CompletionParent>(
+            let retry = RetryActor::new_with_parent_message::<Self>(
                 PassiveTarget,
                 PassiveMessage,
                 Strategy::Interval(IntervalStrategy::new(
@@ -455,12 +455,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<CompletionParent> for CompletionParent {
+    impl Handler<Self> for CompletionParent {
         async fn handle_message(
             &mut self,
             _path: ActorPath,
             message: ParentMsg,
-            ctx: &mut ActorContext<CompletionParent>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             match message {
                 ParentMsg::Start => {
@@ -491,7 +491,7 @@ mod tests {
         type Message = PassiveMessage;
         type Response = ();
         type Event = ();
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -502,12 +502,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<PassiveTarget> for PassiveTarget {
+    impl Handler<Self> for PassiveTarget {
         async fn handle_message(
             &mut self,
             _path: ActorPath,
             _message: PassiveMessage,
-            _ctx: &mut ActorContext<PassiveTarget>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             Ok(())
         }
@@ -529,7 +529,7 @@ mod tests {
         type Message = CountMessage;
         type Response = ();
         type Event = ();
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -540,12 +540,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<CountingTarget> for CountingTarget {
+    impl Handler<Self> for CountingTarget {
         async fn handle_message(
             &mut self,
             _path: ActorPath,
             _message: CountMessage,
-            _ctx: &mut ActorContext<CountingTarget>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             self.deliveries.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -571,7 +571,7 @@ mod tests {
         type Message = TargetMessage;
         type Response = ();
         type Event = ();
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -582,12 +582,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<TargetActor> for TargetActor {
+    impl Handler<Self> for TargetActor {
         async fn handle_message(
             &mut self,
             _path: ActorPath,
             message: TargetMessage,
-            ctx: &mut ActorContext<TargetActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             assert_eq!(message.message, "Hello from parent");
             self.counter += 1;
@@ -641,7 +641,7 @@ mod tests {
         type Message = StopAfterFirstMessage;
         type Response = ();
         type Event = ();
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
 
         fn get_span(
             id: &str,
@@ -652,12 +652,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<StopAfterFirstTarget> for StopAfterFirstTarget {
+    impl Handler<Self> for StopAfterFirstTarget {
         async fn handle_message(
             &mut self,
             _path: ActorPath,
             _message: StopAfterFirstMessage,
-            ctx: &mut ActorContext<StopAfterFirstTarget>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             let count = self.deliveries.fetch_add(1, Ordering::SeqCst) + 1;
             if count == 1 {

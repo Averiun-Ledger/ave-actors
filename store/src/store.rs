@@ -436,7 +436,8 @@ where
             .transpose()?
             .unwrap_or(0);
 
-        let snapshot_counter = store.get_state()?.map(|s| s.counter).unwrap_or(0);
+        let snapshot_counter =
+            store.get_state()?.map(|s| s.counter).unwrap_or(0);
 
         if let Some(metadata) = store.get_metadata()? {
             store.event_counter =
@@ -634,8 +635,8 @@ where
 
         let bytes = self.maybe_decrypt(data)?;
 
-        let (state, counter): (A::State, u64) =
-            borsh::from_slice(&bytes).map_err(|e| {
+        let (state, counter): (A::State, u64) = borsh::from_slice(&bytes)
+            .map_err(|e| {
                 error!("Can't decode state: {}", e);
                 store_error(StoreOperation::DecodeState, e)
             })?;
@@ -738,7 +739,8 @@ where
         debug!("Starting recovery process");
 
         if let Some(snapshot) = self.get_state()? {
-            return self.recover_from_snapshot(snapshot.state, snapshot.counter);
+            return self
+                .recover_from_snapshot(snapshot.state, snapshot.counter);
         }
 
         debug!("No previous state found");
@@ -1355,7 +1357,7 @@ mod tests {
     impl Actor for CounterActor {
         type Message = CounterMessage;
         type Event = CounterEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
         type Response = CounterResponse;
 
         fn get_span(
@@ -1407,12 +1409,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<CounterActor> for CounterActor {
+    impl Handler<Self> for CounterActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: CounterMessage,
-            ctx: &mut ActorContext<CounterActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<CounterResponse, ActorError> {
             match msg {
                 CounterMessage::Add(v) => {
@@ -1439,7 +1441,7 @@ mod tests {
     impl Actor for FullCounterActor {
         type Message = CounterMessage;
         type Event = CounterEvent;
-    type SinkEvent = Self::Event;
+        type SinkEvent = Self::Event;
         type Response = CounterResponse;
 
         fn get_span(
@@ -1495,12 +1497,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<FullCounterActor> for FullCounterActor {
+    impl Handler<Self> for FullCounterActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: CounterMessage,
-            ctx: &mut ActorContext<FullCounterActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<CounterResponse, ActorError> {
             match msg {
                 CounterMessage::Add(v) => {

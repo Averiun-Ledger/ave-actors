@@ -75,7 +75,7 @@ fn test_actor_path_operations() {
     let base_path = ActorPath::from("/user");
 
     // Test adding paths using division operator
-    let child_path = base_path.clone() / "child";
+    let child_path = base_path / "child";
     assert_eq!(child_path.to_string(), "/user/child");
 
     let grandchild_path = child_path / "grandchild";
@@ -162,12 +162,12 @@ impl Actor for ConcurrentActor {
 }
 
 #[async_trait]
-impl Handler<ConcurrentActor> for ConcurrentActor {
+impl Handler<Self> for ConcurrentActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: ConcurrentMessage,
-        ctx: &mut ActorContext<ConcurrentActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<ConcurrentResponse, Error> {
         match msg {
             ConcurrentMessage::Increment => {
@@ -210,13 +210,13 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
                 Ok(ConcurrentResponse::Messages(messages.clone()))
             }
             ConcurrentMessage::CreateChild(name) => {
-                let child = ConcurrentActor::new();
+                let child = Self::new();
                 ctx.create_child(&name, child).await?;
                 Ok(ConcurrentResponse::Success)
             }
             ConcurrentMessage::SendToChild(child_name, message) => {
                 if let Ok(child) =
-                    ctx.get_child::<ConcurrentActor>(&child_name).await
+                    ctx.get_child::<Self>(&child_name).await
                 {
                     let _response = child
                         .ask(ConcurrentMessage::AddMessage(message.clone()))

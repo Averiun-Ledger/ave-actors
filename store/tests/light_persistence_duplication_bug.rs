@@ -93,12 +93,12 @@ impl Actor for VectorActor {
 }
 
 #[async_trait]
-impl Handler<VectorActor> for VectorActor {
+impl Handler<Self> for VectorActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: VectorMessage,
-        ctx: &mut ActorContext<VectorActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<VectorResponse, ActorError> {
         match msg {
             VectorMessage::Add(number) => {

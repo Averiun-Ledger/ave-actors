@@ -112,12 +112,12 @@ impl PersistentActor for CounterTestActor {
 }
 
 #[async_trait]
-impl Handler<CounterTestActor> for CounterTestActor {
+impl Handler<Self> for CounterTestActor {
     async fn handle_message(
         &mut self,
         _sender: ave_actors_actor::ActorPath,
         msg: CounterMessage,
-        _ctx: &mut ActorContext<CounterTestActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<CounterResponse, ActorError> {
         match msg {
             CounterMessage::Add(_) => Ok(CounterResponse::Success),

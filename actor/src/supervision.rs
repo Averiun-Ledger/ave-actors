@@ -129,10 +129,7 @@ impl IntervalStrategy {
     }
 
     /// Creates the strategy with jitter enabled.
-    pub const fn with_jitter(
-        max_retries: usize,
-        duration: Duration,
-    ) -> Self {
+    pub const fn with_jitter(max_retries: usize, duration: Duration) -> Self {
         Self {
             max_retries,
             duration,
@@ -279,8 +276,7 @@ mod tests {
 
     #[test]
     fn test_interval_strategy() {
-        let mut strategy =
-            IntervalStrategy::new(3, Duration::from_secs(1));
+        let mut strategy = IntervalStrategy::new(3, Duration::from_secs(1));
         assert_eq!(strategy.max_retries(), 3);
         assert_eq!(strategy.next_backoff(), Some(Duration::from_secs(1)));
     }
@@ -291,7 +287,8 @@ mod tests {
             IntervalStrategy::with_jitter(3, Duration::from_secs(1));
         assert_eq!(strategy.max_retries(), 3);
         let delay = strategy.next_backoff().unwrap();
-        let expected_range = Duration::from_millis(750)..=Duration::from_millis(1250);
+        let expected_range =
+            Duration::from_millis(750)..=Duration::from_millis(1250);
         assert!(
             expected_range.contains(&delay),
             "jittered delay {:?} should be within ±25% of 1s",
@@ -308,27 +305,12 @@ mod tests {
             2,
         );
         assert_eq!(strategy.max_retries(), 5);
-        assert_eq!(
-            strategy.next_backoff(),
-            Some(Duration::from_millis(100))
-        );
-        assert_eq!(
-            strategy.next_backoff(),
-            Some(Duration::from_millis(200))
-        );
-        assert_eq!(
-            strategy.next_backoff(),
-            Some(Duration::from_millis(400))
-        );
-        assert_eq!(
-            strategy.next_backoff(),
-            Some(Duration::from_millis(800))
-        );
+        assert_eq!(strategy.next_backoff(), Some(Duration::from_millis(100)));
+        assert_eq!(strategy.next_backoff(), Some(Duration::from_millis(200)));
+        assert_eq!(strategy.next_backoff(), Some(Duration::from_millis(400)));
+        assert_eq!(strategy.next_backoff(), Some(Duration::from_millis(800)));
         // Should cap at max
-        assert_eq!(
-            strategy.next_backoff(),
-            Some(Duration::from_secs(1))
-        );
+        assert_eq!(strategy.next_backoff(), Some(Duration::from_secs(1)));
     }
 
     #[test]
@@ -340,7 +322,8 @@ mod tests {
             2,
         );
         let delay = strategy.next_backoff().unwrap();
-        let expected_range = Duration::from_millis(750)..=Duration::from_millis(1250);
+        let expected_range =
+            Duration::from_millis(750)..=Duration::from_millis(1250);
         assert!(
             expected_range.contains(&delay),
             "jittered delay {:?} should be within ±25% of 1s",

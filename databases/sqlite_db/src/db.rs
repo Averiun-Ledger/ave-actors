@@ -1084,7 +1084,7 @@ mod tests {
     impl Default for SqliteManager {
         fn default() -> Self {
             let path = PathBuf::from(create_temp_dir());
-            SqliteManager::new(&path, false, None)
+            Self::new(&path, false, None)
                 .expect("Cannot create the database")
         }
     }
