@@ -178,6 +178,7 @@ impl SqlitePool {
                 reason: format!("connection pool condvar poisoned: {}", e),
             })?;
         }
+        drop(state);
         Ok(())
     }
 }

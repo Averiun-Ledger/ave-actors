@@ -12,9 +12,10 @@ use std::{sync::Arc, time::Duration};
 use tracing::{error, warn};
 
 /// Retry policy applied when a subscriber returns an error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RetryPolicy {
     /// If the subscriber fails it is ignored immediately.
+    #[default]
     None,
     /// Retry up to `max` **additional** times waiting `backoff` between
     /// attempts.  The total number of delivery attempts is `max + 1`
@@ -129,12 +130,12 @@ impl<E: Event> Sink<E> {
     }
 
     /// Returns the number of subscriber entries in this sink.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Returns `true` if this sink has no subscribers.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
@@ -201,11 +202,5 @@ impl<E: Event> Sink<E> {
                 }
             });
         }
-    }
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self::None
     }
 }

@@ -3,7 +3,7 @@
 use crate::{
     ActorPath, Error,
     handler::HandleHelper,
-    runner::{InnerAction, InnerSender, StopHandle, StopSender},
+    runner::{StopHandle, StopSender},
     sink::Sink,
     supervision::SupervisionStrategy,
     system::SystemRef,
@@ -34,8 +34,8 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     error: Option<Error>,
     /// The error sender to send errors to the parent.
     error_sender: ChildErrorSender,
-    /// Inner sender.
-    inner_sender: InnerSender,
+    /// Parent sender to escalate errors/faults directly.
+    parent_sender: Option<ChildErrorSender>,
     /// Child action senders.
     child_senders: HashMap<ActorPath, StopHandle>,
     /// Named sinks registered for this actor.
@@ -53,7 +53,7 @@ where
         path: ActorPath,
         system: SystemRef,
         error_sender: ChildErrorSender,
-        inner_sender: InnerSender,
+        parent_sender: Option<ChildErrorSender>,
         sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
         span: Span,
     ) -> Self {
@@ -64,7 +64,7 @@ where
             system,
             error: None,
             error_sender,
-            inner_sender,
+            parent_sender,
             child_senders: HashMap::new(),
             sinks,
         }
@@ -179,11 +179,9 @@ where
 
     /// Send `event` to every registered sink (fire-and-forget).
     pub fn publish_all(&self, event: A::SinkEvent) {
-        if !self.sinks.is_empty() {
-            let event = Arc::new(event);
-            for entry in self.sinks.iter() {
-                entry.value().send(Arc::clone(&event));
-            }
+        let event = Arc::new(event);
+        for entry in self.sinks.iter() {
+            entry.value().send(Arc::clone(&event));
         }
     }
 
@@ -194,9 +192,6 @@ where
         predicate: impl Fn(&str) -> bool,
         event: A::SinkEvent,
     ) {
-        if self.sinks.is_empty() {
-            return;
-        }
         let event = Arc::new(event);
         for entry in self.sinks.iter() {
             if predicate(entry.key().as_str()) {
@@ -210,15 +205,25 @@ where
     /// Returns an error if the parent channel is no longer reachable.
     pub async fn emit_error(&mut self, error: Error) -> Result<(), Error> {
         tracing::warn!(error = %error, "Emitting error");
-        self.inner_sender
-            .send(InnerAction::Error(error))
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to emit error");
-                Error::Send {
-                    reason: e.to_string(),
-                }
-            })
+        if let Some(parent_sender) = self.parent_sender.as_ref() {
+            parent_sender
+                .send(ChildError::Error { error })
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Failed to emit error");
+                    Error::Send {
+                        reason: e.to_string(),
+                    }
+                })
+        } else {
+            self.system.publish_system_event(
+                crate::SystemEvent::ActorError {
+                    path: self.path.clone(),
+                    error,
+                },
+            );
+            Ok(())
+        }
     }
 
     /// Emits a fatal fault, halts message processing, and escalates to the parent via `on_child_fault`.
@@ -227,17 +232,10 @@ where
     pub async fn emit_fail(&mut self, error: Error) -> Result<(), Error> {
         tracing::error!(error = %error, "Actor failing");
         // Store error to stop message handling.
-        self.set_error(error.clone());
-        // Send fail to parent actor.
-        self.inner_sender
-            .send(InnerAction::Fail(error.clone()))
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to emit fail");
-                Error::Send {
-                    reason: e.to_string(),
-                }
-            })
+        self.set_error(error);
+        // Stop the actor; the runner will notify the parent when entering Failed.
+        self.stop(None).await;
+        Ok(())
     }
 
     /// Spawns a child actor and registers it under this actor's path.
@@ -274,11 +272,11 @@ where
                     path,
                     StopHandle::new(stop_sender.clone(), C::stop_timeout()),
                 );
-                let inner_sender = self.inner_sender.clone();
+                let error_sender = self.error_sender.clone();
                 tokio::spawn(async move {
                     stop_sender.closed().await;
-                    let _ = inner_sender
-                        .send(InnerAction::ChildStopped(child_path))
+                    let _ = error_sender
+                        .send(ChildError::ChildStopped(child_path))
                         .await;
                 });
                 tracing::debug!(child_name = %name, "Child actor created");
@@ -360,7 +358,7 @@ pub type ChildErrorReceiver = mpsc::Receiver<ChildError>;
 /// Child error sender.
 pub type ChildErrorSender = mpsc::Sender<ChildError>;
 
-/// Message sent from a child to its parent on error or fault.
+/// Message sent from a child to its parent on error, fault, or stop.
 pub enum ChildError {
     /// Error in child.
     Error {
@@ -374,6 +372,8 @@ pub enum ChildError {
         /// The sender will communicate the action to be carried out to the child.
         sender: oneshot::Sender<ChildAction>,
     },
+    /// Child actor has stopped.
+    ChildStopped(ActorPath),
 }
 
 /// Defines the identity and associated types of an actor.
@@ -563,7 +563,7 @@ where
     A: Actor + Handler<A>,
 {
     /// The path of the actor.
-    path: ActorPath,
+    path: Arc<ActorPath>,
     /// The handle helper.
     sender: HandleHelper<A>,
     /// The actor stop sender.
@@ -577,7 +577,7 @@ where
     A: Actor + Handler<A>,
 {
     pub const fn new(
-        path: ActorPath,
+        path: Arc<ActorPath>,
         sender: HandleHelper<A>,
         stop_sender: StopSender,
         sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
@@ -657,7 +657,7 @@ where
 
     /// Returns the hierarchical path of this actor.
     pub fn path(&self) -> ActorPath {
-        self.path.clone()
+        (*self.path).clone()
     }
 
     /// Returns `true` if the actor's mailbox is closed, meaning the actor has stopped.
@@ -778,9 +778,7 @@ mod test {
 
     #[test(tokio::test)]
     async fn test_actor() {
-        let (event_sender, _event_receiver) = mpsc::channel(100);
         let system = SystemRef::new(
-            event_sender,
             CancellationToken::new(),
             CancellationToken::new(),
         );
@@ -807,22 +805,20 @@ mod test {
 
     #[test(tokio::test)]
     async fn test_emit_error_channel_closed() {
-        let (event_sender, _event_receiver) = mpsc::channel(100);
         let system = SystemRef::new(
-            event_sender,
             CancellationToken::new(),
             CancellationToken::new(),
         );
         let (stop_sender, _stop_receiver) = mpsc::channel(1);
         let (error_sender, _error_receiver) = mpsc::channel(1);
-        let (inner_sender, inner_receiver) = mpsc::channel(1);
-        drop(inner_receiver);
+        let (parent_sender, parent_receiver) = mpsc::channel::<ChildError>(1);
+        drop(parent_receiver);
         let mut ctx = ActorContext::<TestActor>::new(
             stop_sender,
             ActorPath::from("/user/test"),
             system,
             error_sender,
-            inner_sender,
+            Some(parent_sender),
             Arc::new(DashMap::new()),
             info_span!("test"),
         );
@@ -836,23 +832,19 @@ mod test {
     }
 
     #[test(tokio::test)]
-    async fn test_emit_fail_channel_closed() {
-        let (event_sender, _event_receiver) = mpsc::channel(100);
+    async fn test_emit_fail_stores_error() {
         let system = SystemRef::new(
-            event_sender,
             CancellationToken::new(),
             CancellationToken::new(),
         );
         let (stop_sender, _stop_receiver) = mpsc::channel(1);
         let (error_sender, _error_receiver) = mpsc::channel(1);
-        let (inner_sender, inner_receiver) = mpsc::channel(1);
-        drop(inner_receiver);
         let mut ctx = ActorContext::<TestActor>::new(
             stop_sender,
             ActorPath::from("/user/test"),
             system,
             error_sender,
-            inner_sender,
+            None,
             Arc::new(DashMap::new()),
             info_span!("test"),
         );
@@ -861,7 +853,7 @@ mod test {
                 description: "test".to_owned(),
             })
             .await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::Send { .. }));
+        assert!(result.is_ok());
+        assert!(ctx.error().is_some());
     }
 }

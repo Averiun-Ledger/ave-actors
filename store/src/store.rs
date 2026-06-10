@@ -383,6 +383,12 @@ struct StoreMetadata {
     state_counter: u64,
 }
 
+/// Snapshot returned by [`Store::get_state`].
+struct StateSnapshot<S> {
+    state: Arc<S>,
+    counter: u64,
+}
+
 impl<A> Store<A>
 where
     A: PersistentActor,
@@ -430,7 +436,7 @@ where
             .transpose()?
             .unwrap_or(0);
 
-        let snapshot_counter = store.get_state()?.map(|(_, c)| c).unwrap_or(0);
+        let snapshot_counter = store.get_state()?.map(|s| s.counter).unwrap_or(0);
 
         if let Some(metadata) = store.get_metadata()? {
             store.event_counter =
@@ -617,7 +623,7 @@ where
             .transpose()
     }
 
-    fn get_state(&self) -> Result<Option<(Arc<A::State>, u64)>, Error> {
+    fn get_state(&self) -> Result<Option<StateSnapshot<A::State>>, Error> {
         let data = match self.states.get() {
             Ok(data) => data,
             Err(Error::EntryNotFound { .. }) => {
@@ -628,13 +634,16 @@ where
 
         let bytes = self.maybe_decrypt(data)?;
 
-        let state: (A::State, u64) =
+        let (state, counter): (A::State, u64) =
             borsh::from_slice(&bytes).map_err(|e| {
                 error!("Can't decode state: {}", e);
                 store_error(StoreOperation::DecodeState, e)
             })?;
 
-        Ok(Some((Arc::new(state.0), state.1)))
+        Ok(Some(StateSnapshot {
+            state: Arc::new(state),
+            counter,
+        }))
     }
 
     fn events(&self, from: u64, to: u64) -> Result<Vec<A::Event>, Error> {
@@ -728,8 +737,8 @@ where
     fn recover(&mut self) -> Result<Option<Arc<A::State>>, Error> {
         debug!("Starting recovery process");
 
-        if let Some((state, counter)) = self.get_state()? {
-            return self.recover_from_snapshot(state, counter);
+        if let Some(snapshot) = self.get_state()? {
+            return self.recover_from_snapshot(snapshot.state, snapshot.counter);
         }
 
         debug!("No previous state found");
@@ -875,7 +884,7 @@ where
 
         let mut state = self
             .get_state()?
-            .map(|(s, _)| s)
+            .map(|s| s.state)
             .unwrap_or_else(|| Arc::clone(&self.initial_state));
 
         let events = self.events(self.state_counter, self.event_counter - 1)?;

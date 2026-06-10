@@ -6,7 +6,7 @@ use crate::{
     runner::{ActorRunner, StopHandle, StopSender},
 };
 
-use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
+use tokio::sync::{RwLock, broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use tracing::{Instrument, Span, debug, error, warn};
@@ -53,9 +53,8 @@ impl ActorSystem {
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
     ) -> (SystemRef, SystemRunner) {
-        let (event_sender, event_receiver) = mpsc::channel(4);
-        let system = SystemRef::new(event_sender, graceful_token, crash_token);
-        let runner = SystemRunner::new(event_receiver);
+        let system = SystemRef::new(graceful_token.clone(), crash_token.clone());
+        let runner = SystemRunner::new(graceful_token, crash_token);
         (system, runner)
     }
 }
@@ -107,7 +106,6 @@ pub struct SystemRef {
 
 impl SystemRef {
     pub(crate) fn new(
-        event_sender: mpsc::Sender<SystemEvent>,
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
     ) -> Self {
@@ -166,12 +164,6 @@ impl SystemRef {
             }
             while set.join_next().await.is_some() {}
 
-            if let Err(e) = event_sender
-                .send(SystemEvent::StopSystem(reason.clone()))
-                .await
-            {
-                error!(error = %e, "Failed to send StopSystem event");
-            }
             let _ =
                 system_event_sender_clone.send(SystemEvent::StopSystem(reason));
         });
@@ -203,7 +195,7 @@ impl SystemRef {
         let _ = self.system_event_sender.send(event);
     }
 
-    async fn index_actor(&self, path: &ActorPath) {
+    fn index_actor(&self, path: &ActorPath) {
         let parent = path.parent();
         self.child_index
             .entry(parent)
@@ -211,7 +203,7 @@ impl SystemRef {
             .insert(path.clone());
     }
 
-    async fn deindex_actor(&self, path: &ActorPath) {
+    fn deindex_actor(&self, path: &ActorPath) {
         let parent = path.parent();
         if let Some(mut children) = self.child_index.get_mut(&parent) {
             children.remove(path);
@@ -268,7 +260,7 @@ impl SystemRef {
                 e.insert(Box::new(actor_ref.clone()));
             }
         }
-        self.index_actor(&path).await;
+        self.index_actor(&path);
 
         if is_root {
             let mut root_senders = self.root_senders.write().await;
@@ -379,7 +371,7 @@ impl SystemRef {
     pub(crate) async fn remove_actor(&self, path: &ActorPath) {
         let removed = self.actors.remove(path).is_some();
         if removed {
-            self.deindex_actor(path).await;
+            self.deindex_actor(path);
         }
     }
 
@@ -431,33 +423,32 @@ impl SystemRef {
 
 /// Drives the actor system event loop; block on [`SystemRunner::run`] to keep the system alive until shutdown.
 pub struct SystemRunner {
-    /// Receiver for system-wide events.
-    event_receiver: mpsc::Receiver<SystemEvent>,
+    graceful_token: CancellationToken,
+    crash_token: CancellationToken,
 }
 
 impl SystemRunner {
     pub(crate) const fn new(
-        event_receiver: mpsc::Receiver<SystemEvent>,
+        graceful_token: CancellationToken,
+        crash_token: CancellationToken,
     ) -> Self {
-        Self { event_receiver }
+        Self {
+            graceful_token,
+            crash_token,
+        }
     }
 
     /// Runs the system event loop until shutdown, returning the [`ShutdownReason`] for use as a process exit code.
     pub async fn run(&mut self) -> ShutdownReason {
         debug!("Running actor system");
-        loop {
-            match self.event_receiver.recv().await {
-                Some(SystemEvent::StopSystem(reason)) => {
-                    debug!(reason = ?reason, "Actor system stopped");
-                    return reason;
-                }
-                Some(SystemEvent::ActorError { path, error }) => {
-                    warn!(path = %path, error = %error, "Ignoring observable ActorError on control channel");
-                }
-                None => {
-                    warn!("System event channel closed unexpectedly");
-                    return ShutdownReason::Graceful;
-                }
+        tokio::select! {
+            _ = self.graceful_token.cancelled() => {
+                debug!("Actor system stopped gracefully");
+                ShutdownReason::Graceful
+            }
+            _ = self.crash_token.cancelled() => {
+                debug!("Actor system crashed");
+                ShutdownReason::Crash
             }
         }
     }
@@ -482,31 +473,23 @@ mod tests {
     }
 
     #[test(tokio::test)]
-    async fn test_system_runner_channel_closed() {
-        let (event_sender, event_receiver) = tokio::sync::mpsc::channel(4);
-        let mut runner = SystemRunner::new(event_receiver);
-        drop(event_sender);
+    async fn test_system_runner_graceful() {
+        let graceful = CancellationToken::new();
+        let crash = CancellationToken::new();
+        let mut runner = SystemRunner::new(graceful.clone(), crash.clone());
+        graceful.cancel();
         let reason = runner.run().await;
         assert_eq!(reason, ShutdownReason::Graceful);
     }
 
     #[test(tokio::test)]
-    async fn test_system_runner_actor_error_event() {
-        let (event_sender, event_receiver) = tokio::sync::mpsc::channel(4);
-        let system = SystemRef::new(
-            event_sender,
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
-        let mut runner = SystemRunner::new(event_receiver);
+    async fn test_system_runner_stop_system() {
+        let graceful = CancellationToken::new();
+        let crash = CancellationToken::new();
+        let system = SystemRef::new(graceful.clone(), crash.clone());
+        let mut runner = SystemRunner::new(graceful, crash);
         let system_clone = system.clone();
         tokio::spawn(async move {
-            system_clone.publish_system_event(SystemEvent::ActorError {
-                path: ActorPath::from("/user/test"),
-                error: crate::Error::Functional {
-                    description: "test error".to_owned(),
-                },
-            });
             system_clone.stop_system();
         });
         let reason = runner.run().await;
@@ -515,13 +498,10 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_system_runner_crash() {
-        let (event_sender, event_receiver) = tokio::sync::mpsc::channel(4);
-        let system = SystemRef::new(
-            event_sender,
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
-        let mut runner = SystemRunner::new(event_receiver);
+        let graceful = CancellationToken::new();
+        let crash = CancellationToken::new();
+        let system = SystemRef::new(graceful.clone(), crash.clone());
+        let mut runner = SystemRunner::new(graceful, crash);
         let system_clone = system.clone();
         tokio::spawn(async move {
             system_clone.crash_system();
