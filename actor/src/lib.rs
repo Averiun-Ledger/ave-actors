@@ -25,8 +25,8 @@ pub use sink::{RetryPolicy, Sink, SinkEntry, Subscriber};
 
 pub use retries::{RetryActor, RetryMessage};
 pub use supervision::{
-    CustomIntervalStrategy, FixedIntervalStrategy, NoIntervalStrategy,
-    RetryStrategy, Strategy, SupervisionStrategy,
+    CustomIntervalStrategy, ExponentialBackoffStrategy, IntervalStrategy,
+    NoIntervalStrategy, RetryStrategy, Strategy, SupervisionStrategy,
 };
 pub use system::{
     ActorSystem, ShutdownReason, SystemEvent, SystemRef, SystemRunner,

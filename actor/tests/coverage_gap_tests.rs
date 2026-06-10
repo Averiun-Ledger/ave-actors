@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
-    Event, FixedIntervalStrategy, Handler, Message, NoIntervalStrategy,
+    Event, IntervalStrategy, Handler, Message, NoIntervalStrategy,
     Response, RetryActor, RetryMessage, ShutdownReason, Strategy,
     SupervisionStrategy,
 };
@@ -284,8 +284,8 @@ impl Actor for ParentOfFaultyChild {
     }
 
     fn supervision_strategy() -> SupervisionStrategy {
-        SupervisionStrategy::Retry(Strategy::FixedInterval(
-            FixedIntervalStrategy::new(3, Duration::from_millis(10)),
+        SupervisionStrategy::Retry(Strategy::Interval(
+            IntervalStrategy::new(3, Duration::from_millis(10)),
         ))
     }
 }
@@ -1252,8 +1252,8 @@ impl Actor for DefaultBehaviorActor {
     }
 
     fn supervision_strategy() -> SupervisionStrategy {
-        SupervisionStrategy::Retry(Strategy::FixedInterval(
-            FixedIntervalStrategy::new(1, Duration::from_millis(10)),
+        SupervisionStrategy::Retry(Strategy::Interval(
+            IntervalStrategy::new(1, Duration::from_millis(10)),
         ))
     }
 

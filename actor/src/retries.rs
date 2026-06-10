@@ -326,7 +326,7 @@ mod tests {
 
     use super::*;
 
-    use crate::{ActorRef, ActorSystem, Error, FixedIntervalStrategy};
+    use crate::{ActorRef, ActorSystem, Error, IntervalStrategy};
 
     use std::sync::{
         Arc,
@@ -364,7 +364,7 @@ mod tests {
             println!("SourceActor pre_start");
             let target = TargetActor { counter: 0 };
 
-            let strategy = Strategy::FixedInterval(FixedIntervalStrategy::new(
+            let strategy = Strategy::Interval(IntervalStrategy::new(
                 3,
                 Duration::from_secs(1),
             ));
@@ -442,7 +442,7 @@ mod tests {
             let retry = RetryActor::new_with_parent_message::<CompletionParent>(
                 PassiveTarget,
                 PassiveMessage,
-                Strategy::FixedInterval(FixedIntervalStrategy::new(
+                Strategy::Interval(IntervalStrategy::new(
                     2,
                     Duration::from_millis(10),
                 )),
@@ -684,7 +684,7 @@ mod tests {
                 deliveries: deliveries.clone(),
             },
             StopAfterFirstMessage,
-            Strategy::FixedInterval(FixedIntervalStrategy::new(
+            Strategy::Interval(IntervalStrategy::new(
                 5,
                 Duration::from_millis(20),
             )),
@@ -802,7 +802,7 @@ mod tests {
                 deliveries: Arc::new(AtomicUsize::new(0)),
             },
             CountMessage,
-            Strategy::FixedInterval(FixedIntervalStrategy::new(
+            Strategy::Interval(IntervalStrategy::new(
                 5,
                 Duration::from_secs(10),
             )),

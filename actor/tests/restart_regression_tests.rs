@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, Error, Event,
-    FixedIntervalStrategy, Handler, Message, NoIntervalStrategy,
+    IntervalStrategy, Handler, Message, NoIntervalStrategy,
     NotPersistentActor, Response, RetryActor, RetryMessage, ShutdownReason,
     Strategy, SupervisionStrategy, SystemEvent,
 };
@@ -167,8 +167,8 @@ impl Actor for RuntimeRestartActor {
     }
 
     fn supervision_strategy() -> SupervisionStrategy {
-        SupervisionStrategy::Retry(Strategy::FixedInterval(
-            FixedIntervalStrategy::new(4, Duration::from_millis(10)),
+        SupervisionStrategy::Retry(Strategy::Interval(
+            IntervalStrategy::new(4, Duration::from_millis(10)),
         ))
     }
 

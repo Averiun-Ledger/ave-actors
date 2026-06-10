@@ -69,5 +69,6 @@ tokio = { version = "1.52.3" }
 tokio-util = { version = "0.7.18" }
 tracing ={ version = "0.1.44" }
 dashmap = "6.1.0"
+fastrand = "2.3.0"
 tracing-test = "0.2.6"
 test-log = {version = "0.2.20", features = ["trace"] }

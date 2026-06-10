@@ -147,12 +147,12 @@ async fn post_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), Error>
 Root actors can restart automatically on failure:
 
 ```rust,ignore
-use ave_actors_actor::{SupervisionStrategy, Strategy, FixedIntervalStrategy};
+use ave_actors_actor::{IntervalStrategy, SupervisionStrategy, Strategy};
 use std::time::Duration;
 
 fn supervision_strategy(&self) -> SupervisionStrategy {
-    SupervisionStrategy::Retry(Strategy::FixedInterval(
-        FixedIntervalStrategy::new(5, Duration::from_secs(1)),
+    SupervisionStrategy::Retry(Strategy::Interval(
+        IntervalStrategy::new(5, Duration::from_secs(1)),
     ))
 }
 ```

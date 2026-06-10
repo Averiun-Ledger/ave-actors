@@ -469,7 +469,7 @@ mod tests {
         Error,
         actor::{Actor, ActorContext, Event, Handler, Message},
         supervision::{
-            FixedIntervalStrategy, NoIntervalStrategy, Strategy,
+            IntervalStrategy, NoIntervalStrategy, Strategy,
             SupervisionStrategy,
         },
         system::SystemRef,
@@ -521,8 +521,8 @@ mod tests {
         }
 
         fn supervision_strategy() -> SupervisionStrategy {
-            SupervisionStrategy::Retry(Strategy::FixedInterval(
-                FixedIntervalStrategy::new(3, Duration::from_secs(1)),
+            SupervisionStrategy::Retry(Strategy::Interval(
+                IntervalStrategy::new(3, Duration::from_secs(1)),
             ))
         }
 

@@ -2,7 +2,7 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, ChildAction,
-    CustomIntervalStrategy, Error, Event, FixedIntervalStrategy, Handler,
+    CustomIntervalStrategy, Error, Event, IntervalStrategy, Handler,
     Message, NoIntervalStrategy, Response, RetryActor, RetryMessage,
     RetryStrategy, Strategy, SupervisionStrategy,
 };
@@ -64,8 +64,8 @@ impl Actor for EdgeCaseActor {
     }
 
     fn supervision_strategy() -> SupervisionStrategy {
-        SupervisionStrategy::Retry(Strategy::FixedInterval(
-            FixedIntervalStrategy::new(2, Duration::from_millis(50)),
+        SupervisionStrategy::Retry(Strategy::Interval(
+            IntervalStrategy::new(2, Duration::from_millis(50)),
         ))
     }
 
@@ -448,7 +448,7 @@ async fn test_retry_actor_functionality() {
         fail_on_message: false,
     };
 
-    let retry_strategy = Strategy::FixedInterval(FixedIntervalStrategy::new(
+    let retry_strategy = Strategy::Interval(IntervalStrategy::new(
         3,
         Duration::from_millis(10),
     ));

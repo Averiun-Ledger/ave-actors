@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, Error, Event,
-    FixedIntervalStrategy, Handler, Message, NotPersistentActor, Response,
+    IntervalStrategy, Handler, Message, NotPersistentActor, Response,
     ShutdownReason, Strategy, SupervisionStrategy,
 };
 use serde::{Deserialize, Serialize};
@@ -85,8 +85,8 @@ impl Actor for StressActor {
     }
 
     fn supervision_strategy() -> SupervisionStrategy {
-        SupervisionStrategy::Retry(Strategy::FixedInterval(
-            FixedIntervalStrategy::new(128, Duration::from_millis(1)),
+        SupervisionStrategy::Retry(Strategy::Interval(
+            IntervalStrategy::new(128, Duration::from_millis(1)),
         ))
     }
 
