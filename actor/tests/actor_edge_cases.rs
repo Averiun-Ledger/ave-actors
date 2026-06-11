@@ -86,7 +86,6 @@ impl Actor for EdgeCaseActor {
     async fn pre_restart(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        _error: Option<&Error>,
     ) -> Result<(), Error> {
         if self.fail_on_restart {
             return Err(Error::FunctionalCritical {

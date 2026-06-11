@@ -113,7 +113,7 @@ where
         &mut self,
         system: SystemRef,
         stop_sender: StopSender,
-        mut sender: Option<oneshot::Sender<bool>>,
+        mut sender: Option<oneshot::Sender<Result<(), Error>>>,
         span: tracing::Span,
     ) {
         // Create the actor context.
@@ -142,20 +142,27 @@ where
                         }
                         Err(err) => {
                             error!(error = %err, "Actor failed to start");
-                            ctx.set_error(err);
-                            self.lifecycle = ActorLifecycle::Failed;
+                            ctx.set_startup_error(err);
+                            if self.parent_sender.is_some() {
+                                // Child actor: notify synchronously via the
+                                // init oneshot only; the parent already sees
+                                // the failure through create_child Err.
+                                self.lifecycle = ActorLifecycle::Terminated;
+                            } else {
+                                self.lifecycle = ActorLifecycle::Failed;
+                            }
                         }
                     }
                 }
                 // State: STARTED
                 ActorLifecycle::Started => {
                     if let Some(sender) = sender.take()
-                        && let Err(err) = sender.send(true)
+                        && let Err(err) = sender.send(Ok(()))
                     {
-                        error!(error = %err, "Failed to send start signal");
+                        error!(error = ?err, "Failed to send start signal");
                     }
                     pending_stop_ack = self.run(&mut ctx).await;
-                    if ctx.error().is_some() {
+                    if ctx.fail().is_some() {
                         self.lifecycle = ActorLifecycle::Failed;
                     }
                 }
@@ -182,9 +189,9 @@ where
                     if self.parent_sender.is_none() {
                         self.lifecycle = ActorLifecycle::Restarted;
                     } else {
-                        let error = ctx.error().unwrap_or_else(|| Error::FunctionalCritical {
+                        let error = ctx.fail().unwrap_or_else(|| Error::FunctionalCritical {
                             description: format!(
-                                "Actor '{}' entered Failed without error context",
+                                "Actor '{}' entered Failed without fault context",
                                 self.path
                             ),
                         });
@@ -231,10 +238,18 @@ where
                 // State: TERMINATED
                 ActorLifecycle::Terminated => {
                     debug!("Actor terminated");
+                    let init_err = ctx.startup_error().unwrap_or_else(|| {
+                        Error::FunctionalCritical {
+                            description: format!(
+                                "Actor '{}' terminated without startup error context",
+                                self.path
+                            ),
+                        }
+                    });
                     if let Some(sender) = sender.take()
-                        && let Err(err) = sender.send(false)
+                        && let Err(err) = sender.send(Err(init_err))
                     {
-                        error!(error = %err, "Failed to send termination signal");
+                        error!(error = ?err, "Failed to send termination signal");
                     }
                     break;
                 }
@@ -335,7 +350,7 @@ where
         }
 
         self.parent_sender.is_none()
-            && ctx.error().is_some()
+            && ctx.fail().is_some()
             && matches!(
                 self.supervision_strategy,
                 SupervisionStrategy::Retry(_)
@@ -466,17 +481,17 @@ where
                         tokio::time::sleep(duration).await;
                     }
                     *retries += 1;
-                    let error = ctx.error();
-                    match ctx.restart(&mut self.actor, error.as_ref()).await {
+                    match ctx.restart(&mut self.actor).await {
                         Ok(_) => {
-                            ctx.clean_error();
+                            ctx.clean_fail();
+                            ctx.clean_startup_error();
                             self.lifecycle = ActorLifecycle::Started;
                             *retries = 0;
                             self.supervision_strategy =
                                 A::supervision_strategy();
                         }
                         Err(err) => {
-                            ctx.set_error(err);
+                            ctx.set_startup_error(err);
                             self.supervision_strategy =
                                 SupervisionStrategy::Retry(retry_strategy);
                         }
@@ -576,7 +591,6 @@ mod tests {
         async fn pre_restart(
             &mut self,
             _ctx: &mut ActorContext<Self>,
-            _error: Option<&Error>,
         ) -> Result<(), Error> {
             if self.failed {
                 self.failed = false;
@@ -1168,7 +1182,6 @@ mod tests {
         async fn pre_restart(
             &mut self,
             _ctx: &mut ActorContext<Self>,
-            _error: Option<&Error>,
         ) -> Result<(), Error> {
             Err(Error::FunctionalCritical {
                 description: "pre_restart fail".to_owned(),

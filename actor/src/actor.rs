@@ -30,8 +30,10 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     path: ActorPath,
     /// The actor system.
     system: SystemRef,
-    /// Error in the actor.
-    error: Option<Error>,
+    /// Fault set by emit_fail; reported to the parent when the actor enters Failed.
+    fail: Option<Error>,
+    /// Startup error from pre_start/pre_restart; used for retry and passed to pre_restart.
+    startup_error: Option<Error>,
     /// The error sender to send errors to the parent.
     error_sender: ChildErrorSender,
     /// Parent sender to escalate errors/faults directly.
@@ -62,7 +64,8 @@ where
             stop,
             path,
             system,
-            error: None,
+            fail: None,
+            startup_error: None,
             error_sender,
             parent_sender,
             child_senders: HashMap::new(),
@@ -73,13 +76,12 @@ where
     pub(crate) async fn restart(
         &mut self,
         actor: &mut A,
-        error: Option<&Error>,
     ) -> Result<(), Error>
     where
         A: Actor,
     {
-        tracing::warn!(error = ?error, "Actor restarting");
-        let result = actor.pre_restart(self, error).await;
+        tracing::warn!("Actor restarting");
+        let result = actor.pre_restart(self).await;
         if let Err(ref e) = result {
             tracing::error!(error = %e, "Actor restart failed");
         }
@@ -233,8 +235,8 @@ where
     /// Returns an error if the escalation channel is no longer reachable.
     pub async fn emit_fail(&mut self, error: Error) -> Result<(), Error> {
         tracing::error!(error = %error, "Actor failing");
-        // Store error to stop message handling.
-        self.set_error(error);
+        // Store fault to report to the parent when entering Failed.
+        self.set_fail(error);
         // Stop the actor; the runner will notify the parent when entering Failed.
         self.stop(None).await;
         Ok(())
@@ -313,16 +315,28 @@ where
         self.system.get_actor(&path).await
     }
 
-    pub(crate) fn error(&self) -> Option<Error> {
-        self.error.clone()
+    pub(crate) fn fail(&self) -> Option<Error> {
+        self.fail.clone()
     }
 
-    pub(crate) fn set_error(&mut self, error: Error) {
-        self.error = Some(error);
+    pub(crate) fn set_fail(&mut self, error: Error) {
+        self.fail = Some(error);
     }
 
-    pub(crate) fn clean_error(&mut self) {
-        self.error = None;
+    pub(crate) fn clean_fail(&mut self) {
+        self.fail = None;
+    }
+
+    pub(crate) fn startup_error(&self) -> Option<Error> {
+        self.startup_error.clone()
+    }
+
+    pub(crate) fn set_startup_error(&mut self, error: Error) {
+        self.startup_error = Some(error);
+    }
+
+    pub(crate) fn clean_startup_error(&mut self) {
+        self.startup_error = None;
     }
 }
 
@@ -444,13 +458,11 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
 
     /// Called when the actor is about to be restarted after a failure.
     ///
-    /// `error` is the error that caused the restart, or `None` if the restart was manual.
     /// The default implementation delegates to `pre_start`, so any initialization
     /// logic defined there runs again on restart.
     async fn pre_restart(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        _error: Option<&Error>,
     ) -> Result<(), Error> {
         self.pre_start(ctx).await
     }
@@ -853,6 +865,6 @@ mod test {
             })
             .await;
         assert!(result.is_ok());
-        assert!(ctx.error().is_some());
+        assert!(ctx.fail().is_some());
     }
 }

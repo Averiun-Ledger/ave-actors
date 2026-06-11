@@ -135,7 +135,7 @@ Override any hook in the `Actor` trait:
 
 ```rust,ignore
 async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), Error> { .. }
-async fn pre_restart(&mut self, ctx: &mut ActorContext<Self>, err: Option<&Error>) -> Result<(), Error> { .. }
+async fn pre_restart(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), Error> { .. }
 async fn pre_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), Error> { .. }
 async fn post_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), Error> { .. }
 ```

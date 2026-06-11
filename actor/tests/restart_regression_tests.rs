@@ -176,7 +176,6 @@ impl Actor for RuntimeRestartActor {
     async fn pre_restart(
         &mut self,
         _ctx: &mut ActorContext<Self>,
-        _error: Option<&Error>,
     ) -> Result<(), Error> {
         self.hooks.pre_restart_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())

@@ -277,7 +277,7 @@ impl SystemRef {
             );
         }
 
-        let (sender, receiver) = oneshot::channel::<bool>();
+        let (sender, receiver) = oneshot::channel::<Result<(), Error>>();
 
         let stop_sender_clone = stop_sender.clone();
         let span_clone = span.clone();
@@ -298,16 +298,14 @@ impl SystemRef {
         };
 
         match startup_result {
-            Ok(Ok(true)) => {
+            Ok(Ok(Ok(()))) => {
                 debug!(path = %path, "Actor initialized successfully");
                 Ok((actor_ref, stop_sender))
             }
-            Ok(Ok(false)) => {
-                error!(path = %path, "Actor runner failed to initialize");
+            Ok(Ok(Err(err))) => {
+                error!(path = %path, error = %err, "Actor runner failed to initialize");
                 self.cleanup_failed_actor_init(&path, is_root).await;
-                Err(Error::FunctionalCritical {
-                    description: format!("Runner can not init {}", path),
-                })
+                Err(err)
             }
             Ok(Err(e)) => {
                 error!(path = %path, error = %e, "Failed to receive initialization signal");
