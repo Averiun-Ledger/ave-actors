@@ -2,7 +2,6 @@
 
 use crate::{
     Actor, ActorPath, ActorRef, Error, Handler,
-    actor::ChildErrorSender,
     runner::{ActorRunner, StopHandle, StopSender},
 };
 
@@ -63,13 +62,6 @@ impl ActorSystem {
 /// System-level events broadcast on the observable system event channel.
 #[derive(Debug, Clone)]
 pub enum SystemEvent {
-    /// Non-fatal error emitted by a root actor that has no parent to receive it.
-    ActorError {
-        /// Path of the actor that emitted the error.
-        path: ActorPath,
-        /// Error emitted by that actor.
-        error: Error,
-    },
     /// Signals that the actor system should stop.
     /// Carries the reason so the runner can report it to the caller.
     StopSystem(ShutdownReason),
@@ -139,7 +131,12 @@ impl SystemRef {
             let mut receivers = Vec::with_capacity(root_senders.len());
             for (path, handle) in root_senders {
                 let (stop_sender, stop_receiver) = oneshot::channel();
-                if handle.sender().send(Some(stop_sender)).await.is_ok() {
+                if handle
+                    .sender()
+                    .send(crate::runner::StopSignal::Stop(Some(stop_sender)))
+                    .await
+                    .is_ok()
+                {
                     receivers.push((path, handle.timeout(), stop_receiver));
                 } else {
                     warn!(path = %path, "Failed to send stop signal to root actor");
@@ -192,10 +189,6 @@ impl SystemRef {
         self.system_event_sender.subscribe()
     }
 
-    pub(crate) fn publish_system_event(&self, event: SystemEvent) {
-        let _ = self.system_event_sender.send(event);
-    }
-
     fn index_actor(&self, path: &ActorPath) {
         let parent = path.parent();
         self.child_index
@@ -233,7 +226,7 @@ impl SystemRef {
         &self,
         path: ActorPath,
         actor: A,
-        parent_error_sender: Option<ChildErrorSender>,
+        parent_info: Option<crate::parent_ref::ParentInfo>,
         span: Span,
     ) -> Result<(ActorRef<A>, StopSender), Error>
     where
@@ -246,9 +239,9 @@ impl SystemRef {
 
         // Create the actor runner and init it.
         let system = self.clone();
-        let is_root = parent_error_sender.is_none();
+        let is_root = parent_info.is_none();
         let (mut runner, actor_ref, stop_sender) =
-            ActorRunner::create(path.clone(), actor, parent_error_sender);
+            ActorRunner::create(path.clone(), actor, parent_info);
 
         // Atomically check+insert to avoid concurrent duplicate creations
         // for the same path.

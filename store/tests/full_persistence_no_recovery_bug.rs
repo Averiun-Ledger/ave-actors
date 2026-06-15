@@ -55,6 +55,8 @@ impl Actor for CounterActor {
     type Response = CounterResponse;
     type Event = Incremented;
     type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,

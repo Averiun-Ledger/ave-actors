@@ -5,6 +5,7 @@ mod error;
 mod handler;
 mod helpers;
 mod into_actor;
+mod parent_ref;
 mod path;
 mod retries;
 mod runner;
@@ -16,6 +17,7 @@ pub use actor::{
     Actor, ActorContext, ActorRef, ChildAction, Event, Handler, Message,
     Response,
 };
+pub use parent_ref::ParentRef;
 pub use error::Error;
 pub use into_actor::{IntoActor, NotPersistentActor};
 pub use path::ActorPath;

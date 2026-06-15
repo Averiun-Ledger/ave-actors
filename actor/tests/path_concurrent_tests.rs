@@ -152,6 +152,8 @@ impl Actor for ConcurrentActor {
     type Response = ConcurrentResponse;
     type Event = ConcurrentEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,

@@ -400,6 +400,8 @@ impl Actor for RollbackLightActor {
     type Response = ValueResponse;
     type Event = ValueEvent;
     type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -489,6 +491,8 @@ impl Actor for GapActor {
     type Response = ValueResponse;
     type Event = ValueEvent;
     type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -566,6 +570,8 @@ impl Actor for CompactingActor {
     type Response = ValueResponse;
     type Event = ValueEvent;
     type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,

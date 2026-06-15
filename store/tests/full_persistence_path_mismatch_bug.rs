@@ -48,6 +48,10 @@ impl Actor for PathActor {
     type Response = PathResp;
     type Event = PathEvent;
     type SinkEvent = Self::Event;
+
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
+
     fn get_span(
         id: &str,
         _parent_span: Option<tracing::Span>,
@@ -191,6 +195,8 @@ async fn test_explicit_prefix_usage() {
         type Response = PathResp;
         type Event = PathEvent;
         type SinkEvent = Self::Event;
+        type ChildError = ActorError;
+        type ChildFault = ActorError;
 
         fn get_span(
             id: &str,

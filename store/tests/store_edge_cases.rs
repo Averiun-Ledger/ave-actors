@@ -80,6 +80,10 @@ impl Actor for EncryptedActor {
     type Response = EncryptedResponse;
     type Event = EncryptedEvent;
     type SinkEvent = Self::Event;
+
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
+
     fn get_span(
         id: &str,
         _parent_span: Option<tracing::Span>,
@@ -219,6 +223,8 @@ impl Actor for LightActor {
     type Response = EncryptedResponse;
     type Event = EncryptedEvent;
     type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -761,6 +767,8 @@ async fn test_persist_actor_error_scenarios() {
         type Response = EncryptedResponse;
         type Event = EncryptedEvent;
         type SinkEvent = Self::Event;
+        type ChildError = ActorError;
+        type ChildFault = ActorError;
 
         fn get_span(
             id: &str,

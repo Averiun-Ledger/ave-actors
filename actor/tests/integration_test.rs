@@ -55,6 +55,8 @@ impl Actor for TestActor {
     type Response = TestResponse;
     type Event = TestEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -183,6 +185,8 @@ impl Actor for ChildActor {
     type Response = ChildResponse;
     type Event = ChildEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -208,18 +212,20 @@ impl Handler<Self> for ChildActor {
                     ctx.publish_all(ChildEvent(self.state));
                     Ok(ChildResponse::None)
                 } else if value > 10 && value < 100 {
-                    ctx.emit_error(Error::Functional {
-                        description: "Value is too high".to_owned(),
-                    })
-                    .await
-                    .unwrap();
+                    ctx.get_parent::<TestActor>()
+                        .await?
+                        .emit_error(Error::Functional {
+                            description: "Value is too high".to_owned(),
+                        })
+                        .await?;
                     Ok(ChildResponse::State(100))
                 } else {
-                    ctx.emit_fail(Error::Functional {
-                        description: "Value produces a fault".to_owned(),
-                    })
-                    .await
-                    .unwrap();
+                    ctx.get_parent::<TestActor>()
+                        .await?
+                        .emit_fail(Error::Functional {
+                            description: "Value produces a fault".to_owned(),
+                        })
+                        .await?;
                     Ok(ChildResponse::None)
                 }
             }

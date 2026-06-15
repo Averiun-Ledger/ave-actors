@@ -1,8 +1,9 @@
 //! Core actor traits, types, and lifecycle hooks.
 
 use crate::{
-    ActorPath, Error,
+    ActorPath, Error, ParentRef,
     handler::HandleHelper,
+    parent_ref::boxed_notifier,
     runner::{StopHandle, StopSender},
     sink::Sink,
     supervision::SupervisionStrategy,
@@ -30,14 +31,12 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     path: ActorPath,
     /// The actor system.
     system: SystemRef,
-    /// Fault set by emit_fail; reported to the parent when the actor enters Failed.
-    fail: Option<Error>,
     /// Startup error from pre_start/pre_restart; used for retry and passed to pre_restart.
     startup_error: Option<Error>,
-    /// The error sender to send errors to the parent.
-    error_sender: ChildErrorSender,
-    /// Parent sender to escalate errors/faults directly.
-    parent_sender: Option<ChildErrorSender>,
+    /// The error sender to send errors/faults to this actor's children.
+    error_sender: ChildErrorSender<A::ChildError, A::ChildFault>,
+    /// Parent information passed by this actor's parent; used by `get_parent`.
+    parent_info: Option<crate::parent_ref::ParentInfo>,
     /// Child action senders.
     child_senders: HashMap<ActorPath, StopHandle>,
     /// Named sinks registered for this actor.
@@ -54,8 +53,8 @@ where
         stop: StopSender,
         path: ActorPath,
         system: SystemRef,
-        error_sender: ChildErrorSender,
-        parent_sender: Option<ChildErrorSender>,
+        error_sender: ChildErrorSender<A::ChildError, A::ChildFault>,
+        parent_info: Option<crate::parent_ref::ParentInfo>,
         sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
         span: Span,
     ) -> Self {
@@ -64,10 +63,9 @@ where
             stop,
             path,
             system,
-            fail: None,
             startup_error: None,
             error_sender,
-            parent_sender,
+            parent_info,
             child_senders: HashMap::new(),
             sinks,
         }
@@ -102,11 +100,22 @@ where
         &self.system
     }
 
-    /// Returns a typed handle to the parent actor, or an error if this is a root actor or the parent has stopped.
+    /// Returns a typed handle to the parent actor, or an error if this is a root
+    /// actor or the parent's type does not match `P`.
     pub async fn get_parent<P: Actor + Handler<P>>(
         &self,
-    ) -> Result<ActorRef<P>, Error> {
-        self.system.get_actor(&self.path.parent()).await
+    ) -> Result<ParentRef<P>, Error> {
+        let parent_info = self
+            .parent_info
+            .as_ref()
+            .ok_or_else(|| Error::NotFound { path: self.path.parent() })?;
+        let actor_ref = parent_info
+            .actor_ref
+            .downcast_ref::<ActorRef<P>>()
+            .cloned()
+            .ok_or_else(|| Error::NotFound { path: self.path.parent() })?;
+        let notifier = Arc::clone(&parent_info.notifier);
+        Ok(ParentRef::new(actor_ref, notifier, self.stop.clone()))
     }
 
     pub(crate) async fn stop_children(&mut self) {
@@ -119,7 +128,12 @@ where
         let mut receivers = Vec::with_capacity(child_count);
         for (path, handle) in std::mem::take(&mut self.child_senders) {
             let (stop_sender, stop_receiver) = oneshot::channel();
-            if handle.sender().send(Some(stop_sender)).await.is_ok() {
+            if handle
+                .sender()
+                .send(crate::runner::StopSignal::Stop(Some(stop_sender)))
+                .await
+                .is_ok()
+            {
                 receivers.push((path, handle.timeout(), stop_receiver));
             }
         }
@@ -150,7 +164,10 @@ where
 
     /// Sends a stop signal to this actor. Pass `Some(sender)` to receive a confirmation when shutdown completes.
     pub async fn stop(&self, sender: Option<oneshot::Sender<()>>) {
-        let _ = self.stop.send(sender).await;
+        let _ = self
+            .stop
+            .send(crate::runner::StopSignal::Stop(sender))
+            .await;
     }
 
     /// Register a named sink for this actor.
@@ -205,43 +222,6 @@ where
         }
     }
 
-    /// Reports an error to this actor's parent so the parent can invoke `on_child_error`.
-    ///
-    /// Returns an error if the parent channel is no longer reachable.
-    pub async fn emit_error(&mut self, error: Error) -> Result<(), Error> {
-        tracing::warn!(error = %error, "Emitting error");
-        if let Some(parent_sender) = self.parent_sender.as_ref() {
-            parent_sender
-                .send(ChildError::Error { error })
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, "Failed to emit error");
-                    Error::Send {
-                        reason: e.to_string(),
-                    }
-                })
-        } else {
-            self.system
-                .publish_system_event(crate::SystemEvent::ActorError {
-                    path: self.path.clone(),
-                    error,
-                });
-            Ok(())
-        }
-    }
-
-    /// Emits a fatal fault, halts message processing, and escalates to the parent via `on_child_fault`.
-    ///
-    /// Returns an error if the escalation channel is no longer reachable.
-    pub async fn emit_fail(&mut self, error: Error) -> Result<(), Error> {
-        tracing::error!(error = %error, "Actor failing");
-        // Store fault to report to the parent when entering Failed.
-        self.set_fail(error);
-        // Stop the actor; the runner will notify the parent when entering Failed.
-        self.stop(None).await;
-        Ok(())
-    }
-
     /// Spawns a child actor and registers it under this actor's path.
     ///
     /// `name` becomes the last segment of the child's path. Returns an [`ActorRef`]
@@ -259,12 +239,16 @@ where
         tracing::debug!(child_name = %name, "Creating child actor");
         let actor = actor_init.into_actor();
         let path = self.path.clone() / name;
+        let parent_info = crate::parent_ref::ParentInfo {
+            actor_ref: Arc::new(self.reference().await?),
+            notifier: boxed_notifier(self.error_sender.clone()),
+        };
         let result = self
             .system
             .create_actor_path(
                 path.clone(),
                 actor,
-                Some(self.error_sender.clone()),
+                Some(parent_info),
                 C::get_span(name, Some(self.span.clone())),
             )
             .await;
@@ -315,18 +299,6 @@ where
         self.system.get_actor(&path).await
     }
 
-    pub(crate) fn fail(&self) -> Option<Error> {
-        self.fail.clone()
-    }
-
-    pub(crate) fn set_fail(&mut self, error: Error) {
-        self.fail = Some(error);
-    }
-
-    pub(crate) fn clean_fail(&mut self) {
-        self.fail = None;
-    }
-
     pub(crate) fn startup_error(&self) -> Option<Error> {
         self.startup_error.clone()
     }
@@ -369,22 +341,22 @@ pub enum ChildAction {
 }
 
 /// Child error receiver.
-pub type ChildErrorReceiver = mpsc::Receiver<ChildError>;
+pub type ChildErrorReceiver<E, F> = mpsc::Receiver<ChildError<E, F>>;
 
 /// Child error sender.
-pub type ChildErrorSender = mpsc::Sender<ChildError>;
+pub type ChildErrorSender<E, F> = mpsc::Sender<ChildError<E, F>>;
 
 /// Message sent from a child to its parent on error, fault, or stop.
-pub enum ChildError {
+pub enum ChildError<E, F> {
     /// Error in child.
     Error {
         /// The error that caused the failure.
-        error: Error,
+        error: E,
     },
     /// Fault in child.
     Fault {
-        /// The error that caused the failure.
-        error: Error,
+        /// The fault that caused the failure.
+        error: F,
         /// The sender will communicate the action to be carried out to the child.
         sender: oneshot::Sender<ChildAction>,
     },
@@ -410,6 +382,12 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
 
     /// The type returned by the actor in response to each message.
     type Response: Response;
+
+    /// The type of errors that children of this actor may report to it.
+    type ChildError: Debug + Send + Sync + std::any::Any + 'static;
+
+    /// The type of faults that children of this actor may report to it.
+    type ChildFault: Debug + Clone + From<Error> + Send + Sync + std::any::Any + 'static;
 
     /// Creates the tracing span for this actor instance.
     ///
@@ -538,29 +516,31 @@ pub trait Handler<A: Actor + Handler<A>>: Send + Sync {
         // Default implementation.
     }
 
-    /// Called when a child actor reports an error via [`ActorContext::emit_error`].
+    /// Called when a child actor reports an error via its parent's
+    /// [`ParentRef::emit_error`].
     ///
     /// Override to inspect `error` and decide whether to escalate it. The default
     /// implementation does nothing.
     async fn on_child_error(
         &mut self,
-        error: Error,
+        error: A::ChildError,
         _ctx: &mut ActorContext<A>,
     ) {
-        tracing::error!(error = %error, "Child actor error");
+        tracing::error!(error = ?error, "Child actor error");
     }
 
-    /// Called when a child actor fails unrecoverably (panics or exhausts retries).
+    /// Called when a child actor fails unrecoverably and reports a fault via its
+    /// parent's [`ParentRef::emit_fail`].
     ///
     /// Return [`ChildAction::Stop`] to propagate the failure up to this actor's parent,
     /// [`ChildAction::Restart`] to restart the child, or [`ChildAction::Delegate`]
     /// to let the child's own supervision strategy decide. The default returns `Stop`.
     async fn on_child_fault(
         &mut self,
-        error: Error,
+        error: A::ChildFault,
         _ctx: &mut ActorContext<A>,
     ) -> ChildAction {
-        tracing::error!(error = %error, "Child actor fault, stopping child");
+        tracing::error!(error = ?error, "Child actor fault, stopping child");
         // Default implementation from child actor errors.
         ChildAction::Stop
     }
@@ -639,7 +619,12 @@ where
         tracing::debug!("Stopping actor");
         let (response_sender, response_receiver) = oneshot::channel();
 
-        if self.stop_sender.send(Some(response_sender)).await.is_err() {
+        if self
+            .stop_sender
+            .send(crate::runner::StopSignal::Stop(Some(response_sender)))
+            .await
+            .is_err()
+        {
             Ok(())
         } else {
             response_receiver.await.map_err(|error| {
@@ -653,7 +638,10 @@ where
 
     /// Sends a stop signal without waiting for the actor to confirm shutdown (fire-and-forget).
     pub async fn tell_stop(&self) {
-        let _ = self.stop_sender.send(None).await;
+        let _ = self
+            .stop_sender
+            .send(crate::runner::StopSignal::Stop(None))
+            .await;
     }
 
     /// Register a sink from external code.
@@ -711,7 +699,7 @@ mod test {
     use crate::sink::{Sink, Subscriber};
 
     use serde::{Deserialize, Serialize};
-    use tokio::sync::{Mutex, mpsc};
+    use tokio::sync::Mutex;
     use tokio_util::sync::CancellationToken;
     use tracing::info_span;
 
@@ -743,6 +731,8 @@ mod test {
         type Event = TestEvent;
         type SinkEvent = Self::Event;
         type Response = TestResponse;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -818,53 +808,4 @@ mod test {
         actor_ref.ask_stop().await.unwrap();
     }
 
-    #[test(tokio::test)]
-    async fn test_emit_error_channel_closed() {
-        let system =
-            SystemRef::new(CancellationToken::new(), CancellationToken::new());
-        let (stop_sender, _stop_receiver) = mpsc::channel(1);
-        let (error_sender, _error_receiver) = mpsc::channel(1);
-        let (parent_sender, parent_receiver) = mpsc::channel::<ChildError>(1);
-        drop(parent_receiver);
-        let mut ctx = ActorContext::<TestActor>::new(
-            stop_sender,
-            ActorPath::from("/user/test"),
-            system,
-            error_sender,
-            Some(parent_sender),
-            Arc::new(DashMap::new()),
-            info_span!("test"),
-        );
-        let result = ctx
-            .emit_error(Error::Functional {
-                description: "test".to_owned(),
-            })
-            .await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::Send { .. }));
-    }
-
-    #[test(tokio::test)]
-    async fn test_emit_fail_stores_error() {
-        let system =
-            SystemRef::new(CancellationToken::new(), CancellationToken::new());
-        let (stop_sender, _stop_receiver) = mpsc::channel(1);
-        let (error_sender, _error_receiver) = mpsc::channel(1);
-        let mut ctx = ActorContext::<TestActor>::new(
-            stop_sender,
-            ActorPath::from("/user/test"),
-            system,
-            error_sender,
-            None,
-            Arc::new(DashMap::new()),
-            info_span!("test"),
-        );
-        let result = ctx
-            .emit_fail(Error::FunctionalCritical {
-                description: "test".to_owned(),
-            })
-            .await;
-        assert!(result.is_ok());
-        assert!(ctx.fail().is_some());
-    }
 }

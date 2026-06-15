@@ -53,6 +53,8 @@ impl Actor for SingleEventActor {
     type Response = Resp;
     type Event = DataSet;
     type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,

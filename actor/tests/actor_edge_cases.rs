@@ -55,6 +55,8 @@ impl Actor for EdgeCaseActor {
     type Response = EdgeCaseResponse;
     type Event = EdgeCaseEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -140,17 +142,21 @@ impl Handler<Self> for EdgeCaseActor {
 
         match msg {
             EdgeCaseCommand::TriggerError => {
-                ctx.emit_error(Error::Functional {
-                    description: "Test error".to_owned(),
-                })
-                .await?;
+                ctx.get_parent::<EdgeCaseActor>()
+                    .await?
+                    .emit_error(Error::Functional {
+                        description: "Test error".to_owned(),
+                    })
+                    .await?;
                 Ok(EdgeCaseResponse::Success)
             }
             EdgeCaseCommand::TriggerFault => {
-                ctx.emit_fail(Error::Functional {
-                    description: "Test fault".to_owned(),
-                })
-                .await?;
+                ctx.get_parent::<EdgeCaseActor>()
+                    .await?
+                    .emit_fail(Error::Functional {
+                        description: "Test fault".to_owned(),
+                    })
+                    .await?;
                 Ok(EdgeCaseResponse::Success)
             }
             EdgeCaseCommand::GetValue => Ok(EdgeCaseResponse::Value(42)),
@@ -221,6 +227,8 @@ impl Actor for FailingActor {
     type Response = EdgeCaseResponse;
     type Event = EdgeCaseEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,

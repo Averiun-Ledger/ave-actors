@@ -1165,6 +1165,8 @@ where
     type Response = StoreResponse<A>;
     type Event = ();
     type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -1359,6 +1361,8 @@ mod tests {
         type Event = CounterEvent;
         type SinkEvent = Self::Event;
         type Response = CounterResponse;
+        type ChildError = ActorError;
+        type ChildFault = ActorError;
 
         fn get_span(
             id: &str,
@@ -1443,6 +1447,8 @@ mod tests {
         type Event = CounterEvent;
         type SinkEvent = Self::Event;
         type Response = CounterResponse;
+        type ChildError = ActorError;
+        type ChildFault = ActorError;
 
         fn get_span(
             id: &str,

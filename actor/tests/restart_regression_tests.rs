@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, Error, Event,
-    Handler, IntervalStrategy, Message, NoIntervalStrategy, NotPersistentActor,
-    Response, RetryActor, RetryMessage, ShutdownReason, Strategy,
-    SupervisionStrategy, SystemEvent,
+    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
+    Event, Handler, IntervalStrategy, Message, NoIntervalStrategy,
+    NotPersistentActor, Response, RetryActor, RetryMessage, ShutdownReason,
+    Strategy, SupervisionStrategy,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -46,6 +46,8 @@ impl Actor for AlwaysFailStartActor {
     type Response = StartResponse;
     type Event = StartEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -91,6 +93,8 @@ impl Actor for HealthyActor {
     type Response = StartResponse;
     type Event = StartEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -139,6 +143,63 @@ struct RestartEvent;
 
 impl Event for RestartEvent {}
 
+/// Parent that creates a `RuntimeRestartActor` child and restarts it on fault.
+#[derive(Clone)]
+struct RestartParent {
+    child_hooks: Arc<RestartHooks>,
+}
+
+impl NotPersistentActor for RestartParent {}
+
+#[async_trait]
+impl Actor for RestartParent {
+    type Message = RestartMessage;
+    type Response = RestartResponse;
+    type Event = RestartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("RestartParent", id = %id)
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        let child = RuntimeRestartActor::new(self.child_hooks.clone());
+        ctx.create_child("restart_child", child).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for RestartParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: RestartMessage,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<RestartResponse, Error> {
+        match msg {
+            RestartMessage::Ping => Ok(RestartResponse::Pong(0)),
+            RestartMessage::Fail => Ok(RestartResponse::RestartScheduled),
+        }
+    }
+
+    async fn on_child_fault(
+        &mut self,
+        _error: Error,
+        _ctx: &mut ActorContext<Self>,
+    ) -> ChildAction {
+        ChildAction::Restart
+    }
+}
+
 #[derive(Clone)]
 struct RuntimeRestartActor {
     hooks: Arc<RestartHooks>,
@@ -158,6 +219,8 @@ impl Actor for RuntimeRestartActor {
     type Response = RestartResponse;
     type Event = RestartEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -197,10 +260,12 @@ impl Handler<Self> for RuntimeRestartActor {
                 Ok(RestartResponse::Pong(ping))
             }
             RestartMessage::Fail => {
-                ctx.emit_fail(Error::FunctionalCritical {
-                    description: "forced runtime failure".to_owned(),
-                })
-                .await?;
+                ctx.get_parent::<RestartParent>()
+                    .await?
+                    .emit_fail(Error::FunctionalCritical {
+                        description: "forced runtime failure".to_owned(),
+                    })
+                    .await?;
                 Ok(RestartResponse::RestartScheduled)
             }
         }
@@ -230,6 +295,8 @@ impl Actor for CountingTarget {
     type Response = ();
     type Event = CountEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -272,6 +339,63 @@ struct RootErrorEvent;
 
 impl Event for RootErrorEvent {}
 
+/// Parent that observes errors escalated by its child `RootErrorActor`.
+#[derive(Clone)]
+struct ErrorParent {
+    errors_seen: Arc<AtomicUsize>,
+}
+
+impl NotPersistentActor for ErrorParent {}
+
+#[async_trait]
+impl Actor for ErrorParent {
+    type Message = RootErrorMessage;
+    type Response = RootErrorResponse;
+    type Event = RootErrorEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("ErrorParent", id = %id)
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        ctx.create_child("error_child", RootErrorActor).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for ErrorParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: RootErrorMessage,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<RootErrorResponse, Error> {
+        match msg {
+            RootErrorMessage::Emit | RootErrorMessage::Ping => {
+                Ok(RootErrorResponse::Ok)
+            }
+        }
+    }
+
+    async fn on_child_error(
+        &mut self,
+        _error: Error,
+        _ctx: &mut ActorContext<Self>,
+    ) {
+        self.errors_seen.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 #[derive(Clone)]
 struct RootErrorActor;
 
@@ -283,6 +407,8 @@ impl Actor for RootErrorActor {
     type Response = RootErrorResponse;
     type Event = RootErrorEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -302,10 +428,12 @@ impl Handler<Self> for RootErrorActor {
     ) -> Result<RootErrorResponse, Error> {
         match msg {
             RootErrorMessage::Emit => {
-                ctx.emit_error(Error::Functional {
-                    description: "root emitted error".to_owned(),
-                })
-                .await?;
+                ctx.get_parent::<ErrorParent>()
+                    .await?
+                    .emit_error(Error::Functional {
+                        description: "root emitted error".to_owned(),
+                    })
+                    .await?;
             }
             RootErrorMessage::Ping => {}
         }
@@ -326,6 +454,8 @@ impl Actor for HangingStartActor {
     type Response = StartResponse;
     type Event = StartEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -385,6 +515,8 @@ impl Actor for BlockingChild {
     type Response = ();
     type Event = StopEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -425,6 +557,8 @@ impl Actor for ParentWithBlockingChild {
     type Response = ();
     type Event = StopEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -477,6 +611,8 @@ impl Actor for BlockingRootActor {
     type Response = ();
     type Event = StopEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -590,19 +726,29 @@ async fn test_runtime_restart_preserves_registry_lookup() {
     let handle = spawn_system();
     let hooks = Arc::new(RestartHooks::default());
 
-    let actor_ref = handle
+    let _parent_ref = handle
         .system
         .create_root_actor(
             "restart-registry",
-            RuntimeRestartActor::new(hooks.clone()),
+            RestartParent {
+                child_hooks: hooks.clone(),
+            },
         )
+        .await
+        .unwrap();
+
+    let actor_ref: ActorRef<RuntimeRestartActor> = handle
+        .system
+        .get_actor(&ActorPath::from(
+            "/user/restart-registry/restart_child",
+        ))
         .await
         .unwrap();
 
     actor_ref.tell(RestartMessage::Fail).await.unwrap();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    let path = ActorPath::from("/user/restart-registry");
+    let path = ActorPath::from("/user/restart-registry/restart_child");
     loop {
         if hooks.pre_restart_calls.load(Ordering::SeqCst) > 0 {
             let fetched = handle
@@ -630,12 +776,22 @@ async fn test_runtime_restart_resumes_mailbox_processing() {
     let handle = spawn_system();
     let hooks = Arc::new(RestartHooks::default());
 
-    let actor_ref: ActorRef<RuntimeRestartActor> = handle
+    let _parent_ref = handle
         .system
         .create_root_actor(
             "restart-mailbox",
-            RuntimeRestartActor::new(hooks.clone()),
+            RestartParent {
+                child_hooks: hooks.clone(),
+            },
         )
+        .await
+        .unwrap();
+
+    let actor_ref: ActorRef<RuntimeRestartActor> = handle
+        .system
+        .get_actor(&ActorPath::from(
+            "/user/restart-mailbox/restart_child",
+        ))
         .await
         .unwrap();
 
@@ -734,32 +890,42 @@ async fn test_create_root_actor_rejected_once_shutdown_starts() {
 }
 
 #[test(tokio::test)]
-async fn test_root_emit_error_publishes_system_event_without_stopping_actor() {
+async fn test_child_emit_error_propagates_to_parent_without_stopping_child() {
     let handle = spawn_system();
-    let mut system_events = handle.system.subscribe_system_events();
+    let errors_seen = Arc::new(AtomicUsize::new(0));
+
+    let _parent_ref: ActorRef<ErrorParent> = handle
+        .system
+        .create_root_actor(
+            "root-error",
+            ErrorParent {
+                errors_seen: errors_seen.clone(),
+            },
+        )
+        .await
+        .unwrap();
 
     let actor_ref: ActorRef<RootErrorActor> = handle
         .system
-        .create_root_actor("root-error", RootErrorActor)
+        .get_actor(&ActorPath::from(
+            "/user/root-error/error_child",
+        ))
         .await
         .unwrap();
 
     actor_ref.tell(RootErrorMessage::Emit).await.unwrap();
 
-    let event =
-        tokio::time::timeout(Duration::from_secs(1), system_events.recv())
-            .await
-            .expect("system event should arrive within timeout")
-            .expect("system event channel should remain open");
-
-    assert!(matches!(
-        event,
-        SystemEvent::ActorError {
-            path,
-            error: Error::Functional { description }
-        } if path == ActorPath::from("/user/root-error")
-            && description == "root emitted error"
-    ));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if errors_seen.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "parent should receive the child error"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     let response = actor_ref.ask(RootErrorMessage::Ping).await.unwrap();
     assert_eq!(response, RootErrorResponse::Ok);

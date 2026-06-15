@@ -18,8 +18,8 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Event, Handler, Message,
-    NotPersistentActor, Response,
+    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
+    Handler, Message, NotPersistentActor, Response,
 };
 use ave_actors_store::store::{FullPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -70,6 +70,8 @@ impl Actor for MyPersistentActor {
     type Response = PersistentResponse;
     type Event = PersistentEvent;
     type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -148,6 +150,8 @@ impl Actor for MyNonPersistentActor {
     type Response = NonPersistentResponse;
     type Event = NonPersistentEvent;
     type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -185,6 +189,9 @@ impl Actor for ParentActor {
     type Response = ();
     type Event = ();
     type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
+
     fn get_span(
         id: &str,
         _parent_span: Option<tracing::Span>,

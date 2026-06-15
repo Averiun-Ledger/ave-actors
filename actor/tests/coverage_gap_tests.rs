@@ -59,12 +59,88 @@ struct EventEmitterActor;
 
 impl ave_actors_actor::NotPersistentActor for EventEmitterActor {}
 
+/// Parent that observes errors escalated by its `EventEmitterActor` child.
+#[derive(Clone)]
+struct ErrorObservingParent {
+    errors_seen: Arc<AtomicUsize>,
+}
+
+impl ave_actors_actor::NotPersistentActor for ErrorObservingParent {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ErrorObservingMsg {
+    Trigger,
+}
+
+impl Message for ErrorObservingMsg {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ErrorObservingResponse(pub usize);
+
+impl Response for ErrorObservingResponse {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ErrorObservingEvent;
+
+impl Event for ErrorObservingEvent {}
+
+#[async_trait]
+impl Actor for ErrorObservingParent {
+    type Message = ErrorObservingMsg;
+    type Response = ErrorObservingResponse;
+    type Event = ErrorObservingEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("ErrorObservingParent", id = %id)
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        ctx.create_child("emitter", EventEmitterActor).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for ErrorObservingParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: ErrorObservingMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<ErrorObservingResponse, Error> {
+        match msg {
+            ErrorObservingMsg::Trigger => Ok(ErrorObservingResponse(
+                self.errors_seen.load(Ordering::SeqCst),
+            )),
+        }
+    }
+
+    async fn on_child_error(
+        &mut self,
+        _error: Error,
+        _ctx: &mut ActorContext<Self>,
+    ) {
+        self.errors_seen.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 #[async_trait]
 impl Actor for EventEmitterActor {
     type Message = SimpleMsg;
     type Response = ();
     type Event = SimpleEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -82,40 +158,54 @@ impl Handler<Self> for EventEmitterActor {
         _msg: SimpleMsg,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
-        ctx.emit_error(Error::Functional {
-            description: "root error".to_owned(),
-        })
-        .await?;
+        ctx.get_parent::<ErrorObservingParent>()
+            .await?
+            .emit_error(Error::Functional {
+                description: "root error".to_owned(),
+            })
+            .await?;
         Ok(())
     }
 }
 
 #[test(tokio::test)]
-async fn test_subscribe_system_events_receives_actor_error() {
+async fn test_child_error_observed_by_parent() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     let runner_handle = tokio::spawn(async move { runner.run().await });
 
-    let mut events = system.subscribe_system_events();
+    let parent = ErrorObservingParent {
+        errors_seen: Arc::new(AtomicUsize::new(0)),
+    };
+    let parent_ref = system
+        .create_root_actor("emitter_parent", parent)
+        .await
+        .unwrap();
 
-    let actor_ref = system
-        .create_root_actor("emitter", EventEmitterActor)
+    let actor_ref: ActorRef<EventEmitterActor> = system
+        .get_actor(&ActorPath::from(
+            "/user/emitter_parent/emitter",
+        ))
         .await
         .unwrap();
 
     actor_ref.tell(SimpleMsg).await.unwrap();
 
-    // Wait for the system event to propagate
-    let evt = tokio::time::timeout(Duration::from_secs(2), events.recv())
-        .await
-        .expect("should receive event")
-        .expect("channel not closed");
-
-    match evt {
-        ave_actors_actor::SystemEvent::ActorError { path, .. } => {
-            assert_eq!(path.to_string(), "/user/emitter");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let count = parent_ref
+            .ask(ErrorObservingMsg::Trigger)
+            .await
+            .unwrap()
+            .0;
+        if count >= 1 {
+            break;
         }
-        other => panic!("Expected ActorError, got {:?}", other),
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "parent should observe the child error"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     system.stop_system();
@@ -137,6 +227,8 @@ impl Actor for MinimalActor {
     type Response = SimpleResponse;
     type Event = SimpleEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -189,6 +281,8 @@ async fn test_ask_timeout_hits_deadline() {
         type Response = ();
         type Event = SimpleEvent;
         type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
         fn get_span(
             id: &str,
             _parent_span: Option<tracing::Span>,
@@ -274,6 +368,8 @@ impl Actor for ParentOfFaultyChild {
     type Response = ParentResponse;
     type Event = ParentEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -361,6 +457,8 @@ impl Actor for FaultyChildActor {
     type Response = FaultyChildResponse;
     type Event = FaultyChildEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -378,10 +476,12 @@ impl Handler<Self> for FaultyChildActor {
         _msg: FaultyChildMsg,
         ctx: &mut ActorContext<Self>,
     ) -> Result<FaultyChildResponse, Error> {
-        ctx.emit_fail(Error::Functional {
-            description: "child fault".to_owned(),
-        })
-        .await?;
+        ctx.get_parent::<ParentOfFaultyChild>()
+            .await?
+            .emit_fail(Error::Functional {
+                description: "child fault".to_owned(),
+            })
+            .await?;
         Ok(FaultyChildResponse)
     }
 }
@@ -413,6 +513,8 @@ impl Actor for ErrorChildActor {
     type Response = ErrorChildResponse;
     type Event = ErrorChildEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -430,10 +532,12 @@ impl Handler<Self> for ErrorChildActor {
         _msg: ErrorChildMsg,
         ctx: &mut ActorContext<Self>,
     ) -> Result<ErrorChildResponse, Error> {
-        ctx.emit_error(Error::Functional {
-            description: "child error".to_owned(),
-        })
-        .await?;
+        ctx.get_parent::<ParentOfFaultyChild>()
+            .await?
+            .emit_error(Error::Functional {
+                description: "child error".to_owned(),
+            })
+            .await?;
         Ok(ErrorChildResponse)
     }
 }
@@ -558,6 +662,8 @@ impl Actor for ChildCreatorActor {
     type Response = CreatorResponse;
     type Event = CreatorEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -617,10 +723,11 @@ async fn test_create_child_duplicate_returns_error() {
 // Root actor emit_fail stops the actor (no parent to escalate)
 // ============================================================================
 
-#[derive(Debug, Clone)]
-struct RootFailActor;
+/// Parent that stops its child when it reports a fault.
+#[derive(Clone)]
+struct StopOnFaultParent;
 
-impl ave_actors_actor::NotPersistentActor for RootFailActor {}
+impl ave_actors_actor::NotPersistentActor for StopOnFaultParent {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RootFailMsg;
@@ -638,21 +745,69 @@ struct RootFailEvent;
 impl Event for RootFailEvent {}
 
 #[async_trait]
+impl Actor for StopOnFaultParent {
+    type Message = RootFailMsg;
+    type Response = RootFailResponse;
+    type Event = RootFailEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("StopOnFaultParent", id = %id)
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        ctx.create_child("fail_child", RootFailActor).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for StopOnFaultParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: RootFailMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<RootFailResponse, Error> {
+        Ok(RootFailResponse)
+    }
+
+    async fn on_child_fault(
+        &mut self,
+        _error: Error,
+        _ctx: &mut ActorContext<Self>,
+    ) -> ChildAction {
+        ChildAction::Stop
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RootFailActor;
+
+impl ave_actors_actor::NotPersistentActor for RootFailActor {}
+
+#[async_trait]
 impl Actor for RootFailActor {
     type Message = RootFailMsg;
     type Response = RootFailResponse;
     type Event = RootFailEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
         _parent_span: Option<tracing::Span>,
     ) -> tracing::Span {
         info_span!("RootFailActor", id = %id)
-    }
-
-    fn supervision_strategy() -> SupervisionStrategy {
-        SupervisionStrategy::Stop
     }
 }
 
@@ -664,22 +819,31 @@ impl Handler<Self> for RootFailActor {
         _msg: RootFailMsg,
         ctx: &mut ActorContext<Self>,
     ) -> Result<RootFailResponse, Error> {
-        ctx.emit_fail(Error::Functional {
-            description: "root fail".to_owned(),
-        })
-        .await?;
+        ctx.get_parent::<StopOnFaultParent>()
+            .await?
+            .emit_fail(Error::Functional {
+                description: "root fail".to_owned(),
+            })
+            .await?;
         Ok(RootFailResponse)
     }
 }
 
 #[test(tokio::test)]
-async fn test_root_emit_fail_stops_actor() {
+async fn test_child_emit_fail_stops_actor() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let actor_ref = system
-        .create_root_actor("root_fail", RootFailActor)
+    let _parent_ref = system
+        .create_root_actor("root_fail", StopOnFaultParent)
+        .await
+        .unwrap();
+
+    let actor_ref: ActorRef<RootFailActor> = system
+        .get_actor(&ActorPath::from(
+            "/user/root_fail/fail_child",
+        ))
         .await
         .unwrap();
 
@@ -727,6 +891,8 @@ impl Actor for WatchingParent {
     type Response = WatchResponse;
     type Event = WatchEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -815,6 +981,8 @@ impl Actor for AlwaysFailActor {
     type Response = ();
     type Event = SimpleEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -891,6 +1059,8 @@ impl Actor for NotifyParentTarget {
     type Response = NotifyTargetResponse;
     type Event = NotifyTargetEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -943,6 +1113,8 @@ impl Actor for RetryNotifyParent {
     type Response = RetryNotifyResponse;
     type Event = RetryNotifyEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -1050,6 +1222,8 @@ impl Actor for DrainTestActor {
     type Response = DrainTestResponse;
     type Event = DrainTestEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -1118,8 +1292,81 @@ async fn test_non_critical_discarded_on_stop() {
 }
 
 // ============================================================================
-// SystemRunner::run handles ActorError and closed channel
+// SystemRunner::run handles child error propagation and closed channel
 // ============================================================================
+
+#[derive(Clone)]
+struct RunnerErrorParent {
+    errors_seen: Arc<AtomicUsize>,
+}
+
+impl ave_actors_actor::NotPersistentActor for RunnerErrorParent {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum RunnerErrorMsg {
+    GetCount,
+}
+
+impl Message for RunnerErrorMsg {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RunnerErrorResponse(pub usize);
+
+impl Response for RunnerErrorResponse {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RunnerErrorEvent;
+
+impl Event for RunnerErrorEvent {}
+
+#[async_trait]
+impl Actor for RunnerErrorParent {
+    type Message = RunnerErrorMsg;
+    type Response = RunnerErrorResponse;
+    type Event = RunnerErrorEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("RunnerErrorParent", id = %id)
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        ctx.create_child("publisher", ErrorPublisherActor).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for RunnerErrorParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: RunnerErrorMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<RunnerErrorResponse, Error> {
+        match msg {
+            RunnerErrorMsg::GetCount => Ok(RunnerErrorResponse(
+                self.errors_seen.load(Ordering::SeqCst),
+            )),
+        }
+    }
+
+    async fn on_child_error(
+        &mut self,
+        _error: Error,
+        _ctx: &mut ActorContext<Self>,
+    ) {
+        self.errors_seen.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 #[derive(Debug, Clone)]
 struct ErrorPublisherActor;
@@ -1147,6 +1394,8 @@ impl Actor for ErrorPublisherActor {
     type Response = ErrorPublisherResponse;
     type Event = ErrorPublisherEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -1164,31 +1413,50 @@ impl Handler<Self> for ErrorPublisherActor {
         _msg: ErrorPublisherMsg,
         ctx: &mut ActorContext<Self>,
     ) -> Result<ErrorPublisherResponse, Error> {
-        ctx.emit_error(Error::Functional {
-            description: "published".to_owned(),
-        })
-        .await?;
+        ctx.get_parent::<RunnerErrorParent>()
+            .await?
+            .emit_error(Error::Functional {
+                description: "published".to_owned(),
+            })
+            .await?;
         Ok(ErrorPublisherResponse)
     }
 }
 
 #[test(tokio::test)]
-async fn test_system_runner_handles_actor_error_events() {
+async fn test_system_runner_handles_child_error_events() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
 
     // Drive the runner in a task but also intercept its result.
     let runner_handle = tokio::spawn(async move { runner.run().await });
 
-    let actor_ref = system
-        .create_root_actor("error_publisher", ErrorPublisherActor)
+    let parent = RunnerErrorParent {
+        errors_seen: Arc::new(AtomicUsize::new(0)),
+    };
+    let parent_ref = system
+        .create_root_actor("error_publisher", parent)
+        .await
+        .unwrap();
+
+    let actor_ref: ActorRef<ErrorPublisherActor> = system
+        .get_actor(&ActorPath::from(
+            "/user/error_publisher/publisher",
+        ))
         .await
         .unwrap();
 
     actor_ref.tell(ErrorPublisherMsg).await.unwrap();
 
-    // Give the runner time to process the ActorError event internally
+    // Give the runner time to process the child error internally
     tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let count = parent_ref
+        .ask(RunnerErrorMsg::GetCount)
+        .await
+        .unwrap()
+        .0;
+    assert!(count >= 1, "parent should have observed the child error");
 
     system.stop_system();
 
@@ -1240,6 +1508,8 @@ impl Actor for DefaultBehaviorActor {
     type Response = DefaultBehaviorResponse;
     type Event = DefaultBehaviorEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -1441,6 +1711,8 @@ impl Actor for SelfStopActor {
     type Response = SelfStopResponse;
     type Event = SelfStopEvent;
     type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -1491,4 +1763,272 @@ async fn test_root_already_stopped_on_system_shutdown() {
         .expect("runner should finish")
         .expect("runner task should not panic");
     assert_eq!(shutdown, ShutdownReason::Graceful);
+}
+
+// ============================================================================
+// Typed child error/fault propagation
+//
+// Demonstrates that a child and its parent do not need to share the same
+// ChildError/ChildFault associated types. The child declares its own types
+// (which would be used by its own children), but when escalating to the parent
+// it uses the types declared by the parent.
+// ============================================================================
+
+#[derive(Debug, Clone)]
+struct ParentErrorType(pub String);
+
+#[derive(Debug, Clone)]
+struct ParentFaultType(pub String);
+
+impl From<Error> for ParentFaultType {
+    fn from(err: Error) -> Self {
+        ParentFaultType(err.to_string())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ChildErrorType;
+
+#[derive(Debug, Clone)]
+struct ChildFaultType;
+
+impl From<Error> for ChildFaultType {
+    fn from(_err: Error) -> Self {
+        ChildFaultType
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum TypedChildMsg {
+    EmitError,
+    EmitFault,
+}
+
+impl Message for TypedChildMsg {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TypedChildResponse;
+
+impl Response for TypedChildResponse {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TypedChildEvent;
+
+impl Event for TypedChildEvent {}
+
+#[derive(Clone)]
+struct TypedChild;
+
+impl ave_actors_actor::NotPersistentActor for TypedChild {}
+
+#[async_trait]
+impl Actor for TypedChild {
+    type Message = TypedChildMsg;
+    type Response = TypedChildResponse;
+    type Event = TypedChildEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = ChildErrorType;
+    type ChildFault = ChildFaultType;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("TypedChild", id = %id)
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for TypedChild {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: TypedChildMsg,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<TypedChildResponse, Error> {
+        match msg {
+            // The child escalates to the parent using the parent's types, not
+            // its own ChildError/ChildFault types.
+            TypedChildMsg::EmitError => {
+                ctx.get_parent::<TypedParent>()
+                    .await?
+                    .emit_error(ParentErrorType("parent typed error".to_owned()))
+                    .await?;
+            }
+            TypedChildMsg::EmitFault => {
+                ctx.get_parent::<TypedParent>()
+                    .await?
+                    .emit_fail(ParentFaultType("parent typed fault".to_owned()))
+                    .await?;
+            }
+        }
+        Ok(TypedChildResponse)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum TypedParentMsg {
+    GetErrors,
+    GetFaults,
+}
+
+impl Message for TypedParentMsg {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TypedParentResponse {
+    errors: Vec<String>,
+    faults: Vec<String>,
+}
+
+impl Response for TypedParentResponse {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TypedParentEvent;
+
+impl Event for TypedParentEvent {}
+
+#[derive(Clone)]
+struct TypedParent {
+    errors: Arc<Mutex<Vec<ParentErrorType>>>,
+    faults: Arc<Mutex<Vec<ParentFaultType>>>,
+}
+
+impl ave_actors_actor::NotPersistentActor for TypedParent {}
+
+#[async_trait]
+impl Actor for TypedParent {
+    type Message = TypedParentMsg;
+    type Response = TypedParentResponse;
+    type Event = TypedParentEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = ParentErrorType;
+    type ChildFault = ParentFaultType;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("TypedParent", id = %id)
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        ctx.create_child("typed_child", TypedChild).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for TypedParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: TypedParentMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<TypedParentResponse, Error> {
+        match msg {
+            TypedParentMsg::GetErrors => {
+                let errors = self
+                    .errors
+                    .lock()
+                    .await
+                    .iter()
+                    .map(|e| e.0.clone())
+                    .collect();
+                Ok(TypedParentResponse {
+                    errors,
+                    faults: vec![],
+                })
+            }
+            TypedParentMsg::GetFaults => {
+                let faults = self
+                    .faults
+                    .lock()
+                    .await
+                    .iter()
+                    .map(|f| f.0.clone())
+                    .collect();
+                Ok(TypedParentResponse {
+                    errors: vec![],
+                    faults,
+                })
+            }
+        }
+    }
+
+    async fn on_child_error(
+        &mut self,
+        error: ParentErrorType,
+        _ctx: &mut ActorContext<Self>,
+    ) {
+        self.errors.lock().await.push(error);
+    }
+
+    async fn on_child_fault(
+        &mut self,
+        fault: ParentFaultType,
+        _ctx: &mut ActorContext<Self>,
+    ) -> ChildAction {
+        self.faults.lock().await.push(fault);
+        ChildAction::Stop
+    }
+}
+
+#[test(tokio::test)]
+async fn test_child_and_parent_use_different_error_types() {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let runner_handle = tokio::spawn(async move { runner.run().await });
+
+    let parent = TypedParent {
+        errors: Arc::new(Mutex::new(vec![])),
+        faults: Arc::new(Mutex::new(vec![])),
+    };
+    let parent_ref = system
+        .create_root_actor("typed_parent", parent)
+        .await
+        .unwrap();
+
+    let child_ref: ActorRef<TypedChild> = system
+        .get_actor(&ActorPath::from("/user/typed_parent/typed_child"))
+        .await
+        .unwrap();
+
+    child_ref.tell(TypedChildMsg::EmitError).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let resp = parent_ref.ask(TypedParentMsg::GetErrors).await.unwrap();
+        if !resp.errors.is_empty() {
+            assert_eq!(resp.errors, vec!["parent typed error"]);
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("parent did not receive typed error");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    child_ref.tell(TypedChildMsg::EmitFault).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let resp = parent_ref.ask(TypedParentMsg::GetFaults).await.unwrap();
+        if !resp.faults.is_empty() {
+            assert_eq!(resp.faults, vec!["parent typed fault"]);
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("parent did not receive typed fault");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    system.stop_system();
+    let _ = tokio::time::timeout(Duration::from_secs(2), runner_handle)
+        .await
+        .expect("runner should finish")
+        .expect("runner task should not panic");
 }

@@ -14,15 +14,23 @@ use crate::{
 };
 
 use dashmap::DashMap;
-use std::{sync::Arc, time::Duration};
+use std::{any::Any, sync::Arc, time::Duration};
 use tokio::{
     select,
     sync::{mpsc, oneshot},
 };
 use tracing::{debug, error, warn};
 
-pub type StopReceiver = mpsc::Receiver<Option<oneshot::Sender<()>>>;
-pub type StopSender = mpsc::Sender<Option<oneshot::Sender<()>>>;
+/// Signal received through the actor's stop channel.
+pub enum StopSignal {
+    /// Normal stop request with optional acknowledgement sender.
+    Stop(Option<oneshot::Sender<()>>),
+    /// Stop caused by a fatal fault reported to the parent.
+    Fault(Box<dyn Any + Send + Sync>, Option<oneshot::Sender<()>>),
+}
+
+pub type StopReceiver = mpsc::Receiver<StopSignal>;
+pub type StopSender = mpsc::Sender<StopSignal>;
 
 /// Stop channel plus optional acknowledgement timeout for this actor.
 #[derive(Clone)]
@@ -60,11 +68,14 @@ pub struct ActorRunner<A: Actor> {
     // Root actors are stopped by operators/system shutdown; children by their parent.
     stop_receiver: StopReceiver,
     // Shared with children so they can report errors/faults back to this actor.
-    error_sender: ChildErrorSender,
-    // Used to escalate faults to the parent when this actor is a child.
-    parent_sender: Option<ChildErrorSender>,
+    error_sender: ChildErrorSender<A::ChildError, A::ChildFault>,
+    // Parent information passed by this actor's parent; used by `get_parent` and
+    // to report faults.
+    parent_info: Option<crate::parent_ref::ParentInfo>,
+    // Fault received through StopSignal::Fault; reported to the parent in Failed.
+    pending_fault: Option<Box<dyn Any + Send + Sync>>,
     // Receives error/fault notifications from child actors.
-    error_receiver: ChildErrorReceiver,
+    error_receiver: ChildErrorReceiver<A::ChildError, A::ChildFault>,
 
     stop_signal: bool,
     sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
@@ -78,11 +89,12 @@ where
     pub(crate) fn create(
         path: ActorPath,
         actor: A,
-        parent_sender: Option<ChildErrorSender>,
+        parent_info: Option<crate::parent_ref::ParentInfo>,
     ) -> (Self, ActorRef<A>, StopSender) {
         let (sender, receiver) = mailbox();
         let (stop_sender, stop_receiver) = mpsc::channel(4);
-        let (error_sender, error_receiver) = mpsc::channel(256);
+        let (error_sender, error_receiver) =
+            crate::parent_ref::child_error_channel();
         let helper = HandleHelper::new(sender);
         let sinks = Arc::new(DashMap::<String, Sink<A::SinkEvent>>::new());
 
@@ -100,7 +112,8 @@ where
             receiver,
             stop_receiver,
             error_sender,
-            parent_sender,
+            parent_info,
+            pending_fault: None,
             error_receiver,
             stop_signal: false,
             sinks,
@@ -122,7 +135,7 @@ where
             self.path.clone(),
             system.clone(),
             self.error_sender.clone(),
-            self.parent_sender.clone(),
+            self.parent_info.clone(),
             self.sinks.clone(),
             span,
         );
@@ -143,7 +156,7 @@ where
                         Err(err) => {
                             error!(error = %err, "Actor failed to start");
                             ctx.set_startup_error(err);
-                            if self.parent_sender.is_some() {
+                            if self.parent_info.is_some() {
                                 // Child actor: notify synchronously via the
                                 // init oneshot only; the parent already sees
                                 // the failure through create_child Err.
@@ -162,7 +175,7 @@ where
                         error!(error = ?err, "Failed to send start signal");
                     }
                     pending_stop_ack = self.run(&mut ctx).await;
-                    if ctx.fail().is_some() {
+                    if self.pending_fault.is_some() {
                         self.lifecycle = ActorLifecycle::Failed;
                     }
                 }
@@ -186,50 +199,52 @@ where
                 // State: FAILED
                 ActorLifecycle::Failed => {
                     warn!("Actor failed");
-                    if self.parent_sender.is_none() {
+                    if self.parent_info.is_none() {
                         self.lifecycle = ActorLifecycle::Restarted;
                     } else {
-                        let error = ctx.fail().unwrap_or_else(|| Error::FunctionalCritical {
-                            description: format!(
-                                "Actor '{}' entered Failed without fault context",
-                                self.path
-                            ),
-                        });
+                        let fault = self.pending_fault.take().unwrap_or_else(
+                            || {
+                                Box::new(Error::FunctionalCritical {
+                                    description: format!(
+                                        "Actor '{}' entered Failed without fault context",
+                                        self.path
+                                    ),
+                                }) as Box<dyn Any + Send + Sync>
+                            },
+                        );
 
-                        let (action_sender, action_receiver) =
-                            oneshot::channel();
-                        if let Some(parent_sender) = self.parent_sender.as_mut()
-                        {
-                            if let Err(err) = parent_sender
-                                .send(ChildError::Fault {
-                                    error,
-                                    sender: action_sender,
-                                })
-                                .await
-                            {
-                                error!(error = %err, "Failed to send fail to parent");
-                                self.lifecycle = ActorLifecycle::Terminated;
-                            } else {
-                                match action_receiver.await {
-                                    Ok(ChildAction::Stop) => {
-                                        self.lifecycle =
-                                            ActorLifecycle::Terminated;
+                        if let Some(parent_info) = self.parent_info.as_ref() {
+                            match parent_info.notifier.notify_fault(fault).await {
+                                Ok(ChildAction::Stop) => {
+                                    if let Some(ack) =
+                                        pending_stop_ack.take()
+                                    {
+                                        let _ = ack.send(());
                                     }
-                                    Ok(
-                                        ChildAction::Restart
-                                        | ChildAction::Delegate,
-                                    ) => {
-                                        debug!(
-                                            "Parent requested actor restart"
-                                        );
-                                        self.lifecycle =
-                                            ActorLifecycle::Restarted;
+                                    ctx.remove_actor().await;
+                                    self.receiver.close();
+                                    self.lifecycle =
+                                        ActorLifecycle::Terminated;
+                                }
+                                Ok(
+                                    ChildAction::Restart
+                                    | ChildAction::Delegate,
+                                ) => {
+                                    debug!("Parent requested actor restart");
+                                    self.lifecycle =
+                                        ActorLifecycle::Restarted;
+                                }
+                                Err(err) => {
+                                    error!(error = %err, "Failed to send fail to parent");
+                                    if let Some(ack) =
+                                        pending_stop_ack.take()
+                                    {
+                                        let _ = ack.send(());
                                     }
-                                    Err(err) => {
-                                        error!(error = %err, "Failed to receive parent action");
-                                        self.lifecycle =
-                                            ActorLifecycle::Terminated;
-                                    }
+                                    ctx.remove_actor().await;
+                                    self.receiver.close();
+                                    self.lifecycle =
+                                        ActorLifecycle::Terminated;
                                 }
                             }
                         }
@@ -270,7 +285,19 @@ where
                 biased;
 
                 stop = self.stop_receiver.recv() => {
-                    let restarting = self.should_restart_after_stop(ctx);
+                    let (ack, is_fault) = match stop {
+                        Some(StopSignal::Stop(ack)) => (ack, false),
+                        Some(StopSignal::Fault(fault, ack)) => {
+                            warn!("Actor received fatal fault, stopping");
+                            self.pending_fault = Some(fault);
+                            (ack, true)
+                        }
+                        None => {
+                            ctx.stop(None).await;
+                            self.stop_signal = true;
+                            continue;
+                        }
+                    };
 
                     // 1. Pre-stop hook.
                     if let Err(e) = self.actor.pre_stop(ctx).await {
@@ -278,29 +305,38 @@ where
                     }
 
                     // 2. Drain mailbox: process critical, discard non-critical.
-                    self.drain_mailbox(ctx, !restarting).await;
+                    // For a fault we do not close the mailbox yet; the parent may
+                    // decide to restart the actor, in which case message delivery
+                    // must resume on the same channel.
+                    self.drain_mailbox(ctx, !is_fault).await;
 
                     // 3. Stop children.
                     ctx.stop_children().await;
 
                     // 4. Drain sinks: give them a grace period to finish
                     // pending events.
-                    if !restarting {
+                    if !is_fault {
                         self.drain_sinks().await;
                     }
 
-                    // Keep the actor registered while it restarts so lookups by path
-                    // and pre-existing ActorRef handles remain valid.
-                    if !restarting {
+                    // Keep the actor registered while it restarts so lookups by
+                    // path and pre-existing ActorRef handles remain valid.
+                    if !is_fault {
                         ctx.remove_actor().await;
                     }
 
-                    if let Some(Some(stop_sender)) = stop {
+                    if let Some(stop_sender) = ack {
                         stop_ack = Some(stop_sender);
                     }
 
                     if self.lifecycle == ActorLifecycle::Started {
-                        self.lifecycle = ActorLifecycle::Stopped;
+                        self.lifecycle = if is_fault {
+                            // Remain Started: init will transition to Failed and
+                            // ask the parent for the ChildAction.
+                            ActorLifecycle::Started
+                        } else {
+                            ActorLifecycle::Stopped
+                        };
                     }
                     break;
                 }
@@ -309,11 +345,11 @@ where
                     if let Some(error) = error {
                         match error {
                             ChildError::Error { error } => {
-                                debug!(error = %error, "Child error received");
+                                debug!(error = ?error, "Child error received");
                                 self.actor.on_child_error(error, ctx).await
                             },
                             ChildError::Fault { error, sender } => {
-                                warn!(error = %error, "Child fault received");
+                                warn!(error = ?error, "Child fault received");
                                 let action = self.actor.on_child_fault(error, ctx).await;
                                 if sender.send(action).is_err() {
                                     error!("Failed to send action to child");
@@ -340,21 +376,6 @@ where
             }
         }
         stop_ack
-    }
-
-    /// Returns true when the current stop path is part of a restart rather than
-    /// a terminal shutdown.
-    fn should_restart_after_stop(&self, ctx: &ActorContext<A>) -> bool {
-        if self.lifecycle == ActorLifecycle::Restarted {
-            return true;
-        }
-
-        self.parent_sender.is_none()
-            && ctx.fail().is_some()
-            && matches!(
-                self.supervision_strategy,
-                SupervisionStrategy::Retry(_)
-            )
     }
 
     /// Drains pending mailbox messages on stop.
@@ -483,7 +504,7 @@ where
                     *retries += 1;
                     match ctx.restart(&mut self.actor).await {
                         Ok(_) => {
-                            ctx.clean_fail();
+                            self.pending_fault = None;
                             ctx.clean_startup_error();
                             self.lifecycle = ActorLifecycle::Started;
                             *retries = 0;
@@ -561,6 +582,8 @@ mod tests {
         type Response = ();
         type Event = TestEvent;
         type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -708,6 +731,8 @@ mod tests {
         type Event = DrainEvent;
         type SinkEvent = Self::Event;
         type Response = ();
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(id: &str, _parent: Option<tracing::Span>) -> tracing::Span {
             info_span!("DrainActor", id = %id)
@@ -770,6 +795,8 @@ mod tests {
         type Event = SlowEvent;
         type SinkEvent = Self::Event;
         type Response = ();
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(id: &str, _parent: Option<tracing::Span>) -> tracing::Span {
             info_span!("SlowActor", id = %id)
@@ -946,6 +973,8 @@ mod tests {
         type Response = ();
         type Event = TestEvent;
         type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -1020,6 +1049,8 @@ mod tests {
         type Response = ();
         type Event = TestEvent;
         type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -1034,13 +1065,11 @@ mod tests {
 
         async fn pre_start(
             &mut self,
-            ctx: &mut ActorContext<Self>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
-            ctx.emit_fail(Error::FunctionalCritical {
+            Err(Error::FunctionalCritical {
                 description: "fail".to_owned(),
             })
-            .await?;
-            Ok(())
         }
     }
 
@@ -1094,6 +1123,8 @@ mod tests {
         type Response = ();
         type Event = TestEvent;
         type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -1156,6 +1187,8 @@ mod tests {
         type Response = ();
         type Event = TestEvent;
         type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -1242,6 +1275,8 @@ mod tests {
         type Response = ();
         type Event = TestEvent;
         type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,

@@ -251,6 +251,8 @@ where
     type Response = ();
     type Event = ();
     type SinkEvent = ();
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -349,6 +351,8 @@ mod tests {
         type Response = ();
         type Event = ();
         type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -427,6 +431,8 @@ mod tests {
         type Response = ();
         type Event = ();
         type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -492,6 +498,8 @@ mod tests {
         type Response = ();
         type Event = ();
         type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -530,6 +538,8 @@ mod tests {
         type Response = ();
         type Event = ();
         type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -572,6 +582,8 @@ mod tests {
         type Response = ();
         type Event = ();
         type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -642,6 +654,8 @@ mod tests {
         type Response = ();
         type Event = ();
         type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,

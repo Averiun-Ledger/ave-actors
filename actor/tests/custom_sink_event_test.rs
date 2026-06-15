@@ -26,6 +26,8 @@ impl Actor for CustomSinkActor {
     type Event = InternalEvent;
     type SinkEvent = ExternalNotification;
     type Response = ();
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(id: &str, _parent: Option<tracing::Span>) -> tracing::Span {
         info_span!("CustomSinkActor", id = %id)
