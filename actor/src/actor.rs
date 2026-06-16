@@ -12,6 +12,7 @@ use crate::{
 };
 
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::{AbortHandle, JoinHandle};
 
 use async_trait::async_trait;
 
@@ -19,7 +20,12 @@ use serde::{Serialize, de::DeserializeOwned};
 use tracing::Span;
 
 use dashmap::DashMap;
-use std::{collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 /// Execution context passed to actors during message handling and lifecycle hooks.
 ///
@@ -44,6 +50,9 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     child_senders: HashMap<ActorPath, StopHandle>,
     /// Named sinks registered for this actor.
     sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
+    /// Handles of tasks spawned via `ActorContext::spawn`. They are aborted
+    /// when the actor stops so spawned work does not outlive the actor.
+    spawned_tasks: Arc<Mutex<Vec<AbortHandle>>>,
 
     span: tracing::Span,
 }
@@ -58,6 +67,7 @@ pub struct ActorContextParams<A: Actor + Handler<A>> {
     pub parent_info: Option<crate::parent_ref::ParentInfo>,
     pub timer_scheduler: TimerScheduler<A>,
     pub sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
+    pub spawned_tasks: Arc<Mutex<Vec<AbortHandle>>>,
     pub span: Span,
 }
 
@@ -77,6 +87,7 @@ where
             timer_scheduler: params.timer_scheduler,
             child_senders: HashMap::new(),
             sinks: params.sinks,
+            spawned_tasks: params.spawned_tasks,
         }
     }
 
@@ -114,6 +125,41 @@ where
     /// Cancels a previously scheduled timer.
     pub fn cancel_timer(&self, key: TimerKey) {
         self.timer_scheduler.cancel(key);
+    }
+
+    /// Spawns an asynchronous task whose lifetime is bound to this actor.
+    ///
+    /// The task runs on the Tokio runtime, but it is automatically aborted when
+    /// the actor stops or restarts. This is useful for work that must not
+    /// outlive the actor, such as sending a delayed message to another actor
+    /// or calling an external API.
+    ///
+    /// The returned `JoinHandle` can be awaited or ignored; the actor will
+    /// abort the task on shutdown regardless.
+    pub fn spawn<F>(&self, future: F) -> JoinHandle<()>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let handle = tokio::spawn(future);
+        let abort_handle = handle.abort_handle();
+        let mut tasks = self
+            .spawned_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tasks.push(abort_handle);
+        tasks.retain(|t| !t.is_finished());
+        handle
+    }
+
+    /// Aborts every task spawned through `ActorContext::spawn`.
+    pub(crate) fn abort_spawned_tasks(&self) {
+        let mut tasks = self
+            .spawned_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for handle in tasks.drain(..) {
+            handle.abort();
+        }
     }
 
     /// Returns the hierarchical path that uniquely identifies this actor in the system.

@@ -14,7 +14,11 @@ use crate::{
 };
 
 use dashmap::DashMap;
-use std::{any::Any, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::{
     select,
     sync::{mpsc, oneshot},
@@ -134,6 +138,7 @@ where
             self.path.clone(),
             A::max_timers(),
         );
+        let spawned_tasks = Arc::new(Mutex::new(Vec::new()));
 
         // Create the actor context.
         let mut ctx: ActorContext<A> =
@@ -145,6 +150,7 @@ where
                 parent_info: self.parent_info.clone(),
                 timer_scheduler,
                 sinks: self.sinks.clone(),
+                spawned_tasks: spawned_tasks.clone(),
                 span,
             });
 
@@ -258,6 +264,7 @@ where
                 ActorLifecycle::Terminated => {
                     debug!("Actor terminated");
                     ctx.timer_scheduler.shutdown();
+                    ctx.abort_spawned_tasks();
                     let init_err = ctx.startup_error().unwrap_or_else(|| {
                         Error::FunctionalCritical {
                             description: format!(
@@ -308,7 +315,11 @@ where
                     // actor is shutting down or after it restarts.
                     ctx.timer_scheduler.cancel_all();
 
-                    // 2. Pre-stop hook.
+                    // 2. Abort tasks spawned via ActorContext::spawn so they
+                    // do not outlive the actor.
+                    ctx.abort_spawned_tasks();
+
+                    // 3. Pre-stop hook.
                     if let Err(e) = self.actor.pre_stop(ctx).await {
                         error!(error = %e, "pre_stop failed");
                     }
