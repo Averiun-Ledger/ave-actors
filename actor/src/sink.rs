@@ -124,8 +124,7 @@ impl<E: Event> Sink<E> {
     pub fn new(name: impl Into<String>, max_concurrent: Option<usize>) -> Self {
         let name = name.into();
         let max_concurrent = max_concurrent.unwrap_or(10);
-        let (sender, mut receiver) =
-            tokio::sync::mpsc::channel::<Arc<E>>(1024);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<Arc<E>>(1024);
 
         let inner = Arc::new_cyclic(|weak: &std::sync::Weak<SinkInner<E>>| {
             let worker_name = name.clone();
@@ -317,17 +316,13 @@ impl<E: Event> Sink<E> {
         {
             match sender.try_send(event) {
                 Ok(()) => {}
-                Err(
-                    tokio::sync::mpsc::error::TrySendError::Full(_),
-                ) => {
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     warn!(
                         sink = %self.inner.name,
                         "Sink buffer full, event dropped"
                     );
                 }
-                Err(
-                    tokio::sync::mpsc::error::TrySendError::Closed(_),
-                ) => {
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     warn!(
                         sink = %self.inner.name,
                         "Sink is closed, event dropped"

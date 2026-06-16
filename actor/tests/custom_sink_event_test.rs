@@ -96,8 +96,11 @@ async fn test_custom_sink_event() {
     // Give some time for the sink to process
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let received = notifications.lock().await;
-    assert_eq!(received.len(), 2);
-    assert_eq!(received[0], "Counter is now 1");
-    assert_eq!(received[1], "Counter is now 2");
+    {
+        let received = notifications.lock().await;
+        assert_eq!(received.len(), 2);
+        assert_eq!(received[0], "Counter is now 1");
+        assert_eq!(received[1], "Counter is now 2");
+        drop(received);
+    }
 }

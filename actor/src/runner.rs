@@ -129,16 +129,24 @@ where
         mut sender: Option<oneshot::Sender<Result<(), Error>>>,
         span: tracing::Span,
     ) {
-        // Create the actor context.
-        let mut ctx: ActorContext<A> = ActorContext::new(
-            stop_sender,
-            self.path.clone(),
+        let timer_scheduler = crate::timer::TimerScheduler::<A>::new(
             system.clone(),
-            self.error_sender.clone(),
-            self.parent_info.clone(),
-            self.sinks.clone(),
-            span,
+            self.path.clone(),
+            A::max_timers(),
         );
+
+        // Create the actor context.
+        let mut ctx: ActorContext<A> =
+            ActorContext::new(crate::actor::ActorContextParams {
+                stop: stop_sender,
+                path: self.path.clone(),
+                system,
+                error_sender: self.error_sender.clone(),
+                parent_info: self.parent_info.clone(),
+                timer_scheduler,
+                sinks: self.sinks.clone(),
+                span,
+            });
 
         // Main loop of the actor.
         let mut retries = 0;
@@ -147,6 +155,7 @@ where
             match self.lifecycle {
                 // State: CREATED
                 ActorLifecycle::Created => {
+                    ctx.timer_scheduler.set_accepting(true);
                     // Pre-start hook.
                     match self.actor.pre_start(&mut ctx).await {
                         Ok(_) => {
@@ -181,6 +190,7 @@ where
                 }
                 // State: RESTARTED
                 ActorLifecycle::Restarted => {
+                    ctx.timer_scheduler.set_accepting(true);
                     // Apply supervision strategy.
                     self.apply_supervision_strategy(&mut ctx, &mut retries)
                         .await;
@@ -214,37 +224,31 @@ where
                         );
 
                         if let Some(parent_info) = self.parent_info.as_ref() {
-                            match parent_info.notifier.notify_fault(fault).await {
+                            match parent_info.notifier.notify_fault(fault).await
+                            {
                                 Ok(ChildAction::Stop) => {
-                                    if let Some(ack) =
-                                        pending_stop_ack.take()
-                                    {
+                                    if let Some(ack) = pending_stop_ack.take() {
                                         let _ = ack.send(());
                                     }
                                     ctx.remove_actor().await;
                                     self.receiver.close();
-                                    self.lifecycle =
-                                        ActorLifecycle::Terminated;
+                                    self.lifecycle = ActorLifecycle::Terminated;
                                 }
                                 Ok(
                                     ChildAction::Restart
                                     | ChildAction::Delegate,
                                 ) => {
                                     debug!("Parent requested actor restart");
-                                    self.lifecycle =
-                                        ActorLifecycle::Restarted;
+                                    self.lifecycle = ActorLifecycle::Restarted;
                                 }
                                 Err(err) => {
                                     error!(error = %err, "Failed to send fail to parent");
-                                    if let Some(ack) =
-                                        pending_stop_ack.take()
-                                    {
+                                    if let Some(ack) = pending_stop_ack.take() {
                                         let _ = ack.send(());
                                     }
                                     ctx.remove_actor().await;
                                     self.receiver.close();
-                                    self.lifecycle =
-                                        ActorLifecycle::Terminated;
+                                    self.lifecycle = ActorLifecycle::Terminated;
                                 }
                             }
                         }
@@ -253,6 +257,7 @@ where
                 // State: TERMINATED
                 ActorLifecycle::Terminated => {
                     debug!("Actor terminated");
+                    ctx.timer_scheduler.shutdown();
                     let init_err = ctx.startup_error().unwrap_or_else(|| {
                         Error::FunctionalCritical {
                             description: format!(
@@ -299,21 +304,25 @@ where
                         }
                     };
 
-                    // 1. Pre-stop hook.
+                    // 1. Cancel pending timers so they cannot fire while the
+                    // actor is shutting down or after it restarts.
+                    ctx.timer_scheduler.cancel_all();
+
+                    // 2. Pre-stop hook.
                     if let Err(e) = self.actor.pre_stop(ctx).await {
                         error!(error = %e, "pre_stop failed");
                     }
 
-                    // 2. Drain mailbox: process critical, discard non-critical.
+                    // 3. Drain mailbox: process critical, discard non-critical.
                     // For a fault we do not close the mailbox yet; the parent may
                     // decide to restart the actor, in which case message delivery
                     // must resume on the same channel.
                     self.drain_mailbox(ctx, !is_fault).await;
 
-                    // 3. Stop children.
+                    // 4. Stop children.
                     ctx.stop_children().await;
 
-                    // 4. Drain sinks: give them a grace period to finish
+                    // 5. Drain sinks: give them a grace period to finish
                     // pending events.
                     if !is_fault {
                         self.drain_sinks().await;
@@ -451,8 +460,7 @@ where
 
         let mut set = tokio::task::JoinSet::new();
         for sink in sinks {
-            let deadline =
-                std::time::Instant::now() + A::event_drain_timeout();
+            let deadline = std::time::Instant::now() + A::event_drain_timeout();
             set.spawn(async move {
                 if !sink.shutdown(deadline).await {
                     warn!(
@@ -916,8 +924,11 @@ mod tests {
             "critical message should be processed: {critical_result:?}"
         );
 
-        let done = processed.lock().await;
-        assert_eq!(*done, vec!["critical"]);
+        {
+            let done = processed.lock().await;
+            assert_eq!(*done, vec!["critical"]);
+            drop(done);
+        }
     }
 
     /// When mailbox_drain_timeout expires while processing a slow critical
@@ -1295,15 +1306,16 @@ mod tests {
             &mut self,
             _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
-            let mut guard = self.failed.lock().await;
-            if *guard {
+            {
+                let mut guard = self.failed.lock().await;
+                if !*guard {
+                    return Ok(());
+                }
                 *guard = false;
-                Err(Error::FunctionalCritical {
-                    description: "fail once".into(),
-                })
-            } else {
-                Ok(())
             }
+            Err(Error::FunctionalCritical {
+                description: "fail once".into(),
+            })
         }
     }
 

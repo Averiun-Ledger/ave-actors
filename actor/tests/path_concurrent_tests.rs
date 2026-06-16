@@ -199,8 +199,7 @@ impl Handler<Self> for ConcurrentActor {
                 Ok(ConcurrentResponse::Counter(value))
             }
             ConcurrentMessage::AddMessage(msg) => {
-                let mut messages = self.messages_received.lock().await;
-                messages.push(msg);
+                self.messages_received.lock().await.push(msg);
                 Ok(ConcurrentResponse::Success)
             }
             ConcurrentMessage::GetCounter => {
@@ -217,9 +216,7 @@ impl Handler<Self> for ConcurrentActor {
                 Ok(ConcurrentResponse::Success)
             }
             ConcurrentMessage::SendToChild(child_name, message) => {
-                if let Ok(child) =
-                    ctx.get_child::<Self>(&child_name).await
-                {
+                if let Ok(child) = ctx.get_child::<Self>(&child_name).await {
                     let _response = child
                         .ask(ConcurrentMessage::AddMessage(message.clone()))
                         .await?;

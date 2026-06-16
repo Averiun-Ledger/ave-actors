@@ -96,19 +96,19 @@ impl RocksDbManager {
         apply_common_tuning(&mut options);
         apply_tuning(&mut options, ram_mb, cores);
 
-        let cfs = match DB::list_cf(&options, path) {
-            Ok(cf_names) => {
+        let cfs = DB::list_cf(&options, path).map_or_else(
+            |_| {
+                debug!("No existing column families, using default");
+                vec!["default".to_string()]
+            },
+            |cf_names| {
                 debug!(
                     count = cf_names.len(),
                     "Found existing column families"
                 );
                 cf_names
-            }
-            Err(_) => {
-                debug!("No existing column families, using default");
-                vec!["default".to_string()]
-            }
-        };
+            },
+        );
 
         // Build descriptors for each existing column family.
         let cf_opts = options.clone();
@@ -165,7 +165,7 @@ fn apply_tuning(options: &mut Options, ram_mb: u64, cores: usize) {
     // ── Parallelism ────────────────────────────────────────────────────────────
     // Cap at half the cores (floor 1, ceiling 4) so compaction threads don't
     // starve libp2p and the actor runtime on the same machine.
-    let parallelism = ((cores / 2) as i32).max(1).min(4);
+    let parallelism = ((cores / 2) as i32).clamp(1, 4);
     options.increase_parallelism(parallelism);
     options.set_max_background_jobs(parallelism);
 
@@ -173,9 +173,8 @@ fn apply_tuning(options: &mut Options, ram_mb: u64, cores: usize) {
     let budget = ram_mb * 1024 * 1024 * 5 / 100; // bytes
 
     // Block cache: 40 % of budget, floor 4 MB, cap 512 MB
-    let cache_bytes = (budget * 40 / 100)
-        .max(4 * 1024 * 1024)
-        .min(512 * 1024 * 1024);
+    let cache_bytes =
+        (budget * 40 / 100).clamp(4 * 1024 * 1024, 512 * 1024 * 1024);
 
     // Write buffer count: scales with RAM
     let wb_count: u64 = match ram_mb {
@@ -187,13 +186,11 @@ fn apply_tuning(options: &mut Options, ram_mb: u64, cores: usize) {
 
     // Write buffer size: 40 % of budget across all buffers, floor 4 MB, cap 256 MB
     let wb_size = (budget * 40 / 100 / wb_count)
-        .max(4 * 1024 * 1024)
-        .min(256 * 1024 * 1024);
+        .clamp(4 * 1024 * 1024, 256 * 1024 * 1024);
 
     // WAL: 20 % of budget, floor 8 MB, cap 512 MB
-    let wal_bytes = (budget * 20 / 100)
-        .max(8 * 1024 * 1024)
-        .min(512 * 1024 * 1024);
+    let wal_bytes =
+        (budget * 20 / 100).clamp(8 * 1024 * 1024, 512 * 1024 * 1024);
 
     let merge: i32 = if wb_count <= 2 { 1 } else { 2 };
 
@@ -288,9 +285,10 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
             })?;
         for name in &cf_names {
             if let Some(handle) = self.db.cf_handle(name)
-                && let Err(e) = self.db.flush_cf(&handle) {
-                    warn!(cf = name, error = %e, "Failed to flush column family on stop");
-                }
+                && let Err(e) = self.db.flush_cf(&handle)
+            {
+                warn!(cf = name, error = %e, "Failed to flush column family on stop");
+            }
         }
 
         debug!("RocksDB stop complete");
@@ -339,12 +337,14 @@ impl State for RocksDbStore {
                         reason: format!("{:?}", e),
                     }
                 })?;
-            match result {
-                Some(value) => Ok(value),
-                _ => Err(Error::EntryNotFound {
-                    key: self.prefix.clone(),
-                }),
-            }
+            result.map_or_else(
+                || {
+                    Err(Error::EntryNotFound {
+                        key: self.prefix.clone(),
+                    })
+                },
+                Ok,
+            )
         } else {
             error!(cf = %self.name, "Column family not found for state get");
             Err(Error::Store {
@@ -471,10 +471,8 @@ impl Collection for RocksDbStore {
                     error!(cf = %self.name, key = %full_key, error = %e, "Failed to get collection entry");
                     Error::Get { key: full_key.clone(), reason: format!("{:?}", e) }
                 })?;
-            match result {
-                Some(value) => Ok(value),
-                _ => Err(Error::EntryNotFound { key: full_key }),
-            }
+            result
+                .map_or_else(|| Err(Error::EntryNotFound { key: full_key }), Ok)
         } else {
             error!(cf = %self.name, "Column family not found for collection get");
             Err(Error::Store {
@@ -834,8 +832,7 @@ mod tests {
                 .expect("Can not create temporal directory.");
             let path = dir.path().to_path_buf();
             TEMP_DIRS.lock().unwrap().push(dir);
-            Self::new(&path, false, None)
-                .expect("Can not create the database.")
+            Self::new(&path, false, None).expect("Can not create the database.")
         }
     }
 

@@ -6,6 +6,7 @@ use ave_actors_store::{
     config::MachineSpec,
     database::{Collection, DbManager, State},
 };
+use std::os::unix::fs::PermissionsExt;
 use tempfile::tempdir;
 
 #[test]
@@ -396,7 +397,7 @@ fn test_rocksdb_new_dir_creation_fails() {
     std::fs::create_dir(&parent).unwrap();
 
     let mut perms = std::fs::metadata(&parent).unwrap().permissions();
-    perms.set_readonly(true);
+    perms.set_mode(0o555);
     std::fs::set_permissions(&parent, perms).unwrap();
 
     let db_path = parent.join("db");
@@ -405,7 +406,7 @@ fn test_rocksdb_new_dir_creation_fails() {
 
     // Restore permissions so tempdir cleanup works.
     let mut perms = std::fs::metadata(&parent).unwrap().permissions();
-    perms.set_readonly(false);
+    perms.set_mode(0o755);
     std::fs::set_permissions(&parent, perms).unwrap();
 }
 

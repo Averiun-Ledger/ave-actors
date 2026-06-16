@@ -12,14 +12,15 @@ mod runner;
 mod sink;
 mod supervision;
 mod system;
+mod timer;
 
 pub use actor::{
     Actor, ActorContext, ActorRef, ChildAction, Event, Handler, Message,
     Response,
 };
-pub use parent_ref::ParentRef;
 pub use error::Error;
 pub use into_actor::{IntoActor, NotPersistentActor};
+pub use parent_ref::ParentRef;
 pub use path::ActorPath;
 
 pub use helpers::encrypted_key::EncryptedKey;
@@ -33,3 +34,4 @@ pub use supervision::{
 pub use system::{
     ActorSystem, ShutdownReason, SystemEvent, SystemRef, SystemRunner,
 };
+pub use timer::TimerKey;

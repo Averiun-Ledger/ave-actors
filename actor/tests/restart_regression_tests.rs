@@ -739,9 +739,7 @@ async fn test_runtime_restart_preserves_registry_lookup() {
 
     let actor_ref: ActorRef<RuntimeRestartActor> = handle
         .system
-        .get_actor(&ActorPath::from(
-            "/user/restart-registry/restart_child",
-        ))
+        .get_actor(&ActorPath::from("/user/restart-registry/restart_child"))
         .await
         .unwrap();
 
@@ -789,9 +787,7 @@ async fn test_runtime_restart_resumes_mailbox_processing() {
 
     let actor_ref: ActorRef<RuntimeRestartActor> = handle
         .system
-        .get_actor(&ActorPath::from(
-            "/user/restart-mailbox/restart_child",
-        ))
+        .get_actor(&ActorPath::from("/user/restart-mailbox/restart_child"))
         .await
         .unwrap();
 
@@ -907,9 +903,7 @@ async fn test_child_emit_error_propagates_to_parent_without_stopping_child() {
 
     let actor_ref: ActorRef<RootErrorActor> = handle
         .system
-        .get_actor(&ActorPath::from(
-            "/user/root-error/error_child",
-        ))
+        .get_actor(&ActorPath::from("/user/root-error/error_child"))
         .await
         .unwrap();
 

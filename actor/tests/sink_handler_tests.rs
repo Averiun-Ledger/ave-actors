@@ -130,8 +130,7 @@ impl Subscriber<SinkTestEvent> for CollectingSubscriber {
                 description: "Subscriber intentionally failed".to_owned(),
             });
         }
-        let mut events = self.events.lock().await;
-        events.push(event);
+        self.events.lock().await.push(event);
         Ok(())
     }
 }

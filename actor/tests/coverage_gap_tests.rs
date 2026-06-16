@@ -183,9 +183,7 @@ async fn test_child_error_observed_by_parent() {
         .unwrap();
 
     let actor_ref: ActorRef<EventEmitterActor> = system
-        .get_actor(&ActorPath::from(
-            "/user/emitter_parent/emitter",
-        ))
+        .get_actor(&ActorPath::from("/user/emitter_parent/emitter"))
         .await
         .unwrap();
 
@@ -193,11 +191,7 @@ async fn test_child_error_observed_by_parent() {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
-        let count = parent_ref
-            .ask(ErrorObservingMsg::Trigger)
-            .await
-            .unwrap()
-            .0;
+        let count = parent_ref.ask(ErrorObservingMsg::Trigger).await.unwrap().0;
         if count >= 1 {
             break;
         }
@@ -841,9 +835,7 @@ async fn test_child_emit_fail_stops_actor() {
         .unwrap();
 
     let actor_ref: ActorRef<RootFailActor> = system
-        .get_actor(&ActorPath::from(
-            "/user/root_fail/fail_child",
-        ))
+        .get_actor(&ActorPath::from("/user/root_fail/fail_child"))
         .await
         .unwrap();
 
@@ -1148,7 +1140,7 @@ impl Handler<Self> for RetryNotifyParent {
         msg: RetryNotifyMsg,
         _ctx: &mut ActorContext<Self>,
     ) -> Result<RetryNotifyResponse, Error> {
-        if let RetryNotifyMsg::Done = msg {
+        if matches!(msg, RetryNotifyMsg::Done) {
             self.completions.fetch_add(1, Ordering::SeqCst);
         }
         Ok(RetryNotifyResponse)
@@ -1353,9 +1345,9 @@ impl Handler<Self> for RunnerErrorParent {
         _ctx: &mut ActorContext<Self>,
     ) -> Result<RunnerErrorResponse, Error> {
         match msg {
-            RunnerErrorMsg::GetCount => Ok(RunnerErrorResponse(
-                self.errors_seen.load(Ordering::SeqCst),
-            )),
+            RunnerErrorMsg::GetCount => {
+                Ok(RunnerErrorResponse(self.errors_seen.load(Ordering::SeqCst)))
+            }
         }
     }
 
@@ -1440,9 +1432,7 @@ async fn test_system_runner_handles_child_error_events() {
         .unwrap();
 
     let actor_ref: ActorRef<ErrorPublisherActor> = system
-        .get_actor(&ActorPath::from(
-            "/user/error_publisher/publisher",
-        ))
+        .get_actor(&ActorPath::from("/user/error_publisher/publisher"))
         .await
         .unwrap();
 
@@ -1451,11 +1441,7 @@ async fn test_system_runner_handles_child_error_events() {
     // Give the runner time to process the child error internally
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let count = parent_ref
-        .ask(RunnerErrorMsg::GetCount)
-        .await
-        .unwrap()
-        .0;
+    let count = parent_ref.ask(RunnerErrorMsg::GetCount).await.unwrap().0;
     assert!(count >= 1, "parent should have observed the child error");
 
     system.stop_system();
@@ -1782,7 +1768,7 @@ struct ParentFaultType(pub String);
 
 impl From<Error> for ParentFaultType {
     fn from(err: Error) -> Self {
-        ParentFaultType(err.to_string())
+        Self(err.to_string())
     }
 }
 
@@ -1794,7 +1780,7 @@ struct ChildFaultType;
 
 impl From<Error> for ChildFaultType {
     fn from(_err: Error) -> Self {
-        ChildFaultType
+        Self
     }
 }
 
@@ -1852,7 +1838,9 @@ impl Handler<Self> for TypedChild {
             TypedChildMsg::EmitError => {
                 ctx.get_parent::<TypedParent>()
                     .await?
-                    .emit_error(ParentErrorType("parent typed error".to_owned()))
+                    .emit_error(ParentErrorType(
+                        "parent typed error".to_owned(),
+                    ))
                     .await?;
             }
             TypedChildMsg::EmitFault => {

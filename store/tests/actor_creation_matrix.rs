@@ -126,8 +126,7 @@ impl PersistentActor for MyPersistentActor {
 // Non-Persistent Actor
 #[derive(Debug, Clone)]
 struct MyNonPersistentActor {
-    #[allow(dead_code)]
-    pub value: String,
+    pub _value: String,
 }
 
 impl NotPersistentActor for MyNonPersistentActor {}
@@ -231,7 +230,7 @@ async fn test_create_root_actor_non_persistent_direct() {
     tokio::spawn(async move { runner.run().await });
 
     let actor = MyNonPersistentActor {
-        value: "test".to_string(),
+        _value: "test".to_string(),
     };
     let result = system.create_root_actor("non_persistent", actor).await;
     assert!(
@@ -256,24 +255,23 @@ async fn test_create_root_actor_persistent_initial() {
     );
 }
 
-/// ❌ COMPILE FAIL: Persistent actor with direct instance
-/// This test is commented out because it SHOULD NOT compile.
-/// Uncommenting it will cause a compilation error, which is the desired behavior.
-///
-/// ```compile_fail
-/// #[test(tokio::test)]
-/// async fn test_create_root_actor_persistent_direct_fails() {
-///     
-///     let (system, _runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-///
-///     // This WILL NOT compile because MyPersistentActor doesn't implement NotPersistentActor
-///     let actor = MyPersistentActor { state_ptr: Arc::new(MyPersistentActorState::default()) };
-///     let _result = system.create_root_actor("persistent", actor).await;
-///
-///     // Error: the trait `NotPersistentActor` is not implemented for `MyPersistentActor`
-/// }
-/// ```
-
+// ❌ COMPILE FAIL: Persistent actor with direct instance
+// This test is commented out because it SHOULD NOT compile.
+// Uncommenting it will cause a compilation error, which is the desired behavior.
+//
+// ```compile_fail
+// #[test(tokio::test)]
+// async fn test_create_root_actor_persistent_direct_fails() {
+//
+//     let (system, _runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+//
+//     // This WILL NOT compile because MyPersistentActor doesn't implement NotPersistentActor
+//     let actor = MyPersistentActor { state_ptr: Arc::new(MyPersistentActorState::default()) };
+//     let _result = system.create_root_actor("persistent", actor).await;
+//
+//     // Error: the trait `NotPersistentActor` is not implemented for `MyPersistentActor`
+// }
+// ```
 // ============================================================================
 // Test Cases - create_child
 // ============================================================================
@@ -292,7 +290,7 @@ async fn test_create_child_non_persistent_direct() {
 
     // Access the actor's context to create a child
     let child = MyNonPersistentActor {
-        value: "child".to_string(),
+        _value: "child".to_string(),
     };
 
     // We can't directly test create_child from outside, but we verify the type compiles
@@ -342,7 +340,7 @@ async fn test_all_valid_combinations() {
 
     // ✅ Pattern 1: Non-persistent + Direct instance
     let non_persistent = MyNonPersistentActor {
-        value: "test1".to_string(),
+        _value: "test1".to_string(),
     };
     assert!(
         system

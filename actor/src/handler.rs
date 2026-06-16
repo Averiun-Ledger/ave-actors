@@ -55,16 +55,14 @@ impl<A: Actor + Handler<A>> Envelope<A> {
         }
     }
 
-    #[allow(clippy::collapsible_if)]
     pub fn respond_stopped(&mut self) {
         let rsvp = match self {
             Self::Ask { rsvp, .. } => rsvp.take(),
             _ => None,
         };
-        if let Some(r) = rsvp {
-            if r.send(Err(Error::ActorStopped)).is_err() {
-                error!("Failed to send ActorStopped response to caller");
-            }
+        let Some(r) = rsvp else { return };
+        if r.send(Err(Error::ActorStopped)).is_err() {
+            error!("Failed to send ActorStopped response to caller");
         }
     }
 

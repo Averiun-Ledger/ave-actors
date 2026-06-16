@@ -142,7 +142,7 @@ impl Handler<Self> for EdgeCaseActor {
 
         match msg {
             EdgeCaseCommand::TriggerError => {
-                ctx.get_parent::<EdgeCaseActor>()
+                ctx.get_parent::<Self>()
                     .await?
                     .emit_error(Error::Functional {
                         description: "Test error".to_owned(),
@@ -151,7 +151,7 @@ impl Handler<Self> for EdgeCaseActor {
                 Ok(EdgeCaseResponse::Success)
             }
             EdgeCaseCommand::TriggerFault => {
-                ctx.get_parent::<EdgeCaseActor>()
+                ctx.get_parent::<Self>()
                     .await?
                     .emit_fail(Error::Functional {
                         description: "Test fault".to_owned(),

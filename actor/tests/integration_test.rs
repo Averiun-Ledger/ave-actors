@@ -309,6 +309,7 @@ async fn test_actor() {
         let events = child_sub.events.lock().await;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, 10);
+        drop(events);
     }
     let response = child_actor.ask(ChildCommand::GetState).await.unwrap();
     assert_eq!(response, ChildResponse::State(10));
@@ -323,6 +324,7 @@ async fn test_actor() {
         let events = child_sub.events.lock().await;
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].0, 8);
+        drop(events);
     }
     let response = child_actor.ask(ChildCommand::GetState).await.unwrap();
     assert_eq!(response, ChildResponse::State(8));
@@ -350,9 +352,12 @@ async fn test_actor_error() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let events = parent_sub.events.lock().await;
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].0, 0);
+    {
+        let events = parent_sub.events.lock().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, 0);
+        drop(events);
+    }
 }
 
 #[test(tokio::test)]
@@ -381,9 +386,12 @@ async fn test_actor_fault() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let events = parent_sub.events.lock().await;
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].0, 100);
+    {
+        let events = parent_sub.events.lock().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, 100);
+        drop(events);
+    }
 
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let child_ref = system

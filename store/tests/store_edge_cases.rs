@@ -300,13 +300,11 @@ impl Handler<Self> for LightActor {
 }
 
 // Failing database manager for testing error scenarios
-#[derive(Clone)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct FailingManager {
     fail_create: bool,
     fail_operations: bool,
 }
-
 
 struct FailingCollection {
     name: String,

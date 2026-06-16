@@ -87,11 +87,9 @@ where
         &self,
         error: Box<dyn Any + Send>,
     ) -> Result<(), Error> {
-        let error = *error.downcast::<E>().map_err(|_| {
-            Error::Functional {
-                description: "Child error type does not match parent expectation"
-                    .to_string(),
-            }
+        let error = *error.downcast::<E>().map_err(|_| Error::Functional {
+            description: "Child error type does not match parent expectation"
+                .to_string(),
         })?;
         self.sender
             .send(ChildError::Error { error })
@@ -105,11 +103,9 @@ where
         &self,
         fault: Box<dyn Any + Send>,
     ) -> Result<ChildAction, Error> {
-        let fault = *fault.downcast::<F>().map_err(|_| {
-            Error::Functional {
-                description: "Child fault type does not match parent expectation"
-                    .to_string(),
-            }
+        let fault = *fault.downcast::<F>().map_err(|_| Error::Functional {
+            description: "Child fault type does not match parent expectation"
+                .to_string(),
         })?;
         let (action_sender, action_receiver) = oneshot::channel();
         self.sender
@@ -125,7 +121,6 @@ where
             reason: e.to_string(),
         })
     }
-
 }
 
 /// Typed handle that allows a child actor to send messages to its parent and
@@ -173,10 +168,7 @@ impl<P: Actor + Handler<P>> ParentRef<P> {
 
     /// Reports a non-fatal error to the parent, which will invoke
     /// `on_child_error`.
-    pub async fn emit_error(
-        &self,
-        error: P::ChildError,
-    ) -> Result<(), Error> {
+    pub async fn emit_error(&self, error: P::ChildError) -> Result<(), Error> {
         tracing::warn!(error = ?error, "Escalating error to parent");
         self.notifier
             .notify_error(Box::new(error) as Box<dyn Any + Send>)
@@ -222,10 +214,8 @@ where
 }
 
 /// Helper to create a typed `ChildErrorSender` / `ChildErrorReceiver` pair.
-pub fn child_error_channel<E, F>() -> (
-    ChildErrorSender<E, F>,
-    ChildErrorReceiver<E, F>,
-)
+pub fn child_error_channel<E, F>()
+-> (ChildErrorSender<E, F>, ChildErrorReceiver<E, F>)
 where
     E: Debug + Send + Sync + 'static,
     F: Debug + Clone + From<Error> + Send + Sync + 'static,

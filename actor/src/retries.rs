@@ -74,7 +74,7 @@ where
     completion_pending: bool,
     completion_notified: bool,
     on_finished: Option<Box<dyn CompletionNotifier<T>>>,
-    pending_retry: Option<tokio::task::JoinHandle<()>>,
+    pending_retry: Option<crate::TimerKey>,
 }
 
 impl<T> RetryActor<T>
@@ -135,8 +135,8 @@ where
 
     async fn finish_retry_cycle(&mut self, ctx: &ActorContext<Self>) {
         self.is_end = true;
-        if let Some(handle) = self.pending_retry.take() {
-            handle.abort();
+        if let Some(key) = self.pending_retry.take() {
+            ctx.cancel_timer(key);
         }
         if !self.completion_notified {
             self.completion_notified = true;
@@ -154,14 +154,11 @@ where
 
     async fn schedule_completion(&mut self, ctx: &ActorContext<Self>) {
         self.completion_pending = true;
-        if let Ok(actor) = ctx.reference().await {
-            self.pending_retry = Some(tokio::spawn(async move {
-                tokio::task::yield_now().await;
-                let _ = actor.tell(RetryMessage::Complete).await;
-            }));
-        } else {
-            ctx.stop(None).await;
-        }
+        let key = ctx.schedule_once(
+            std::time::Duration::from_millis(1),
+            RetryMessage::Complete,
+        );
+        self.pending_retry = Some(key);
     }
 
     async fn handle_retry_attempt(
@@ -201,22 +198,15 @@ where
             return Ok(());
         }
 
-        if let Ok(actor) = ctx.reference().await {
-            match self.retry_strategy.next_backoff() {
-                Some(duration) => {
-                    self.pending_retry = Some(tokio::spawn(async move {
-                        tokio::time::sleep(duration).await;
-                        let _ = actor.tell(RetryMessage::Continue).await;
-                    }));
-                }
-                None => {
-                    let _ = actor.tell(RetryMessage::Continue).await;
-                }
+        match self.retry_strategy.next_backoff() {
+            Some(duration) => {
+                let key = ctx.schedule_once(duration, RetryMessage::Continue);
+                self.pending_retry = Some(key);
             }
-        } else {
-            debug!("Retry actor no longer registered, stopping silently");
-            self.is_end = true;
-            ctx.stop(None).await;
+            None => {
+                let actor = ctx.reference().await?;
+                actor.tell(RetryMessage::Continue).await?;
+            }
         }
 
         Ok(())
@@ -271,10 +261,10 @@ where
 
     async fn pre_stop(
         &mut self,
-        _ctx: &mut ActorContext<Self>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
-        if let Some(handle) = self.pending_retry.take() {
-            handle.abort();
+        if let Some(key) = self.pending_retry.take() {
+            ctx.cancel_timer(key);
         }
         Ok(())
     }

@@ -1,13 +1,14 @@
 //! Core actor traits, types, and lifecycle hooks.
 
 use crate::{
-    ActorPath, Error, ParentRef,
+    ActorPath, Error, ParentRef, TimerKey,
     handler::HandleHelper,
     parent_ref::boxed_notifier,
     runner::{StopHandle, StopSender},
     sink::Sink,
     supervision::SupervisionStrategy,
     system::SystemRef,
+    timer::TimerScheduler,
 };
 
 use tokio::sync::{mpsc, oneshot};
@@ -37,6 +38,8 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     error_sender: ChildErrorSender<A::ChildError, A::ChildFault>,
     /// Parent information passed by this actor's parent; used by `get_parent`.
     parent_info: Option<crate::parent_ref::ParentInfo>,
+    /// Scheduler for timers created via `schedule_once` and `schedule`.
+    pub(crate) timer_scheduler: TimerScheduler<A>,
     /// Child action senders.
     child_senders: HashMap<ActorPath, StopHandle>,
     /// Named sinks registered for this actor.
@@ -45,36 +48,39 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     span: tracing::Span,
 }
 
+/// Parameters needed to build an `ActorContext`. Grouped into a struct to keep
+/// the constructor signature readable.
+pub struct ActorContextParams<A: Actor + Handler<A>> {
+    pub stop: StopSender,
+    pub path: ActorPath,
+    pub system: SystemRef,
+    pub error_sender: ChildErrorSender<A::ChildError, A::ChildFault>,
+    pub parent_info: Option<crate::parent_ref::ParentInfo>,
+    pub timer_scheduler: TimerScheduler<A>,
+    pub sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
+    pub span: Span,
+}
+
 impl<A> ActorContext<A>
 where
     A: Actor + Handler<A>,
 {
-    pub(crate) fn new(
-        stop: StopSender,
-        path: ActorPath,
-        system: SystemRef,
-        error_sender: ChildErrorSender<A::ChildError, A::ChildFault>,
-        parent_info: Option<crate::parent_ref::ParentInfo>,
-        sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
-        span: Span,
-    ) -> Self {
+    pub(crate) fn new(params: ActorContextParams<A>) -> Self {
         Self {
-            span,
-            stop,
-            path,
-            system,
+            span: params.span,
+            stop: params.stop,
+            path: params.path,
+            system: params.system,
             startup_error: None,
-            error_sender,
-            parent_info,
+            error_sender: params.error_sender,
+            parent_info: params.parent_info,
+            timer_scheduler: params.timer_scheduler,
             child_senders: HashMap::new(),
-            sinks,
+            sinks: params.sinks,
         }
     }
 
-    pub(crate) async fn restart(
-        &mut self,
-        actor: &mut A,
-    ) -> Result<(), Error>
+    pub(crate) async fn restart(&mut self, actor: &mut A) -> Result<(), Error>
     where
         A: Actor,
     {
@@ -88,6 +94,26 @@ where
     /// Returns an `ActorRef` to this actor, or an error if it has already been removed from the system.
     pub async fn reference(&self) -> Result<ActorRef<A>, Error> {
         self.system.get_actor(&self.path).await
+    }
+
+    /// Schedules a single message to be sent to this actor after `delay`.
+    /// Returns a `TimerKey` that can be used to cancel the timer.
+    pub fn schedule_once(&self, delay: Duration, msg: A::Message) -> TimerKey {
+        self.timer_scheduler.schedule_once(delay, msg)
+    }
+
+    /// Schedules a message to be sent to this actor every `period`.
+    /// Returns a `TimerKey` that can be used to cancel the timer.
+    pub fn schedule(&self, period: Duration, msg: A::Message) -> TimerKey
+    where
+        A::Message: Clone,
+    {
+        self.timer_scheduler.schedule(period, msg)
+    }
+
+    /// Cancels a previously scheduled timer.
+    pub fn cancel_timer(&self, key: TimerKey) {
+        self.timer_scheduler.cancel(key);
     }
 
     /// Returns the hierarchical path that uniquely identifies this actor in the system.
@@ -105,15 +131,17 @@ where
     pub async fn get_parent<P: Actor + Handler<P>>(
         &self,
     ) -> Result<ParentRef<P>, Error> {
-        let parent_info = self
-            .parent_info
-            .as_ref()
-            .ok_or_else(|| Error::NotFound { path: self.path.parent() })?;
+        let parent_info =
+            self.parent_info.as_ref().ok_or_else(|| Error::NotFound {
+                path: self.path.parent(),
+            })?;
         let actor_ref = parent_info
             .actor_ref
             .downcast_ref::<ActorRef<P>>()
             .cloned()
-            .ok_or_else(|| Error::NotFound { path: self.path.parent() })?;
+            .ok_or_else(|| Error::NotFound {
+                path: self.path.parent(),
+            })?;
         let notifier = Arc::clone(&parent_info.notifier);
         Ok(ParentRef::new(actor_ref, notifier, self.stop.clone()))
     }
@@ -387,7 +415,13 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
     type ChildError: Debug + Send + Sync + std::any::Any + 'static;
 
     /// The type of faults that children of this actor may report to it.
-    type ChildFault: Debug + Clone + From<Error> + Send + Sync + std::any::Any + 'static;
+    type ChildFault: Debug
+        + Clone
+        + From<Error>
+        + Send
+        + Sync
+        + std::any::Any
+        + 'static;
 
     /// Creates the tracing span for this actor instance.
     ///
@@ -420,6 +454,12 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
     /// Returns the supervision strategy applied when this actor fails at startup.
     fn supervision_strategy() -> SupervisionStrategy {
         SupervisionStrategy::Stop
+    }
+
+    /// Maximum number of pending timers this actor may have scheduled at once.
+    /// Timers created beyond this limit are ignored and logged as a warning.
+    fn max_timers() -> usize {
+        usize::MAX
     }
 
     /// Called once before the actor begins processing messages.
@@ -801,11 +841,13 @@ mod test {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let events = subscriber.events.lock().await;
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].0, 10);
-        assert_eq!(events[1].0, 20);
+        {
+            let events = subscriber.events.lock().await;
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].0, 10);
+            assert_eq!(events[1].0, 20);
+            drop(events);
+        }
         actor_ref.ask_stop().await.unwrap();
     }
-
 }
