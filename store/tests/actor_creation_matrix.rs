@@ -18,12 +18,13 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Event, Handler, Message,
-    NotPersistentActor, Response,
+    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
+    Handler, Message, NotPersistentActor, Response,
 };
 use ave_actors_store::store::{FullPersistence, PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use test_log::test;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
@@ -32,17 +33,16 @@ use tracing::info_span;
 // Test Actors
 // ============================================================================
 
-// Persistent Actor
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    borsh::BorshSerialize,
-    borsh::BorshDeserialize,
-)]
-struct MyPersistentActor {
+// State struct for persistent actor
+#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
+struct MyPersistentActorState {
     counter: i32,
+}
+
+// Persistent Actor
+#[derive(Debug)]
+struct MyPersistentActor {
+    state_ptr: Arc<MyPersistentActorState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +69,9 @@ impl Actor for MyPersistentActor {
     type Message = PersistentMessage;
     type Response = PersistentResponse;
     type Event = PersistentEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -79,12 +82,12 @@ impl Actor for MyPersistentActor {
 }
 
 #[async_trait]
-impl Handler<MyPersistentActor> for MyPersistentActor {
+impl Handler<Self> for MyPersistentActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: PersistentMessage,
-        _ctx: &mut ActorContext<MyPersistentActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<PersistentResponse, ave_actors_actor::Error> {
         Ok(PersistentResponse)
     }
@@ -94,26 +97,36 @@ impl Handler<MyPersistentActor> for MyPersistentActor {
 impl PersistentActor for MyPersistentActor {
     type Persistence = FullPersistence;
     type InitParams = i32;
+    type State = MyPersistentActorState;
 
     fn create_initial(initial_value: i32) -> Self {
         Self {
-            counter: initial_value,
+            state_ptr: Arc::new(MyPersistentActorState {
+                counter: initial_value,
+            }),
         }
     }
 
     fn apply(
-        &mut self,
+        state: Arc<Self::State>,
         _event: &Self::Event,
-    ) -> Result<(), ave_actors_actor::Error> {
-        Ok(())
+    ) -> Result<Arc<Self::State>, ave_actors_actor::Error> {
+        Ok(state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
 // Non-Persistent Actor
 #[derive(Debug, Clone)]
 struct MyNonPersistentActor {
-    #[allow(dead_code)]
-    pub value: String,
+    pub _value: String,
 }
 
 impl NotPersistentActor for MyNonPersistentActor {}
@@ -135,6 +148,9 @@ impl Actor for MyNonPersistentActor {
     type Message = NonPersistentMessage;
     type Response = NonPersistentResponse;
     type Event = NonPersistentEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -145,12 +161,12 @@ impl Actor for MyNonPersistentActor {
 }
 
 #[async_trait]
-impl Handler<MyNonPersistentActor> for MyNonPersistentActor {
+impl Handler<Self> for MyNonPersistentActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: NonPersistentMessage,
-        _ctx: &mut ActorContext<MyNonPersistentActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<NonPersistentResponse, ave_actors_actor::Error> {
         Ok(NonPersistentResponse)
     }
@@ -171,6 +187,10 @@ impl Actor for ParentActor {
     type Message = ParentMessage;
     type Response = ();
     type Event = ();
+    type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
+
     fn get_span(
         id: &str,
         _parent_span: Option<tracing::Span>,
@@ -187,12 +207,12 @@ impl Actor for ParentActor {
 }
 
 #[async_trait]
-impl Handler<ParentActor> for ParentActor {
+impl Handler<Self> for ParentActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: ParentMessage,
-        _ctx: &mut ActorContext<ParentActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<(), ave_actors_actor::Error> {
         Ok(())
     }
@@ -210,7 +230,7 @@ async fn test_create_root_actor_non_persistent_direct() {
     tokio::spawn(async move { runner.run().await });
 
     let actor = MyNonPersistentActor {
-        value: "test".to_string(),
+        _value: "test".to_string(),
     };
     let result = system.create_root_actor("non_persistent", actor).await;
     assert!(
@@ -235,24 +255,23 @@ async fn test_create_root_actor_persistent_initial() {
     );
 }
 
-/// ❌ COMPILE FAIL: Persistent actor with direct instance
-/// This test is commented out because it SHOULD NOT compile.
-/// Uncommenting it will cause a compilation error, which is the desired behavior.
-///
-/// ```compile_fail
-/// #[test(tokio::test)]
-/// async fn test_create_root_actor_persistent_direct_fails() {
-///     
-///     let (system, _runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-///
-///     // This WILL NOT compile because MyPersistentActor doesn't implement NotPersistentActor
-///     let actor = MyPersistentActor { counter: 42 };
-///     let _result = system.create_root_actor("persistent", actor).await;
-///
-///     // Error: the trait `NotPersistentActor` is not implemented for `MyPersistentActor`
-/// }
-/// ```
-
+// ❌ COMPILE FAIL: Persistent actor with direct instance
+// This test is commented out because it SHOULD NOT compile.
+// Uncommenting it will cause a compilation error, which is the desired behavior.
+//
+// ```compile_fail
+// #[test(tokio::test)]
+// async fn test_create_root_actor_persistent_direct_fails() {
+//
+//     let (system, _runner) = ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+//
+//     // This WILL NOT compile because MyPersistentActor doesn't implement NotPersistentActor
+//     let actor = MyPersistentActor { state_ptr: Arc::new(MyPersistentActorState::default()) };
+//     let _result = system.create_root_actor("persistent", actor).await;
+//
+//     // Error: the trait `NotPersistentActor` is not implemented for `MyPersistentActor`
+// }
+// ```
 // ============================================================================
 // Test Cases - create_child
 // ============================================================================
@@ -271,7 +290,7 @@ async fn test_create_child_non_persistent_direct() {
 
     // Access the actor's context to create a child
     let child = MyNonPersistentActor {
-        value: "child".to_string(),
+        _value: "child".to_string(),
     };
 
     // We can't directly test create_child from outside, but we verify the type compiles
@@ -302,7 +321,7 @@ async fn test_create_child_persistent_initial() {
 /// ```compile_fail
 /// async fn test_create_child_persistent_direct_fails(ctx: &mut ActorContext<ParentActor>) {
 ///     // This WILL NOT compile
-///     let actor = MyPersistentActor { counter: 42 };
+///     let actor = MyPersistentActor { state_ptr: Arc::new(MyPersistentActorState::default()) };
 ///     let _result = ctx.create_child("child", actor).await;
 ///
 ///     // Error: the trait `NotPersistentActor` is not implemented for `MyPersistentActor`
@@ -321,7 +340,7 @@ async fn test_all_valid_combinations() {
 
     // ✅ Pattern 1: Non-persistent + Direct instance
     let non_persistent = MyNonPersistentActor {
-        value: "test1".to_string(),
+        _value: "test1".to_string(),
     };
     assert!(
         system
@@ -339,7 +358,7 @@ async fn test_all_valid_combinations() {
     );
 
     // ❌ Pattern 3: Persistent + Direct instance → COMPILE ERROR (prevented)
-    // let persistent = MyPersistentActor { counter: 1 };
+    // let persistent = MyPersistentActor { state_ptr: Arc::new(MyPersistentActorState::default()) };
     // system.create_root_actor("test3", persistent).await; // Won't compile!
 
     // ❌ Pattern 4: Non-persistent + initial() → N/A (doesn't have initial())
@@ -359,6 +378,7 @@ fn test_type_safety_documentation() {
     fn _assert_persistent_has_trait<T: PersistentActor>()
     where
         T::Event: BorshSerialize + BorshDeserialize,
+        T::State: BorshSerialize + BorshDeserialize,
     {
     }
     _assert_persistent_has_trait::<MyPersistentActor>();

@@ -36,7 +36,7 @@ pub enum TestMessage {
 
 impl Message for TestMessage {}
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestResponse {
     pub value: u32,
 }
@@ -48,6 +48,9 @@ impl Actor for TestActor {
     type Message = TestMessage;
     type Response = TestResponse;
     type Event = SinkTestEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -58,17 +61,17 @@ impl Actor for TestActor {
 }
 
 #[async_trait]
-impl Handler<TestActor> for TestActor {
+impl Handler<Self> for TestActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: TestMessage,
-        ctx: &mut ActorContext<TestActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, Error> {
         match msg {
             TestMessage::Emit(id, data) => {
                 self.counter += 1;
-                ctx.publish_event(SinkTestEvent { id, data }).await?;
+                ctx.publish_all(SinkTestEvent { id, data });
                 Ok(TestResponse {
                     value: self.counter,
                 })
@@ -83,8 +86,14 @@ impl Handler<TestActor> for TestActor {
 // Test subscriber that collects events
 #[derive(Clone)]
 pub struct CollectingSubscriber {
-    pub events: Arc<Mutex<Vec<SinkTestEvent>>>,
+    pub events: Arc<Mutex<Vec<Arc<SinkTestEvent>>>>,
     pub should_fail: bool,
+}
+
+impl Default for CollectingSubscriber {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CollectingSubscriber {
@@ -103,19 +112,26 @@ impl CollectingSubscriber {
     }
 
     pub async fn get_events(&self) -> Vec<SinkTestEvent> {
-        self.events.lock().await.clone()
+        self.events
+            .lock()
+            .await
+            .iter()
+            .map(|e| (**e).clone())
+            .collect()
     }
 }
 
 #[async_trait]
 impl Subscriber<SinkTestEvent> for CollectingSubscriber {
-    async fn notify(&self, event: SinkTestEvent) {
+    async fn notify(&self, event: Arc<SinkTestEvent>) -> Result<(), Error> {
         if self.should_fail {
-            // Simulate subscriber failure - this shouldn't crash the sink
-            panic!("Subscriber intentionally failed");
+            // Simulate subscriber failure
+            return Err(Error::Functional {
+                description: "Subscriber intentionally failed".to_owned(),
+            });
         }
-        let mut events = self.events.lock().await;
-        events.push(event);
+        self.events.lock().await.push(event);
+        Ok(())
     }
 }
 
@@ -133,9 +149,10 @@ async fn test_sink_basic_functionality() {
     let subscriber = CollectingSubscriber::new();
     let subscriber_clone = subscriber.clone();
 
-    // Create and run sink
-    let sink = Sink::new(actor_ref.subscribe(), subscriber);
-    system.run_sink(sink).await;
+    // Register sink on the actor
+    let mut sink = Sink::new("test_sink", None);
+    sink.add("sub1", subscriber);
+    actor_ref.register_sink(sink);
 
     // Give sink time to start
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -182,9 +199,10 @@ async fn test_sink_with_failing_subscriber() {
 
     let subscriber = CollectingSubscriber::new_failing();
 
-    // Create sink with failing subscriber
-    let sink = Sink::new(actor_ref.subscribe(), subscriber);
-    system.run_sink(sink).await;
+    // Register sink with failing subscriber
+    let mut sink = Sink::new("failing_sink", None);
+    sink.add("sub1", subscriber);
+    actor_ref.register_sink(sink);
 
     // Give sink time to start
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -200,37 +218,6 @@ async fn test_sink_with_failing_subscriber() {
 
     let response = actor_ref.ask(TestMessage::GetCounter).await.unwrap();
     assert_eq!(response.value, 1);
-}
-
-#[test(tokio::test)]
-async fn test_sink_with_closed_receiver() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
-
-    let actor = TestActor { counter: 0 };
-    let actor_ref = system
-        .create_root_actor("closed_sink_test", actor)
-        .await
-        .unwrap();
-
-    let subscriber = CollectingSubscriber::new();
-    let receiver = actor_ref.subscribe();
-
-    // Create sink
-    let sink = Sink::new(receiver, subscriber);
-    system.run_sink(sink).await;
-
-    // Give sink time to start
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    // Stop the actor (this will close the receiver)
-    actor_ref.ask_stop().await.unwrap();
-
-    // Wait for sink to handle the closed receiver
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    // Sink should handle the closed receiver gracefully and exit
 }
 
 // Tests for Handler functionality and error scenarios
@@ -249,6 +236,9 @@ impl Actor for FailingHandlerActor {
     type Message = TestMessage;
     type Response = TestResponse;
     type Event = SinkTestEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -259,12 +249,12 @@ impl Actor for FailingHandlerActor {
 }
 
 #[async_trait]
-impl Handler<FailingHandlerActor> for FailingHandlerActor {
+impl Handler<Self> for FailingHandlerActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: TestMessage,
-        _ctx: &mut ActorContext<FailingHandlerActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, Error> {
         if self.fail_on_message {
             return Err(Error::Functional {
@@ -334,6 +324,9 @@ async fn test_message_serialization_edge_cases() {
         type Message = ComplexMessage;
         type Response = TestResponse;
         type Event = SinkTestEvent;
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -344,12 +337,12 @@ async fn test_message_serialization_edge_cases() {
     }
 
     #[async_trait]
-    impl Handler<ComplexHandlerActor> for ComplexHandlerActor {
+    impl Handler<Self> for ComplexHandlerActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: ComplexMessage,
-            _ctx: &mut ActorContext<ComplexHandlerActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<TestResponse, Error> {
             // Verify message was properly deserialized
             assert!(!msg.nested.is_empty());
@@ -408,6 +401,9 @@ async fn test_message_ordering_and_mailbox() {
         type Message = OrderedMessage;
         type Response = TestResponse;
         type Event = SinkTestEvent;
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -418,12 +414,12 @@ async fn test_message_ordering_and_mailbox() {
     }
 
     #[async_trait]
-    impl Handler<OrderingActor> for OrderingActor {
+    impl Handler<Self> for OrderingActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: OrderedMessage,
-            _ctx: &mut ActorContext<OrderingActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<TestResponse, Error> {
             self.received_order.push(msg.sequence);
             Ok(TestResponse {
@@ -485,6 +481,9 @@ async fn test_handler_context_operations() {
         type Message = ContextMessage;
         type Response = TestResponse;
         type Event = SinkTestEvent;
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -495,12 +494,12 @@ async fn test_handler_context_operations() {
     }
 
     #[async_trait]
-    impl Handler<ContextActor> for ContextActor {
+    impl Handler<Self> for ContextActor {
         async fn handle_message(
             &mut self,
             sender: ActorPath,
             msg: ContextMessage,
-            ctx: &mut ActorContext<ContextActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<TestResponse, Error> {
             match msg {
                 ContextMessage::CheckPath => {

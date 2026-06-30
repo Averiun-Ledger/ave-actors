@@ -70,7 +70,7 @@ mod tests {
         let key = [1u8; 32];
         let eh = EncryptedKey::new(&key).unwrap();
         let key1 = eh.key().unwrap();
-        let eh_cloned = eh.clone();
+        let eh_cloned = eh;
         let key2 = eh_cloned.key().unwrap();
         assert_eq!(*key1, *key2);
     }

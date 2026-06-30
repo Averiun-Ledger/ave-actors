@@ -12,7 +12,7 @@ use crate::{
 
 use async_trait::async_trait;
 
-use std::{fmt::Debug, marker::PhantomData, time::Duration};
+use std::{fmt::Debug, marker::PhantomData};
 use tracing::{debug, error, info_span};
 
 #[async_trait]
@@ -74,7 +74,7 @@ where
     completion_pending: bool,
     completion_notified: bool,
     on_finished: Option<Box<dyn CompletionNotifier<T>>>,
-    pending_retry: Option<tokio::task::JoinHandle<()>>,
+    pending_retry: Option<crate::TimerKey>,
 }
 
 impl<T> RetryActor<T>
@@ -135,8 +135,8 @@ where
 
     async fn finish_retry_cycle(&mut self, ctx: &ActorContext<Self>) {
         self.is_end = true;
-        if let Some(handle) = self.pending_retry.take() {
-            handle.abort();
+        if let Some(key) = self.pending_retry.take() {
+            ctx.cancel_timer(key);
         }
         if !self.completion_notified {
             self.completion_notified = true;
@@ -154,14 +154,11 @@ where
 
     async fn schedule_completion(&mut self, ctx: &ActorContext<Self>) {
         self.completion_pending = true;
-        if let Ok(actor) = ctx.reference().await {
-            self.pending_retry = Some(tokio::spawn(async move {
-                tokio::time::sleep(Duration::ZERO).await;
-                let _ = actor.tell(RetryMessage::Complete).await;
-            }));
-        } else {
-            ctx.stop(None).await;
-        }
+        let key = ctx.schedule_once(
+            std::time::Duration::from_millis(1),
+            RetryMessage::Complete,
+        );
+        self.pending_retry = Some(key);
     }
 
     async fn handle_retry_attempt(
@@ -201,22 +198,15 @@ where
             return Ok(());
         }
 
-        if let Ok(actor) = ctx.reference().await {
-            match self.retry_strategy.next_backoff() {
-                Some(duration) => {
-                    self.pending_retry = Some(tokio::spawn(async move {
-                        tokio::time::sleep(duration).await;
-                        let _ = actor.tell(RetryMessage::Continue).await;
-                    }));
-                }
-                None => {
-                    let _ = actor.tell(RetryMessage::Continue).await;
-                }
+        match self.retry_strategy.next_backoff() {
+            Some(duration) => {
+                let key = ctx.schedule_once(duration, RetryMessage::Continue);
+                self.pending_retry = Some(key);
             }
-        } else {
-            debug!("Retry actor no longer registered, stopping silently");
-            self.is_end = true;
-            ctx.stop(None).await;
+            None => {
+                let actor = ctx.reference().await?;
+                actor.tell(RetryMessage::Continue).await?;
+            }
         }
 
         Ok(())
@@ -250,6 +240,9 @@ where
     type Message = RetryMessage;
     type Response = ();
     type Event = ();
+    type SinkEvent = ();
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -268,10 +261,10 @@ where
 
     async fn pre_stop(
         &mut self,
-        _ctx: &mut ActorContext<Self>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
-        if let Some(handle) = self.pending_retry.take() {
-            handle.abort();
+        if let Some(key) = self.pending_retry.take() {
+            ctx.cancel_timer(key);
         }
         Ok(())
     }
@@ -325,7 +318,7 @@ mod tests {
 
     use super::*;
 
-    use crate::{ActorRef, ActorSystem, Error, FixedIntervalStrategy};
+    use crate::{ActorRef, ActorSystem, Error, IntervalStrategy};
 
     use std::sync::{
         Arc,
@@ -347,6 +340,9 @@ mod tests {
         type Message = SourceMessage;
         type Response = ();
         type Event = ();
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -357,12 +353,12 @@ mod tests {
 
         async fn pre_start(
             &mut self,
-            ctx: &mut ActorContext<SourceActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             println!("SourceActor pre_start");
             let target = TargetActor { counter: 0 };
 
-            let strategy = Strategy::FixedInterval(FixedIntervalStrategy::new(
+            let strategy = Strategy::Interval(IntervalStrategy::new(
                 3,
                 Duration::from_secs(1),
             ));
@@ -384,12 +380,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<SourceActor> for SourceActor {
+    impl Handler<Self> for SourceActor {
         async fn handle_message(
             &mut self,
             _path: ActorPath,
             message: SourceMessage,
-            ctx: &mut ActorContext<SourceActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             println!("Message: {:?}", message);
             assert_eq!(message.0, "Hello from child");
@@ -424,6 +420,9 @@ mod tests {
         type Message = ParentMsg;
         type Response = ();
         type Event = ();
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -436,10 +435,10 @@ mod tests {
             &mut self,
             ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
-            let retry = RetryActor::new_with_parent_message::<CompletionParent>(
+            let retry = RetryActor::new_with_parent_message::<Self>(
                 PassiveTarget,
                 PassiveMessage,
-                Strategy::FixedInterval(FixedIntervalStrategy::new(
+                Strategy::Interval(IntervalStrategy::new(
                     2,
                     Duration::from_millis(10),
                 )),
@@ -452,12 +451,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<CompletionParent> for CompletionParent {
+    impl Handler<Self> for CompletionParent {
         async fn handle_message(
             &mut self,
             _path: ActorPath,
             message: ParentMsg,
-            ctx: &mut ActorContext<CompletionParent>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             match message {
                 ParentMsg::Start => {
@@ -488,6 +487,9 @@ mod tests {
         type Message = PassiveMessage;
         type Response = ();
         type Event = ();
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -498,12 +500,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<PassiveTarget> for PassiveTarget {
+    impl Handler<Self> for PassiveTarget {
         async fn handle_message(
             &mut self,
             _path: ActorPath,
             _message: PassiveMessage,
-            _ctx: &mut ActorContext<PassiveTarget>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             Ok(())
         }
@@ -525,6 +527,9 @@ mod tests {
         type Message = CountMessage;
         type Response = ();
         type Event = ();
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -535,12 +540,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<CountingTarget> for CountingTarget {
+    impl Handler<Self> for CountingTarget {
         async fn handle_message(
             &mut self,
             _path: ActorPath,
             _message: CountMessage,
-            _ctx: &mut ActorContext<CountingTarget>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             self.deliveries.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -566,6 +571,9 @@ mod tests {
         type Message = TargetMessage;
         type Response = ();
         type Event = ();
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -576,12 +584,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<TargetActor> for TargetActor {
+    impl Handler<Self> for TargetActor {
         async fn handle_message(
             &mut self,
             _path: ActorPath,
             message: TargetMessage,
-            ctx: &mut ActorContext<TargetActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             assert_eq!(message.message, "Hello from parent");
             self.counter += 1;
@@ -635,6 +643,9 @@ mod tests {
         type Message = StopAfterFirstMessage;
         type Response = ();
         type Event = ();
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -645,12 +656,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<StopAfterFirstTarget> for StopAfterFirstTarget {
+    impl Handler<Self> for StopAfterFirstTarget {
         async fn handle_message(
             &mut self,
             _path: ActorPath,
             _message: StopAfterFirstMessage,
-            ctx: &mut ActorContext<StopAfterFirstTarget>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             let count = self.deliveries.fetch_add(1, Ordering::SeqCst) + 1;
             if count == 1 {
@@ -677,7 +688,7 @@ mod tests {
                 deliveries: deliveries.clone(),
             },
             StopAfterFirstMessage,
-            Strategy::FixedInterval(FixedIntervalStrategy::new(
+            Strategy::Interval(IntervalStrategy::new(
                 5,
                 Duration::from_millis(20),
             )),
@@ -777,5 +788,40 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), retry_ref.closed())
             .await
             .expect("retry actor should stop after exhausting retries");
+    }
+
+    #[test(tokio::test)]
+    async fn test_retry_end_with_pending_retry() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+
+        let retry_actor = RetryActor::new(
+            CountingTarget {
+                deliveries: Arc::new(AtomicUsize::new(0)),
+            },
+            CountMessage,
+            Strategy::Interval(IntervalStrategy::new(
+                5,
+                Duration::from_secs(10),
+            )),
+        );
+
+        let retry_ref: ActorRef<RetryActor<CountingTarget>> = system
+            .create_root_actor("retry_end_pending", retry_actor)
+            .await
+            .unwrap();
+
+        retry_ref.tell(RetryMessage::Retry).await.unwrap();
+        retry_ref.tell(RetryMessage::End).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), retry_ref.closed())
+            .await
+            .expect("retry actor should stop after End");
     }
 }

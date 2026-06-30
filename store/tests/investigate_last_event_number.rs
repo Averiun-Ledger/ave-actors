@@ -15,20 +15,21 @@ use test_log::test;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
+// State struct
 #[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    borsh::BorshSerialize,
-    borsh::BorshDeserialize,
-    Default,
+    Debug, Clone, Default, borsh::BorshSerialize, borsh::BorshDeserialize,
 )]
-struct TestActor {
+struct TestActorState {
     value: i32,
+}
+
+#[derive(Debug)]
+struct TestActor {
+    state_ptr: Arc<TestActorState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +56,9 @@ impl Actor for TestActor {
     type Message = TestMessage;
     type Response = TestResponse;
     type Event = TestEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -65,12 +69,12 @@ impl Actor for TestActor {
 }
 
 #[async_trait]
-impl Handler<TestActor> for TestActor {
+impl Handler<Self> for TestActor {
     async fn handle_message(
         &mut self,
         _sender: ave_actors_actor::ActorPath,
         _msg: TestMessage,
-        _ctx: &mut ActorContext<TestActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, ActorError> {
         Ok(TestResponse)
     }
@@ -80,14 +84,29 @@ impl Handler<TestActor> for TestActor {
 impl PersistentActor for TestActor {
     type Persistence = FullPersistence;
     type InitParams = ();
+    type State = TestActorState;
 
     fn create_initial(_: ()) -> Self {
-        Self::default()
+        Self {
+            state_ptr: Arc::new(TestActorState::default()),
+        }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        self.value += event.0;
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).value += event.0;
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
@@ -112,7 +131,7 @@ async fn test_last_event_number_after_persist() {
         "last_event",
         memory_manager.clone(),
         None,
-        TestActor::create_initial(()),
+        Arc::new(TestActorState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -126,7 +145,7 @@ async fn test_last_event_number_after_persist() {
 
     println!("\n📊 STEP 2: After persisting 1 event");
     store_ref
-        .ask(StoreCommand::Persist(TestEvent(10)))
+        .ask(StoreCommand::Persist(Arc::new(TestEvent(10))))
         .await
         .unwrap();
 
@@ -147,7 +166,7 @@ async fn test_last_event_number_after_persist() {
 
     println!("\n📊 STEP 3: After persisting 2nd event");
     store_ref
-        .ask(StoreCommand::Persist(TestEvent(20)))
+        .ask(StoreCommand::Persist(Arc::new(TestEvent(20))))
         .await
         .unwrap();
 
@@ -158,8 +177,8 @@ async fn test_last_event_number_after_persist() {
     }
 
     println!("\n📊 STEP 4: After creating snapshot");
-    let actor = TestActor { value: 30 };
-    store_ref.ask(StoreCommand::Snapshot(actor)).await.unwrap();
+    let state = Arc::new(TestActorState { value: 30 });
+    store_ref.ask(StoreCommand::Snapshot(state)).await.unwrap();
 
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     if let StoreResponse::LastEventNumber(count) = result {
@@ -178,7 +197,7 @@ async fn test_last_event_number_after_persist() {
         "last_event",
         memory_manager.clone(),
         None,
-        TestActor::create_initial(()),
+        Arc::new(TestActorState::default()),
     )
     .unwrap();
     let store_ref2 = system.create_root_actor("store2", store2).await.unwrap();

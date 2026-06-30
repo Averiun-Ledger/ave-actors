@@ -1,21 +1,31 @@
 //! Core actor traits, types, and lifecycle hooks.
 
 use crate::{
-    ActorPath, Error,
+    ActorPath, Error, ParentRef, TimerKey,
     handler::HandleHelper,
-    runner::{InnerAction, InnerSender, StopHandle, StopSender},
+    parent_ref::boxed_notifier,
+    runner::{StopHandle, StopSender},
+    sink::Sink,
     supervision::SupervisionStrategy,
     system::SystemRef,
+    timer::TimerScheduler,
 };
 
-use tokio::sync::{broadcast::Receiver as EventReceiver, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::{AbortHandle, JoinHandle};
 
 use async_trait::async_trait;
 
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::Span;
 
-use std::{collections::HashMap, fmt::Debug, time::Duration};
+use dashmap::DashMap;
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 /// Execution context passed to actors during message handling and lifecycle hooks.
 ///
@@ -28,52 +38,65 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     path: ActorPath,
     /// The actor system.
     system: SystemRef,
-    /// Error in the actor.
-    error: Option<Error>,
-    /// The error sender to send errors to the parent.
-    error_sender: ChildErrorSender,
-    /// Inner sender.
-    inner_sender: InnerSender<A>,
+    /// Startup error from pre_start/pre_restart; used for retry and passed to pre_restart.
+    startup_error: Option<Error>,
+    /// The error sender to send errors/faults to this actor's children.
+    error_sender: ChildErrorSender<A::ChildError, A::ChildFault>,
+    /// Parent information passed by this actor's parent; used by `get_parent`.
+    parent_info: Option<crate::parent_ref::ParentInfo>,
+    /// Scheduler for timers created via `schedule_once` and `schedule`.
+    pub(crate) timer_scheduler: TimerScheduler<A>,
     /// Child action senders.
     child_senders: HashMap<ActorPath, StopHandle>,
+    /// Named sinks registered for this actor.
+    sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
+    /// Handles of tasks spawned via `ActorContext::spawn`. They are aborted
+    /// when the actor stops so spawned work does not outlive the actor.
+    spawned_tasks: Arc<Mutex<Vec<AbortHandle>>>,
 
     span: tracing::Span,
+}
+
+/// Parameters needed to build an `ActorContext`. Grouped into a struct to keep
+/// the constructor signature readable.
+pub struct ActorContextParams<A: Actor + Handler<A>> {
+    pub stop: StopSender,
+    pub path: ActorPath,
+    pub system: SystemRef,
+    pub error_sender: ChildErrorSender<A::ChildError, A::ChildFault>,
+    pub parent_info: Option<crate::parent_ref::ParentInfo>,
+    pub timer_scheduler: TimerScheduler<A>,
+    pub sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
+    pub spawned_tasks: Arc<Mutex<Vec<AbortHandle>>>,
+    pub span: Span,
 }
 
 impl<A> ActorContext<A>
 where
     A: Actor + Handler<A>,
 {
-    pub(crate) fn new(
-        stop: StopSender,
-        path: ActorPath,
-        system: SystemRef,
-        error_sender: ChildErrorSender,
-        inner_sender: InnerSender<A>,
-        span: Span,
-    ) -> Self {
+    pub(crate) fn new(params: ActorContextParams<A>) -> Self {
         Self {
-            span,
-            stop,
-            path,
-            system,
-            error: None,
-            error_sender,
-            inner_sender,
+            span: params.span,
+            stop: params.stop,
+            path: params.path,
+            system: params.system,
+            startup_error: None,
+            error_sender: params.error_sender,
+            parent_info: params.parent_info,
+            timer_scheduler: params.timer_scheduler,
             child_senders: HashMap::new(),
+            sinks: params.sinks,
+            spawned_tasks: params.spawned_tasks,
         }
     }
 
-    pub(crate) async fn restart(
-        &mut self,
-        actor: &mut A,
-        error: Option<&Error>,
-    ) -> Result<(), Error>
+    pub(crate) async fn restart(&mut self, actor: &mut A) -> Result<(), Error>
     where
         A: Actor,
     {
-        tracing::warn!(error = ?error, "Actor restarting");
-        let result = actor.pre_restart(self, error).await;
+        tracing::warn!("Actor restarting");
+        let result = actor.pre_restart(self).await;
         if let Err(ref e) = result {
             tracing::error!(error = %e, "Actor restart failed");
         }
@@ -82,6 +105,61 @@ where
     /// Returns an `ActorRef` to this actor, or an error if it has already been removed from the system.
     pub async fn reference(&self) -> Result<ActorRef<A>, Error> {
         self.system.get_actor(&self.path).await
+    }
+
+    /// Schedules a single message to be sent to this actor after `delay`.
+    /// Returns a `TimerKey` that can be used to cancel the timer.
+    pub fn schedule_once(&self, delay: Duration, msg: A::Message) -> TimerKey {
+        self.timer_scheduler.schedule_once(delay, msg)
+    }
+
+    /// Schedules a message to be sent to this actor every `period`.
+    /// Returns a `TimerKey` that can be used to cancel the timer.
+    pub fn schedule(&self, period: Duration, msg: A::Message) -> TimerKey
+    where
+        A::Message: Clone,
+    {
+        self.timer_scheduler.schedule(period, msg)
+    }
+
+    /// Cancels a previously scheduled timer.
+    pub fn cancel_timer(&self, key: TimerKey) {
+        self.timer_scheduler.cancel(key);
+    }
+
+    /// Spawns an asynchronous task whose lifetime is bound to this actor.
+    ///
+    /// The task runs on the Tokio runtime, but it is automatically aborted when
+    /// the actor stops or restarts. This is useful for work that must not
+    /// outlive the actor, such as sending a delayed message to another actor
+    /// or calling an external API.
+    ///
+    /// The returned `JoinHandle` can be awaited or ignored; the actor will
+    /// abort the task on shutdown regardless.
+    pub fn spawn<F>(&self, future: F) -> JoinHandle<()>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let handle = tokio::spawn(future);
+        let abort_handle = handle.abort_handle();
+        let mut tasks = self
+            .spawned_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tasks.push(abort_handle);
+        tasks.retain(|t| !t.is_finished());
+        handle
+    }
+
+    /// Aborts every task spawned through `ActorContext::spawn`.
+    pub(crate) fn abort_spawned_tasks(&self) {
+        let mut tasks = self
+            .spawned_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for handle in tasks.drain(..) {
+            handle.abort();
+        }
     }
 
     /// Returns the hierarchical path that uniquely identifies this actor in the system.
@@ -94,14 +172,27 @@ where
         &self.system
     }
 
-    /// Returns a typed handle to the parent actor, or an error if this is a root actor or the parent has stopped.
+    /// Returns a typed handle to the parent actor, or an error if this is a root
+    /// actor or the parent's type does not match `P`.
     pub async fn get_parent<P: Actor + Handler<P>>(
         &self,
-    ) -> Result<ActorRef<P>, Error> {
-        self.system.get_actor(&self.path.parent()).await
+    ) -> Result<ParentRef<P>, Error> {
+        let parent_info =
+            self.parent_info.as_ref().ok_or_else(|| Error::NotFound {
+                path: self.path.parent(),
+            })?;
+        let actor_ref = parent_info
+            .actor_ref
+            .downcast_ref::<ActorRef<P>>()
+            .cloned()
+            .ok_or_else(|| Error::NotFound {
+                path: self.path.parent(),
+            })?;
+        let notifier = Arc::clone(&parent_info.notifier);
+        Ok(ParentRef::new(actor_ref, notifier, self.stop.clone()))
     }
 
-    pub(crate) async fn stop_childs(&mut self) {
+    pub(crate) async fn stop_children(&mut self) {
         let child_count = self.child_senders.len();
         if child_count > 0 {
             tracing::debug!(child_count, "Stopping child actors");
@@ -111,26 +202,34 @@ where
         let mut receivers = Vec::with_capacity(child_count);
         for (path, handle) in std::mem::take(&mut self.child_senders) {
             let (stop_sender, stop_receiver) = oneshot::channel();
-            if handle.sender().send(Some(stop_sender)).await.is_ok() {
+            if handle
+                .sender()
+                .send(crate::runner::StopSignal::Stop(Some(stop_sender)))
+                .await
+                .is_ok()
+            {
                 receivers.push((path, handle.timeout(), stop_receiver));
             }
         }
 
-        // Wait for all confirmations. Children shut down in parallel so the
-        // total wait is max(child_shutdown_time) rather than the sum.
+        // Wait for all confirmations in parallel.
+        let mut set = tokio::task::JoinSet::new();
         for (path, timeout, receiver) in receivers {
-            if let Some(timeout) = timeout {
-                if tokio::time::timeout(timeout, receiver).await.is_err() {
-                    tracing::warn!(
-                        child = %path,
-                        timeout_ms = timeout.as_millis(),
-                        "Timed out waiting for child actor shutdown acknowledgement"
-                    );
+            set.spawn(async move {
+                if let Some(timeout) = timeout {
+                    if tokio::time::timeout(timeout, receiver).await.is_err() {
+                        tracing::warn!(
+                            child = %path,
+                            timeout_ms = timeout.as_millis(),
+                            "Timed out waiting for child actor shutdown acknowledgement"
+                        );
+                    }
+                } else {
+                    let _ = receiver.await;
                 }
-            } else {
-                let _ = receiver.await;
-            }
+            });
         }
+        while set.join_next().await.is_some() {}
     }
 
     pub(crate) async fn remove_actor(&self) {
@@ -139,57 +238,62 @@ where
 
     /// Sends a stop signal to this actor. Pass `Some(sender)` to receive a confirmation when shutdown completes.
     pub async fn stop(&self, sender: Option<oneshot::Sender<()>>) {
-        let _ = self.stop.send(sender).await;
+        let _ = self
+            .stop
+            .send(crate::runner::StopSignal::Stop(sender))
+            .await;
     }
 
-    /// Broadcasts `event` to all current subscribers of this actor's event channel.
+    /// Register a named sink for this actor.
     ///
-    /// Returns an error if the broadcast channel is closed (i.e., the actor is stopping).
-    pub async fn publish_event(&self, event: A::Event) -> Result<(), Error> {
-        self.inner_sender
-            .send(InnerAction::Event(event))
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to publish event");
-                Error::SendEvent {
-                    reason: e.to_string(),
-                }
-            })
+    /// If a sink with the same name already exists it is replaced and the
+    /// previous sink is returned.
+    pub fn register_sink(
+        &self,
+        sink: Sink<A::SinkEvent>,
+    ) -> Option<Sink<A::SinkEvent>> {
+        self.sinks.insert(sink.name().to_string(), sink)
     }
 
-    /// Reports an error to this actor's parent so the parent can invoke `on_child_error`.
-    ///
-    /// Returns an error if the parent channel is no longer reachable.
-    pub async fn emit_error(&mut self, error: Error) -> Result<(), Error> {
-        tracing::warn!(error = %error, "Emitting error");
-        self.inner_sender
-            .send(InnerAction::Error(error))
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to emit error");
-                Error::Send {
-                    reason: e.to_string(),
-                }
-            })
+    /// Remove the sink named `name` and return it, if present.
+    pub fn remove_sink(&self, name: &str) -> Option<Sink<A::SinkEvent>> {
+        self.sinks.remove(name).map(|(_, v)| v)
     }
 
-    /// Emits a fatal fault, halts message processing, and escalates to the parent via `on_child_fault`.
+    /// Send `event` to the sink named `sink_name`.
     ///
-    /// Returns an error if the escalation channel is no longer reachable.
-    pub async fn emit_fail(&mut self, error: Error) -> Result<(), Error> {
-        tracing::error!(error = %error, "Actor failing");
-        // Store error to stop message handling.
-        self.set_error(error.clone());
-        // Send fail to parent actor.
-        self.inner_sender
-            .send(InnerAction::Fail(error.clone()))
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to emit fail");
-                Error::Send {
-                    reason: e.to_string(),
-                }
-            })
+    /// If the sink does not exist a `debug!` log is emitted and the event
+    /// is silently dropped (no-op).
+    pub fn publish_to(&self, sink_name: impl AsRef<str>, event: A::SinkEvent) {
+        let name = sink_name.as_ref();
+        if let Some(entry) = self.sinks.get(name) {
+            entry.value().send(Arc::new(event));
+        } else {
+            tracing::debug!(sink = %name, "Sink not found, event dropped");
+        }
+    }
+
+    /// Send `event` to every registered sink (fire-and-forget).
+    pub fn publish_all(&self, event: A::SinkEvent) {
+        let event = Arc::new(event);
+        for entry in self.sinks.iter() {
+            entry.value().send(Arc::clone(&event));
+        }
+    }
+
+    /// Send `event` to sinks whose name satisfies `predicate`
+    /// (fire-and-forget).
+    pub fn publish_filtered(
+        &self,
+        predicate: impl Fn(&str) -> bool,
+        event: A::SinkEvent,
+    ) {
+        let event = Arc::new(event);
+        for entry in self.sinks.iter() {
+            if predicate(entry.key().as_str()) {
+                entry.value().send(Arc::clone(&event));
+            }
+        }
     }
 
     /// Spawns a child actor and registers it under this actor's path.
@@ -209,12 +313,16 @@ where
         tracing::debug!(child_name = %name, "Creating child actor");
         let actor = actor_init.into_actor();
         let path = self.path.clone() / name;
+        let parent_info = crate::parent_ref::ParentInfo {
+            actor_ref: Arc::new(self.reference().await?),
+            notifier: boxed_notifier(self.error_sender.clone()),
+        };
         let result = self
             .system
             .create_actor_path(
                 path.clone(),
                 actor,
-                Some(self.error_sender.clone()),
+                Some(parent_info),
                 C::get_span(name, Some(self.span.clone())),
             )
             .await;
@@ -226,11 +334,11 @@ where
                     path,
                     StopHandle::new(stop_sender.clone(), C::stop_timeout()),
                 );
-                let inner_sender = self.inner_sender.clone();
+                let error_sender = self.error_sender.clone();
                 tokio::spawn(async move {
                     stop_sender.closed().await;
-                    let _ = inner_sender
-                        .send(InnerAction::ChildStopped(child_path))
+                    let _ = error_sender
+                        .send(ChildError::ChildStopped(child_path))
                         .await;
                 });
                 tracing::debug!(child_name = %name, "Child actor created");
@@ -247,8 +355,7 @@ where
         let should_remove = self
             .child_senders
             .get(child_path)
-            .map(StopHandle::is_closed)
-            .unwrap_or(false);
+            .is_some_and(StopHandle::is_closed);
         if should_remove {
             self.child_senders.remove(child_path);
         }
@@ -266,16 +373,16 @@ where
         self.system.get_actor(&path).await
     }
 
-    pub(crate) fn error(&self) -> Option<Error> {
-        self.error.clone()
+    pub(crate) fn startup_error(&self) -> Option<Error> {
+        self.startup_error.clone()
     }
 
-    pub(crate) fn set_error(&mut self, error: Error) {
-        self.error = Some(error);
+    pub(crate) fn set_startup_error(&mut self, error: Error) {
+        self.startup_error = Some(error);
     }
 
-    pub(crate) fn clean_error(&mut self) {
-        self.error = None;
+    pub(crate) fn clean_startup_error(&mut self) {
+        self.startup_error = None;
     }
 }
 
@@ -308,25 +415,27 @@ pub enum ChildAction {
 }
 
 /// Child error receiver.
-pub type ChildErrorReceiver = mpsc::Receiver<ChildError>;
+pub type ChildErrorReceiver<E, F> = mpsc::Receiver<ChildError<E, F>>;
 
 /// Child error sender.
-pub type ChildErrorSender = mpsc::Sender<ChildError>;
+pub type ChildErrorSender<E, F> = mpsc::Sender<ChildError<E, F>>;
 
-/// Message sent from a child to its parent on error or fault.
-pub enum ChildError {
+/// Message sent from a child to its parent on error, fault, or stop.
+pub enum ChildError<E, F> {
     /// Error in child.
     Error {
         /// The error that caused the failure.
-        error: Error,
+        error: E,
     },
     /// Fault in child.
     Fault {
-        /// The error that caused the failure.
-        error: Error,
+        /// The fault that caused the failure.
+        error: F,
         /// The sender will communicate the action to be carried out to the child.
         sender: oneshot::Sender<ChildAction>,
     },
+    /// Child actor has stopped.
+    ChildStopped(ActorPath),
 }
 
 /// Defines the identity and associated types of an actor.
@@ -342,8 +451,23 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
     /// The type of events this actor can broadcast to subscribers.
     type Event: Event;
 
+    /// The type of events this actor sends to its sinks.
+    type SinkEvent: Event;
+
     /// The type returned by the actor in response to each message.
     type Response: Response;
+
+    /// The type of errors that children of this actor may report to it.
+    type ChildError: Debug + Send + Sync + std::any::Any + 'static;
+
+    /// The type of faults that children of this actor may report to it.
+    type ChildFault: Debug
+        + Clone
+        + From<Error>
+        + Send
+        + Sync
+        + std::any::Any
+        + 'static;
 
     /// Creates the tracing span for this actor instance.
     ///
@@ -378,6 +502,12 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
         SupervisionStrategy::Stop
     }
 
+    /// Maximum number of pending timers this actor may have scheduled at once.
+    /// Timers created beyond this limit are ignored and logged as a warning.
+    fn max_timers() -> usize {
+        usize::MAX
+    }
+
     /// Called once before the actor begins processing messages.
     ///
     /// Override to initialize resources, spawn child actors, or connect to external
@@ -392,13 +522,11 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
 
     /// Called when the actor is about to be restarted after a failure.
     ///
-    /// `error` is the error that caused the restart, or `None` if the restart was manual.
     /// The default implementation delegates to `pre_start`, so any initialization
     /// logic defined there runs again on restart.
     async fn pre_restart(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        _error: Option<&Error>,
     ) -> Result<(), Error> {
         self.pre_start(ctx).await
     }
@@ -432,7 +560,7 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
 
 /// Application-defined values that an actor may publish, persist, or apply via `on_event`.
 pub trait Event:
-    Serialize + DeserializeOwned + Debug + Clone + Send + Sync + 'static
+    Serialize + DeserializeOwned + Debug + Send + Sync + 'static
 {
 }
 
@@ -474,29 +602,31 @@ pub trait Handler<A: Actor + Handler<A>>: Send + Sync {
         // Default implementation.
     }
 
-    /// Called when a child actor reports an error via [`ActorContext::emit_error`].
+    /// Called when a child actor reports an error via its parent's
+    /// [`ParentRef::emit_error`].
     ///
     /// Override to inspect `error` and decide whether to escalate it. The default
     /// implementation does nothing.
     async fn on_child_error(
         &mut self,
-        error: Error,
+        error: A::ChildError,
         _ctx: &mut ActorContext<A>,
     ) {
-        tracing::error!(error = %error, "Child actor error");
+        tracing::error!(error = ?error, "Child actor error");
     }
 
-    /// Called when a child actor fails unrecoverably (panics or exhausts retries).
+    /// Called when a child actor fails unrecoverably and reports a fault via its
+    /// parent's [`ParentRef::emit_fail`].
     ///
     /// Return [`ChildAction::Stop`] to propagate the failure up to this actor's parent,
     /// [`ChildAction::Restart`] to restart the child, or [`ChildAction::Delegate`]
     /// to let the child's own supervision strategy decide. The default returns `Stop`.
     async fn on_child_fault(
         &mut self,
-        error: Error,
+        error: A::ChildFault,
         _ctx: &mut ActorContext<A>,
     ) -> ChildAction {
-        tracing::error!(error = %error, "Child actor fault, stopping child");
+        tracing::error!(error = ?error, "Child actor fault, stopping child");
         // Default implementation from child actor errors.
         ChildAction::Stop
     }
@@ -513,13 +643,13 @@ where
     A: Actor + Handler<A>,
 {
     /// The path of the actor.
-    path: ActorPath,
+    path: Arc<ActorPath>,
     /// The handle helper.
     sender: HandleHelper<A>,
-    /// The actor event receiver.
-    event_receiver: EventReceiver<<A as Actor>::Event>,
     /// The actor stop sender.
     stop_sender: StopSender,
+    /// Named sinks registered for this actor.
+    sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
 }
 
 impl<A> ActorRef<A>
@@ -527,16 +657,16 @@ where
     A: Actor + Handler<A>,
 {
     pub const fn new(
-        path: ActorPath,
+        path: Arc<ActorPath>,
         sender: HandleHelper<A>,
         stop_sender: StopSender,
-        event_receiver: EventReceiver<<A as Actor>::Event>,
+        sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
     ) -> Self {
         Self {
             path,
             sender,
             stop_sender,
-            event_receiver,
+            sinks,
         }
     }
 
@@ -575,7 +705,12 @@ where
         tracing::debug!("Stopping actor");
         let (response_sender, response_receiver) = oneshot::channel();
 
-        if self.stop_sender.send(Some(response_sender)).await.is_err() {
+        if self
+            .stop_sender
+            .send(crate::runner::StopSignal::Stop(Some(response_sender)))
+            .await
+            .is_err()
+        {
             Ok(())
         } else {
             response_receiver.await.map_err(|error| {
@@ -589,12 +724,31 @@ where
 
     /// Sends a stop signal without waiting for the actor to confirm shutdown (fire-and-forget).
     pub async fn tell_stop(&self) {
-        let _ = self.stop_sender.send(None).await;
+        let _ = self
+            .stop_sender
+            .send(crate::runner::StopSignal::Stop(None))
+            .await;
+    }
+
+    /// Register a sink from external code.
+    ///
+    /// If a sink with the same name already exists it is replaced and the
+    /// previous sink is returned.
+    pub fn register_sink(
+        &self,
+        sink: Sink<A::SinkEvent>,
+    ) -> Option<Sink<A::SinkEvent>> {
+        self.sinks.insert(sink.name().to_string(), sink)
+    }
+
+    /// Remove a sink from external code.
+    pub fn remove_sink(&self, name: &str) -> Option<Sink<A::SinkEvent>> {
+        self.sinks.remove(name).map(|(_, v)| v)
     }
 
     /// Returns the hierarchical path of this actor.
     pub fn path(&self) -> ActorPath {
-        self.path.clone()
+        (*self.path).clone()
     }
 
     /// Returns `true` if the actor's mailbox is closed, meaning the actor has stopped.
@@ -605,14 +759,6 @@ where
     /// Waits until the actor has fully terminated.
     pub async fn closed(&self) {
         self.sender.close().await;
-    }
-
-    /// Returns a broadcast receiver for this actor's events.
-    ///
-    /// Each subscriber receives every future event independently. Use this receiver
-    /// directly or wrap it in a [`Sink`](crate::Sink) to process events asynchronously.
-    pub fn subscribe(&self) -> EventReceiver<<A as Actor>::Event> {
-        self.event_receiver.resubscribe()
     }
 }
 
@@ -625,7 +771,7 @@ where
             path: self.path.clone(),
             sender: self.sender.clone(),
             stop_sender: self.stop_sender.clone(),
-            event_receiver: self.event_receiver.resubscribe(),
+            sinks: self.sinks.clone(),
         }
     }
 }
@@ -639,7 +785,7 @@ mod test {
     use crate::sink::{Sink, Subscriber};
 
     use serde::{Deserialize, Serialize};
-    use tokio::sync::mpsc;
+    use tokio::sync::Mutex;
     use tokio_util::sync::CancellationToken;
     use tracing::info_span;
 
@@ -669,7 +815,10 @@ mod test {
     impl Actor for TestActor {
         type Message = TestMessage;
         type Event = TestEvent;
+        type SinkEvent = Self::Event;
         type Response = TestResponse;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -680,56 +829,71 @@ mod test {
     }
 
     #[async_trait]
-    impl Handler<TestActor> for TestActor {
+    impl Handler<Self> for TestActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: TestMessage,
-            ctx: &mut ActorContext<TestActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<TestResponse, Error> {
-            if ctx.get_parent::<TestActor>().await.is_ok() {
+            if ctx.get_parent::<Self>().await.is_ok() {
                 panic!("Is not a root actor");
             }
 
             let value = msg.0;
             self.counter += value;
-            ctx.publish_event(TestEvent(self.counter)).await.unwrap();
+            ctx.publish_all(TestEvent(self.counter));
             Ok(TestResponse(self.counter))
         }
     }
 
-    pub struct TestSubscriber;
+    #[derive(Clone)]
+    pub struct TestSubscriber {
+        events: Arc<Mutex<Vec<TestEvent>>>,
+    }
+
+    impl TestSubscriber {
+        pub fn new() -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
 
     #[async_trait]
     impl Subscriber<TestEvent> for TestSubscriber {
-        async fn notify(&self, event: TestEvent) {
+        async fn notify(&self, event: Arc<TestEvent>) -> Result<(), Error> {
             assert!(event.0 > 0);
+            self.events.lock().await.push((*event).clone());
+            Ok(())
         }
     }
 
     #[test(tokio::test)]
     async fn test_actor() {
-        let (event_sender, _event_receiver) = mpsc::channel(100);
-        let system = SystemRef::new(
-            event_sender,
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let (system, _) =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let actor = TestActor { counter: 0 };
         let actor_ref = system.create_root_actor("test", actor).await.unwrap();
 
-        let sink = Sink::new(actor_ref.subscribe(), TestSubscriber);
-        system.run_sink(sink).await;
+        let subscriber = TestSubscriber::new();
+        let mut sink = Sink::new("test_sink", None);
+        sink.add("sub1", subscriber.clone());
+        actor_ref.register_sink(sink);
 
         actor_ref.tell(TestMessage(10)).await.unwrap();
-        let mut recv = actor_ref.subscribe();
         let response = actor_ref.ask(TestMessage(10)).await.unwrap();
         assert_eq!(response.0, 20);
-        let event = recv.recv().await.unwrap();
-        assert_eq!(event.0, 10);
-        let event = recv.recv().await.unwrap();
-        assert_eq!(event.0, 20);
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        {
+            let events = subscriber.events.lock().await;
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].0, 10);
+            assert_eq!(events[1].0, 20);
+            drop(events);
+        }
         actor_ref.ask_stop().await.unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
 }

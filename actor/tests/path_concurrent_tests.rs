@@ -75,7 +75,7 @@ fn test_actor_path_operations() {
     let base_path = ActorPath::from("/user");
 
     // Test adding paths using division operator
-    let child_path = base_path.clone() / "child";
+    let child_path = base_path / "child";
     assert_eq!(child_path.to_string(), "/user/child");
 
     let grandchild_path = child_path / "grandchild";
@@ -151,6 +151,9 @@ impl Actor for ConcurrentActor {
     type Message = ConcurrentMessage;
     type Response = ConcurrentResponse;
     type Event = ConcurrentEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -161,12 +164,12 @@ impl Actor for ConcurrentActor {
 }
 
 #[async_trait]
-impl Handler<ConcurrentActor> for ConcurrentActor {
+impl Handler<Self> for ConcurrentActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: ConcurrentMessage,
-        ctx: &mut ActorContext<ConcurrentActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<ConcurrentResponse, Error> {
         match msg {
             ConcurrentMessage::Increment => {
@@ -175,11 +178,10 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
                 let value = *counter;
                 drop(counter);
 
-                ctx.publish_event(ConcurrentEvent {
+                ctx.publish_all(ConcurrentEvent {
                     action: "increment".to_string(),
                     value,
-                })
-                .await?;
+                });
 
                 Ok(ConcurrentResponse::Counter(value))
             }
@@ -189,17 +191,15 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
                 let value = *counter;
                 drop(counter);
 
-                ctx.publish_event(ConcurrentEvent {
+                ctx.publish_all(ConcurrentEvent {
                     action: "decrement".to_string(),
                     value,
-                })
-                .await?;
+                });
 
                 Ok(ConcurrentResponse::Counter(value))
             }
             ConcurrentMessage::AddMessage(msg) => {
-                let mut messages = self.messages_received.lock().await;
-                messages.push(msg);
+                self.messages_received.lock().await.push(msg);
                 Ok(ConcurrentResponse::Success)
             }
             ConcurrentMessage::GetCounter => {
@@ -211,14 +211,12 @@ impl Handler<ConcurrentActor> for ConcurrentActor {
                 Ok(ConcurrentResponse::Messages(messages.clone()))
             }
             ConcurrentMessage::CreateChild(name) => {
-                let child = ConcurrentActor::new();
+                let child = Self::new();
                 ctx.create_child(&name, child).await?;
                 Ok(ConcurrentResponse::Success)
             }
             ConcurrentMessage::SendToChild(child_name, message) => {
-                if let Ok(child) =
-                    ctx.get_child::<ConcurrentActor>(&child_name).await
-                {
+                if let Ok(child) = ctx.get_child::<Self>(&child_name).await {
                     let _response = child
                         .ask(ConcurrentMessage::AddMessage(message.clone()))
                         .await?;
@@ -357,40 +355,6 @@ async fn test_multiple_actor_communication() {
 }
 
 // Test event subscription with multiple subscribers
-#[test(tokio::test)]
-async fn test_multiple_event_subscribers() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
-
-    let actor = ConcurrentActor::new();
-    let actor_ref = system
-        .create_root_actor("event_source", actor)
-        .await
-        .unwrap();
-
-    // Create multiple subscribers
-    let mut subscribers = Vec::new();
-    for _ in 0..3 {
-        let subscriber = actor_ref.subscribe();
-        subscribers.push(subscriber);
-    }
-
-    // Send event-generating messages
-    actor_ref.tell(ConcurrentMessage::Increment).await.unwrap();
-    actor_ref.tell(ConcurrentMessage::Increment).await.unwrap();
-    actor_ref.tell(ConcurrentMessage::Decrement).await.unwrap();
-
-    // Wait for events to be published
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    // Verify each subscriber received events (note: we can't easily test reception
-    // without modifying the subscriber interface, so this test mainly ensures
-    // the system doesn't crash with multiple subscribers)
-
-    // The fact that we get here without panicking means multiple subscribers work
-    assert_eq!(subscribers.len(), 3);
-}
 
 // Test actor lifecycle with rapid creation/destruction
 #[test(tokio::test)]

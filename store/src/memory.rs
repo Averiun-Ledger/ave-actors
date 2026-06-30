@@ -24,15 +24,16 @@ pub struct MemoryManager {
     data: MemoryData,
 }
 
-impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
-    fn create_state(
+impl MemoryManager {
+    fn get_or_create_store(
         &self,
         name: &str,
         prefix: &str,
     ) -> Result<MemoryStore, Error> {
         let mut data_lock = self.data.write().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockManagerData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
         let data = data_lock
             .entry((name.to_owned(), prefix.to_owned()))
@@ -46,8 +47,18 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
             data,
         })
     }
+}
 
-    fn stop(&mut self) -> Result<(), Error> {
+impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
+    fn create_state(
+        &self,
+        name: &str,
+        prefix: &str,
+    ) -> Result<MemoryStore, Error> {
+        self.get_or_create_store(name, prefix)
+    }
+
+    fn stop(self) -> Result<(), Error> {
         Ok(())
     }
 
@@ -56,21 +67,7 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
         name: &str,
         prefix: &str,
     ) -> Result<MemoryStore, Error> {
-        let mut data_lock = self.data.write().map_err(|e| Error::Store {
-            operation: StoreOperation::LockManagerData,
-            reason: format!("{}", e),
-        })?;
-        let data = data_lock
-            .entry((name.to_owned(), prefix.to_owned()))
-            .or_insert_with(|| Arc::new(RwLock::new(BTreeMap::new())))
-            .clone();
-        drop(data_lock);
-
-        Ok(MemoryStore {
-            name: name.to_owned(),
-            prefix: prefix.to_owned(),
-            data,
-        })
+        self.get_or_create_store(name, prefix)
     }
 }
 
@@ -99,8 +96,9 @@ impl State for MemoryStore {
 
     fn get(&self) -> Result<Vec<u8>, Error> {
         let lock = self.data.read().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
 
         lock.get(&self.prefix).map_or_else(
@@ -117,8 +115,9 @@ impl State for MemoryStore {
         self.data
             .write()
             .map_err(|e| Error::Store {
+                source: None,
                 operation: StoreOperation::LockData,
-                reason: format!("{}", e),
+                reason: e.to_string(),
             })?
             .insert(self.prefix.clone(), data.to_vec());
 
@@ -127,8 +126,9 @@ impl State for MemoryStore {
 
     fn del(&mut self) -> Result<(), Error> {
         let mut lock = self.data.write().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
         match lock.remove(&self.prefix) {
             Some(_) => Ok(()),
@@ -142,8 +142,9 @@ impl State for MemoryStore {
         self.data
             .write()
             .map_err(|e| Error::Store {
+                source: None,
                 operation: StoreOperation::LockData,
-                reason: format!("{}", e),
+                reason: e.to_string(),
             })?
             .remove(&self.prefix);
         Ok(())
@@ -163,8 +164,9 @@ impl Collection for MemoryStore {
     fn get(&self, key: &str) -> Result<Vec<u8>, Error> {
         let key = format!("{}.{}", self.prefix, key);
         let lock = self.data.read().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
 
         lock.get(&key).map_or_else(
@@ -178,8 +180,9 @@ impl Collection for MemoryStore {
         self.data
             .write()
             .map_err(|e| Error::Store {
+                source: None,
                 operation: StoreOperation::LockData,
-                reason: format!("{}", e),
+                reason: e.to_string(),
             })?
             .insert(key, data.to_vec());
 
@@ -189,8 +192,9 @@ impl Collection for MemoryStore {
     fn del(&mut self, key: &str) -> Result<(), Error> {
         let key = format!("{}.{}", self.prefix, key);
         let mut lock = self.data.write().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
         match lock.remove(&key) {
             Some(_) => Ok(()),
@@ -200,8 +204,9 @@ impl Collection for MemoryStore {
 
     fn purge(&mut self) -> Result<(), Error> {
         let mut lock = self.data.write().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
         let collection_prefix = self.collection_prefix();
 
@@ -225,8 +230,9 @@ impl Collection for MemoryStore {
         Error,
     > {
         let lock = self.data.read().map_err(|e| Error::Store {
+            source: None,
             operation: StoreOperation::LockData,
-            reason: format!("{}", e),
+            reason: e.to_string(),
         })?;
         let collection_prefix = self.collection_prefix();
         let prefix_len = collection_prefix.len();
@@ -252,13 +258,78 @@ impl Collection for MemoryStore {
 
         Ok(Box::new(items.into_iter().map(Ok)))
     }
+
+    fn iter_range<'a>(
+        &'a self,
+        start: &str,
+        end: &str,
+        reverse: bool,
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>,
+        Error,
+    > {
+        let lock = self.data.read().map_err(|e| Error::Store {
+            source: None,
+            operation: StoreOperation::LockData,
+            reason: e.to_string(),
+        })?;
+        let collection_prefix = self.collection_prefix();
+        let prefix_len = collection_prefix.len();
+
+        let start_key = format!("{}.{}", self.prefix, start);
+        let end_key = format!("{}.{}", self.prefix, end);
+
+        let items: Vec<(String, Vec<u8>)> = if reverse {
+            lock.range(start_key..=end_key)
+                .rev()
+                .map(|(key, value)| {
+                    let key = &key[prefix_len..];
+                    (key.to_owned(), value.clone())
+                })
+                .collect()
+        } else {
+            lock.range(start_key..=end_key)
+                .map(|(key, value)| {
+                    let key = &key[prefix_len..];
+                    (key.to_owned(), value.clone())
+                })
+                .collect()
+        };
+
+        Ok(Box::new(items.into_iter().map(Ok)))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::{Collection, State};
     use crate::test_store_trait;
     test_store_trait! {
         unit_test_memory_manager:crate::memory::MemoryManager:MemoryStore
+    }
+
+    #[test]
+    fn test_state_del_not_found() {
+        let manager = MemoryManager::default();
+        let mut state = manager.create_state("test", "test").unwrap();
+        assert_eq!(
+            State::del(&mut state),
+            Err(Error::EntryNotFound {
+                key: "test".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn test_collection_del_not_found() {
+        let manager = MemoryManager::default();
+        let mut collection = manager.create_collection("test", "test").unwrap();
+        assert_eq!(
+            Collection::del(&mut collection, "missing"),
+            Err(Error::EntryNotFound {
+                key: "test.missing".to_owned()
+            })
+        );
     }
 }

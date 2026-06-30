@@ -18,3 +18,8 @@ coverage
 SECURITY_*.md
 
 .codex
+
+AGENTS.md
+temporal/
+.agents/
+todo.txt

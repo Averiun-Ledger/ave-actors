@@ -17,11 +17,15 @@ use tracing::info_span;
 
 static SHARED_MGR: OnceLock<Arc<TokioMutex<MemoryManager>>> = OnceLock::new();
 
-#[derive(
-    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
-struct SingleEventActor {
+// State struct
+#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
+struct SingleEventActorState {
     data: String,
+}
+
+#[derive(Debug)]
+struct SingleEventActor {
+    state_ptr: Arc<SingleEventActorState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +52,9 @@ impl Actor for SingleEventActor {
     type Message = Msg;
     type Response = Resp;
     type Event = DataSet;
+    type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -62,7 +69,7 @@ impl Actor for SingleEventActor {
     ) -> Result<(), ActorError> {
         println!(
             "  [PRE_START] Actor starting, current data: '{}'",
-            self.data
+            self.state_ptr.data
         );
         let manager_ref = SHARED_MGR.get_or_init(|| {
             Arc::new(TokioMutex::new(MemoryManager::default()))
@@ -74,25 +81,25 @@ impl Actor for SingleEventActor {
 }
 
 #[async_trait]
-impl Handler<SingleEventActor> for SingleEventActor {
+impl Handler<Self> for SingleEventActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: Msg,
-        ctx: &mut ActorContext<SingleEventActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<Resp, ActorError> {
         match msg {
             Msg::SetData(new_data) => {
                 println!("  [HANDLER] Setting data: '{}'", new_data);
-                self.persist(&DataSet(new_data), ctx).await?;
+                self.persist(DataSet(new_data), ctx).await?;
                 Ok(Resp {
-                    data: self.data.clone(),
+                    data: self.state_ptr.data.clone(),
                 })
             }
             Msg::GetData => {
-                println!("  [HANDLER] Getting data: '{}'", self.data);
+                println!("  [HANDLER] Getting data: '{}'", self.state_ptr.data);
                 Ok(Resp {
-                    data: self.data.clone(),
+                    data: self.state_ptr.data.clone(),
                 })
             }
         }
@@ -103,18 +110,31 @@ impl Handler<SingleEventActor> for SingleEventActor {
 impl PersistentActor for SingleEventActor {
     type Persistence = FullPersistence;
     type InitParams = ();
+    type State = SingleEventActorState;
 
     fn create_initial(_params: ()) -> Self {
         println!("  [CREATE_INITIAL] Creating actor with empty data");
         Self {
-            data: String::new(),
+            state_ptr: Arc::new(SingleEventActorState::default()),
         }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        println!("  [APPLY] data: '{}' → '{}'", self.data, event.0);
-        self.data = event.0.clone();
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        println!("  [APPLY] data: '{}' → '{}'", state.data, event.0);
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).data.clone_from(&event.0);
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
@@ -197,7 +217,7 @@ async fn test_debug_event_counter_after_first_event() {
         "debug_counter",
         memory_manager.clone(),
         None,
-        SingleEventActor::create_initial(()),
+        Arc::new(SingleEventActorState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -211,7 +231,7 @@ async fn test_debug_event_counter_after_first_event() {
 
     println!("\n📝 Persist ONE event");
     store_ref
-        .ask(StoreCommand::Persist(DataSet("test".to_string())))
+        .ask(StoreCommand::Persist(Arc::new(DataSet("test".to_string()))))
         .await
         .unwrap();
 

@@ -5,12 +5,14 @@ mod error;
 mod handler;
 mod helpers;
 mod into_actor;
+mod parent_ref;
 mod path;
 mod retries;
 mod runner;
 mod sink;
 mod supervision;
 mod system;
+mod timer;
 
 pub use actor::{
     Actor, ActorContext, ActorRef, ChildAction, Event, Handler, Message,
@@ -18,16 +20,18 @@ pub use actor::{
 };
 pub use error::Error;
 pub use into_actor::{IntoActor, NotPersistentActor};
+pub use parent_ref::ParentRef;
 pub use path::ActorPath;
 
 pub use helpers::encrypted_key::EncryptedKey;
-pub use sink::{Sink, Subscriber};
+pub use sink::{RetryPolicy, Sink, SinkEntry, Subscriber};
 
 pub use retries::{RetryActor, RetryMessage};
 pub use supervision::{
-    CustomIntervalStrategy, FixedIntervalStrategy, NoIntervalStrategy,
-    RetryStrategy, Strategy, SupervisionStrategy,
+    CustomIntervalStrategy, ExponentialBackoffStrategy, IntervalStrategy,
+    NoIntervalStrategy, RetryStrategy, Strategy, SupervisionStrategy,
 };
 pub use system::{
     ActorSystem, ShutdownReason, SystemEvent, SystemRef, SystemRunner,
 };
+pub use timer::TimerKey;

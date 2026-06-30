@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, Error, Event,
-    FixedIntervalStrategy, Handler, Message, NotPersistentActor, Response,
+    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
+    Event, Handler, IntervalStrategy, Message, NotPersistentActor, Response,
     ShutdownReason, Strategy, SupervisionStrategy,
 };
 use serde::{Deserialize, Serialize};
@@ -70,11 +70,71 @@ impl StressActor {
 
 impl NotPersistentActor for StressActor {}
 
+/// Parent used by the fail/restart stress test. It restarts any child fault.
+#[derive(Clone)]
+struct StressParent {
+    child_hooks: Arc<LifecycleHooks>,
+}
+
+impl NotPersistentActor for StressParent {}
+
+#[async_trait]
+impl Actor for StressParent {
+    type Message = StressMessage;
+    type Response = StressResponse;
+    type Event = StressEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("StressParent", id = %id)
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        let child = StressActor::new(self.child_hooks.clone(), 0);
+        ctx.create_child("stress_child", child).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for StressParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: StressMessage,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<StressResponse, Error> {
+        match msg {
+            StressMessage::Ping => Ok(StressResponse::Ack),
+            StressMessage::Fail => Ok(StressResponse::Ack),
+        }
+    }
+
+    async fn on_child_fault(
+        &mut self,
+        _error: Error,
+        _ctx: &mut ActorContext<Self>,
+    ) -> ChildAction {
+        ChildAction::Restart
+    }
+}
+
 #[async_trait]
 impl Actor for StressActor {
     type Message = StressMessage;
     type Response = StressResponse;
     type Event = StressEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
 
     fn get_span(
         id: &str,
@@ -84,9 +144,10 @@ impl Actor for StressActor {
     }
 
     fn supervision_strategy() -> SupervisionStrategy {
-        SupervisionStrategy::Retry(Strategy::FixedInterval(
-            FixedIntervalStrategy::new(128, Duration::from_millis(1)),
-        ))
+        SupervisionStrategy::Retry(Strategy::Interval(IntervalStrategy::new(
+            128,
+            Duration::from_millis(1),
+        )))
     }
 
     async fn pre_start(
@@ -105,7 +166,6 @@ impl Actor for StressActor {
     async fn pre_restart(
         &mut self,
         _ctx: &mut ActorContext<Self>,
-        _error: Option<&Error>,
     ) -> Result<(), Error> {
         self.hooks.pre_restart_calls.fetch_add(1, Ordering::SeqCst);
         if self.consume_startup_failure() {
@@ -126,7 +186,7 @@ impl Actor for StressActor {
 }
 
 #[async_trait]
-impl Handler<StressActor> for StressActor {
+impl Handler<Self> for StressActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -137,10 +197,12 @@ impl Handler<StressActor> for StressActor {
             StressMessage::Ping => Ok(StressResponse::Ack),
             StressMessage::Fail => {
                 self.hooks.fail_messages.fetch_add(1, Ordering::SeqCst);
-                ctx.emit_fail(Error::FunctionalCritical {
-                    description: "forced runtime failure".to_owned(),
-                })
-                .await?;
+                ctx.get_parent::<StressParent>()
+                    .await?
+                    .emit_fail(Error::FunctionalCritical {
+                        description: "forced runtime failure".to_owned(),
+                    })
+                    .await?;
                 Ok(StressResponse::Ack)
             }
         }
@@ -261,24 +323,35 @@ async fn test_stress_concurrent_fail_restarts_and_recovers() {
     let runner_handle = tokio::spawn(async move { runner.run().await });
 
     let hooks = Arc::new(LifecycleHooks::default());
-    let actor_ref = system
-        .create_root_actor("fail-stress", StressActor::new(hooks.clone(), 2))
+    let _parent_ref = system
+        .create_root_actor(
+            "fail-stress",
+            StressParent {
+                child_hooks: hooks.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+    // Create the child that will fail and be restarted by the parent.
+    let child_ref: ActorRef<StressActor> = system
+        .get_actor(&ActorPath::from("/user/fail-stress/stress_child"))
         .await
         .unwrap();
 
     assert_eq!(hooks.pre_start_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(hooks.pre_restart_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(hooks.pre_restart_calls.load(Ordering::SeqCst), 0);
 
     const FAIL_BURST: usize = 64;
     let barrier = Arc::new(Barrier::new(FAIL_BURST));
     let mut joins = Vec::with_capacity(FAIL_BURST);
 
     for _ in 0..FAIL_BURST {
-        let actor_ref = actor_ref.clone();
+        let child_ref = child_ref.clone();
         let barrier = barrier.clone();
         joins.push(tokio::spawn(async move {
             barrier.wait().await;
-            actor_ref.tell(StressMessage::Fail).await
+            child_ref.tell(StressMessage::Fail).await
         }));
     }
 
@@ -287,10 +360,10 @@ async fn test_stress_concurrent_fail_restarts_and_recovers() {
     }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let path = ActorPath::from("/user/fail-stress");
+    let path = ActorPath::from("/user/fail-stress/stress_child");
     loop {
         if system.get_actor::<StressActor>(&path).await.is_ok()
-            && actor_ref.ask(StressMessage::Ping).await
+            && child_ref.ask(StressMessage::Ping).await
                 == Ok(StressResponse::Ack)
         {
             break;
@@ -302,7 +375,7 @@ async fn test_stress_concurrent_fail_restarts_and_recovers() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    assert!(hooks.pre_restart_calls.load(Ordering::SeqCst) >= 3);
+    assert!(hooks.pre_restart_calls.load(Ordering::SeqCst) >= 1);
     assert!(hooks.fail_messages.load(Ordering::SeqCst) > 0);
     assert!(system.get_actor::<StressActor>(&path).await.is_ok());
 

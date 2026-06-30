@@ -1,5 +1,6 @@
 //! Error types for the store system.
 
+use ave_actors_actor::Error as ActorError;
 use std::fmt;
 use thiserror::Error;
 
@@ -10,6 +11,7 @@ pub enum StoreOperation {
     Persist,
     PersistLight,
     PersistFull,
+    PersistBatch,
     Snapshot,
     Recover,
     ApplyEvent,
@@ -55,6 +57,7 @@ impl fmt::Display for StoreOperation {
             Self::Persist => "persist",
             Self::PersistLight => "persist_light",
             Self::PersistFull => "persist_full",
+            Self::PersistBatch => "persist_batch",
             Self::Snapshot => "snapshot",
             Self::Recover => "recover",
             Self::ApplyEvent => "apply_event",
@@ -120,9 +123,12 @@ pub enum Error {
     ///
     /// `operation` identifies which operation failed (e.g. `persist`, `snapshot`);
     /// `reason` contains the underlying error message.
+    /// `source` optionally holds the original [`ActorError`] when the failure
+    /// originated in actor logic (e.g. during recovery replay).
     #[error("store operation failed: {operation} - {reason}")]
     Store {
         operation: StoreOperation,
         reason: String,
+        source: Option<ActorError>,
     },
 }

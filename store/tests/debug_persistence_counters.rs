@@ -15,20 +15,21 @@ use ave_actors_actor::{
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
+// State struct
 #[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    borsh::BorshSerialize,
-    borsh::BorshDeserialize,
-    Default,
+    Debug, Clone, Default, borsh::BorshSerialize, borsh::BorshDeserialize,
 )]
-struct DebugActor {
+struct DebugActorState {
     value: i32,
+}
+
+#[derive(Debug)]
+struct DebugActor {
+    state_ptr: Arc<DebugActorState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +67,11 @@ impl Actor for DebugActor {
     type Message = DebugMessage;
     type Response = DebugResponse;
     type Event = DebugEvent;
+    type SinkEvent = Self::Event;
+
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
+
     fn get_span(
         id: &str,
         _parent_span: Option<tracing::Span>,
@@ -75,16 +81,18 @@ impl Actor for DebugActor {
 }
 
 #[async_trait]
-impl Handler<DebugActor> for DebugActor {
+impl Handler<Self> for DebugActor {
     async fn handle_message(
         &mut self,
         _sender: ave_actors_actor::ActorPath,
         msg: DebugMessage,
-        _ctx: &mut ActorContext<DebugActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<DebugResponse, ActorError> {
         match msg {
             DebugMessage::Add(_) => Ok(DebugResponse::Success),
-            DebugMessage::GetValue => Ok(DebugResponse::Value(self.value)),
+            DebugMessage::GetValue => {
+                Ok(DebugResponse::Value(self.state_ptr.value))
+            }
         }
     }
 }
@@ -93,16 +101,31 @@ impl Handler<DebugActor> for DebugActor {
 impl PersistentActor for DebugActor {
     type Persistence = LightPersistence;
     type InitParams = ();
+    type State = DebugActorState;
 
     fn create_initial(_: ()) -> Self {
-        Self::default()
+        Self {
+            state_ptr: Arc::new(DebugActorState::default()),
+        }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
         println!("  [DEBUG] Applying event with delta: {}", event.delta);
-        self.value += event.delta;
-        println!("  [DEBUG] State after apply: value={}", self.value);
-        Ok(())
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).value += event.delta;
+        println!("  [DEBUG] State after apply: value={}", new_state.value);
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
@@ -121,7 +144,7 @@ async fn test_debug_light_persistence_counters() {
         "test_light",
         memory_manager.clone(),
         None,
-        DebugActor::create_initial(()),
+        Arc::new(DebugActorState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -137,12 +160,12 @@ async fn test_debug_light_persistence_counters() {
     }
 
     println!("\n=== STEP 2: Persist first event with PersistLight ===");
-    let actor = DebugActor { value: 0 };
+    let state = Arc::new(DebugActorState { value: 0 });
     let event = DebugEvent { delta: 10 };
 
-    println!("Before persist: actor.value = {}", actor.value);
+    println!("Before persist: actor.value = {}", state.value);
     let result = store_ref
-        .ask(StoreCommand::PersistLight(event, actor.clone()))
+        .ask(StoreCommand::PersistLight(Arc::new(event), state))
         .await
         .unwrap();
     match result {
@@ -169,7 +192,7 @@ async fn test_debug_light_persistence_counters() {
         "test_light",
         memory_manager.clone(),
         None,
-        DebugActor::create_initial(()),
+        Arc::new(DebugActorState::default()),
     )
     .unwrap();
     let store_ref2 = system.create_root_actor("store2", store2).await.unwrap();

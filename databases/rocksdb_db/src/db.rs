@@ -30,7 +30,6 @@ use std::{
 /// - **Connection**: Thread-safe shared DB instance using Arc<DB>
 /// - **Column Families**: Separate namespaces for different actors
 ///
-#[derive(Clone)]
 pub struct RocksDbManager {
     /// RocksDB configuration options.
     opts: Options,
@@ -79,7 +78,7 @@ impl RocksDbManager {
                 error!(path = %path.display(), error = %e, "Failed to create RocksDB directory");
                 Error::CreateStore {
                     reason: format!(
-                    "fail RockDB create directory: {}",
+                    "fail RocksDB create directory: {}",
                     e
                 ),
                 }
@@ -96,19 +95,19 @@ impl RocksDbManager {
         apply_common_tuning(&mut options);
         apply_tuning(&mut options, ram_mb, cores);
 
-        let cfs = match DB::list_cf(&options, path) {
-            Ok(cf_names) => {
+        let cfs = DB::list_cf(&options, path).map_or_else(
+            |_| {
+                debug!("No existing column families, using default");
+                vec!["default".to_string()]
+            },
+            |cf_names| {
                 debug!(
                     count = cf_names.len(),
                     "Found existing column families"
                 );
                 cf_names
-            }
-            Err(_) => {
-                debug!("No existing column families, using default");
-                vec!["default".to_string()]
-            }
-        };
+            },
+        );
 
         // Build descriptors for each existing column family.
         let cf_opts = options.clone();
@@ -122,7 +121,7 @@ impl RocksDbManager {
         let db = DB::open_cf_descriptors(&options, path, cf_descriptors)
             .map_err(|e| {
                 error!(path = %path.display(), error = %e, "Failed to open RocksDB");
-                Error::CreateStore { reason: format!("Can not open RockDB: {}", e) }
+                Error::CreateStore { reason: format!("Can not open RocksDB: {}", e) }
             })?;
 
         debug!("RocksDB database manager created successfully");
@@ -132,6 +131,11 @@ impl RocksDbManager {
             db: Arc::new(db),
             strong_durability,
         })
+    }
+
+    #[cfg(test)]
+    fn raw_db(&self) -> Arc<DB> {
+        Arc::clone(&self.db)
     }
 }
 
@@ -165,7 +169,7 @@ fn apply_tuning(options: &mut Options, ram_mb: u64, cores: usize) {
     // ── Parallelism ────────────────────────────────────────────────────────────
     // Cap at half the cores (floor 1, ceiling 4) so compaction threads don't
     // starve libp2p and the actor runtime on the same machine.
-    let parallelism = ((cores / 2) as i32).max(1).min(4);
+    let parallelism = ((cores / 2) as i32).clamp(1, 4);
     options.increase_parallelism(parallelism);
     options.set_max_background_jobs(parallelism);
 
@@ -173,9 +177,8 @@ fn apply_tuning(options: &mut Options, ram_mb: u64, cores: usize) {
     let budget = ram_mb * 1024 * 1024 * 5 / 100; // bytes
 
     // Block cache: 40 % of budget, floor 4 MB, cap 512 MB
-    let cache_bytes = (budget * 40 / 100)
-        .max(4 * 1024 * 1024)
-        .min(512 * 1024 * 1024);
+    let cache_bytes =
+        (budget * 40 / 100).clamp(4 * 1024 * 1024, 512 * 1024 * 1024);
 
     // Write buffer count: scales with RAM
     let wb_count: u64 = match ram_mb {
@@ -187,13 +190,11 @@ fn apply_tuning(options: &mut Options, ram_mb: u64, cores: usize) {
 
     // Write buffer size: 40 % of budget across all buffers, floor 4 MB, cap 256 MB
     let wb_size = (budget * 40 / 100 / wb_count)
-        .max(4 * 1024 * 1024)
-        .min(256 * 1024 * 1024);
+        .clamp(4 * 1024 * 1024, 256 * 1024 * 1024);
 
     // WAL: 20 % of budget, floor 8 MB, cap 512 MB
-    let wal_bytes = (budget * 20 / 100)
-        .max(8 * 1024 * 1024)
-        .min(512 * 1024 * 1024);
+    let wal_bytes =
+        (budget * 20 / 100).clamp(8 * 1024 * 1024, 512 * 1024 * 1024);
 
     let merge: i32 = if wb_count <= 2 { 1 } else { 2 };
 
@@ -243,7 +244,7 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         Ok(RocksDbStore {
             name: name.to_owned(),
             prefix: prefix.to_owned(),
-            store: self.db.clone(),
+            store: Arc::clone(&self.db),
             strong_durability: self.strong_durability,
         })
     }
@@ -258,12 +259,12 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         Ok(RocksDbStore {
             name: name.to_owned(),
             prefix: prefix.to_owned(),
-            store: self.db.clone(),
+            store: Arc::clone(&self.db),
             strong_durability: self.strong_durability,
         })
     }
 
-    fn stop(&mut self) -> Result<(), Error> {
+    fn stop(self) -> Result<(), Error> {
         debug!("Stopping RocksDB manager, flushing memtables and WAL");
 
         // Sync WAL first: ensures all committed writes survive even if the
@@ -271,6 +272,7 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         self.db.flush_wal(true).map_err(|e| {
             error!(error = %e, "Failed to flush WAL on stop");
             Error::Store {
+                source: None,
                 operation: StoreOperation::FlushWal,
                 reason: format!("{:?}", e),
             }
@@ -281,17 +283,21 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         // WAL sync above already guarantees durability.
         let cf_names =
             DB::list_cf(&self.opts, &self.path).map_err(|e| Error::Store {
+                source: None,
                 operation: StoreOperation::ListCf,
                 reason: format!("{:?}", e),
             })?;
         for name in &cf_names {
-            if let Some(handle) = self.db.cf_handle(name) {
-                if let Err(e) = self.db.flush_cf(&handle) {
-                    warn!(cf = name, error = %e, "Failed to flush column family on stop");
-                }
+            if let Some(handle) = self.db.cf_handle(name)
+                && let Err(e) = self.db.flush_cf(&handle)
+            {
+                warn!(cf = name, error = %e, "Failed to flush column family on stop");
             }
         }
 
+        // Dropping `self` (and therefore `self.db`) releases the last strong
+        // reference held by this manager, which closes RocksDB and frees the
+        // file lock.
         debug!("RocksDB stop complete");
         Ok(())
     }
@@ -338,15 +344,18 @@ impl State for RocksDbStore {
                         reason: format!("{:?}", e),
                     }
                 })?;
-            match result {
-                Some(value) => Ok(value),
-                _ => Err(Error::EntryNotFound {
-                    key: self.prefix.clone(),
-                }),
-            }
+            result.map_or_else(
+                || {
+                    Err(Error::EntryNotFound {
+                        key: self.prefix.clone(),
+                    })
+                },
+                Ok,
+            )
         } else {
             error!(cf = %self.name, "Column family not found for state get");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -363,6 +372,7 @@ impl State for RocksDbStore {
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to put state");
                     Error::Store {
+                        source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
@@ -370,6 +380,7 @@ impl State for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for state put");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -402,6 +413,7 @@ impl State for RocksDbStore {
                 .map_err(|e| {
                     warn!(cf = %self.name, error = %e, "Failed to delete state");
                     Error::Store {
+                source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
@@ -409,6 +421,7 @@ impl State for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for state delete");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -426,6 +439,7 @@ impl State for RocksDbStore {
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to purge state");
                     Error::Store {
+                source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
@@ -433,6 +447,7 @@ impl State for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for state purge");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -463,13 +478,12 @@ impl Collection for RocksDbStore {
                     error!(cf = %self.name, key = %full_key, error = %e, "Failed to get collection entry");
                     Error::Get { key: full_key.clone(), reason: format!("{:?}", e) }
                 })?;
-            match result {
-                Some(value) => Ok(value),
-                _ => Err(Error::EntryNotFound { key: full_key }),
-            }
+            result
+                .map_or_else(|| Err(Error::EntryNotFound { key: full_key }), Ok)
         } else {
             error!(cf = %self.name, "Column family not found for collection get");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -487,6 +501,7 @@ impl Collection for RocksDbStore {
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to put collection entry");
                     Error::Store {
+                source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
@@ -494,6 +509,7 @@ impl Collection for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for collection put");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -526,6 +542,7 @@ impl Collection for RocksDbStore {
                 .map_err(|e| {
                     warn!(cf = %self.name, error = %e, "Failed to delete collection entry");
                     Error::Store {
+                source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
@@ -533,6 +550,7 @@ impl Collection for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for collection delete");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -555,6 +573,7 @@ impl Collection for RocksDbStore {
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to purge collection");
                     Error::Store {
+                source: None,
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
@@ -562,6 +581,7 @@ impl Collection for RocksDbStore {
         } else {
             error!(cf = %self.name, "Column family not found for collection purge");
             Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -579,6 +599,7 @@ impl Collection for RocksDbStore {
         let Some(_handle) = self.store.cf_handle(&self.name) else {
             error!(cf = %self.name, "Column family not found for collection iter");
             return Err(Error::Store {
+                source: None,
                 operation: StoreOperation::ColumnAccess,
                 reason: "RocksDB column for the store does not exist."
                     .to_owned(),
@@ -589,7 +610,63 @@ impl Collection for RocksDbStore {
             self.name.clone(),
             self.prefix.clone(),
             reverse,
-        )))
+        )?))
+    }
+
+    fn iter_range<'a>(
+        &'a self,
+        start: &str,
+        end: &str,
+        reverse: bool,
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>,
+        Error,
+    > {
+        let Some(_handle) = self.store.cf_handle(&self.name) else {
+            error!(cf = %self.name, "Column family not found for collection iter_range");
+            return Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                reason: "RocksDB column for the store does not exist."
+                    .to_owned(),
+            });
+        };
+        Ok(Box::new(RocksDbRangeIterator::new(
+            &self.store,
+            self.name.clone(),
+            self.prefix.clone(),
+            start,
+            end,
+            reverse,
+        )?))
+    }
+
+    fn del_range(&mut self, start: &str, end: &str) -> Result<(), Error> {
+        if let Some(handle) = self.store.cf_handle(&self.name) {
+            let wopts = write_options(self.strong_durability);
+            let start_key = format!("{}.{}", self.prefix, start).into_bytes();
+            let mut end_key = format!("{}.{}", self.prefix, end).into_bytes();
+            end_key.push(0xFF);
+            debug!(cf = %self.name, "Deleting collection range");
+            self.store
+                .delete_range_cf_opt(&handle, start_key, end_key, &wopts)
+                .map_err(|e| {
+                    error!(cf = %self.name, error = %e, "Failed to delete collection range");
+                    Error::Store {
+                source: None,
+                        operation: StoreOperation::RocksdbOperation,
+                        reason: format!("{:?}", e),
+                    }
+                })
+        } else {
+            error!(cf = %self.name, "Column family not found for collection del_range");
+            Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                reason: "RocksDB column for the store does not exist."
+                    .to_owned(),
+            })
+        }
     }
 }
 
@@ -604,14 +681,19 @@ impl<'a> RocksDbIterator<'a> {
         name: String,
         prefix: String,
         reverse: bool,
-    ) -> Self {
+    ) -> Result<Self, Error> {
         let prefix_dot = format!("{}.", prefix).into_bytes();
         let mut upper_bound = prefix_dot.clone();
         upper_bound.push(0xFF);
 
-        let handle = store
-            .cf_handle(&name)
-            .expect("RocksDB column for the store does not exist.");
+        let Some(handle) = store.cf_handle(&name) else {
+            return Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                reason: "RocksDB column for the store does not exist."
+                    .to_owned(),
+            });
+        };
 
         let mode = if reverse {
             IteratorMode::From(&upper_bound, Direction::Reverse)
@@ -620,7 +702,7 @@ impl<'a> RocksDbIterator<'a> {
         };
 
         let iter = store.iterator_cf(&handle, mode);
-        Self { prefix_dot, iter }
+        Ok(Self { prefix_dot, iter })
     }
 }
 
@@ -628,47 +710,136 @@ impl Iterator for RocksDbIterator<'_> {
     type Item = Result<(String, Vec<u8>), Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        for item in self.iter.by_ref() {
-            match item {
-                Ok((key, value)) => {
-                    if !key.starts_with(&self.prefix_dot) {
-                        return None;
+        let item = self.iter.next()?;
+        match item {
+            Ok((key, value)) => {
+                if !key.starts_with(&self.prefix_dot) {
+                    return None;
+                }
+                let suffix = &key[self.prefix_dot.len()..];
+                let key_str = match std::str::from_utf8(suffix) {
+                    Ok(s) => s.to_owned(),
+                    Err(error) => {
+                        return Some(Err(Error::Get {
+                            key: String::from_utf8_lossy(&key).into_owned(),
+                            reason: format!("{}", error),
+                        }));
                     }
-                    let suffix = &key[self.prefix_dot.len()..];
-                    let key_str = match String::from_utf8(suffix.to_vec()) {
-                        Ok(key_str) => key_str,
-                        Err(error) => {
-                            return Some(Err(Error::Get {
-                                key: String::from_utf8_lossy(&key).into_owned(),
-                                reason: format!("{}", error),
-                            }));
-                        }
-                    };
-                    return Some(Ok((key_str, value.to_vec())));
-                }
-                Err(e) => {
-                    error!(error = %e, "RocksDB iteration error");
-                    return Some(Err(Error::Get {
-                        key: String::from_utf8_lossy(&self.prefix_dot)
-                            .into_owned(),
-                        reason: format!("{}", e),
-                    }));
-                }
+                };
+                Some(Ok((key_str, value.to_vec())))
+            }
+            Err(e) => {
+                error!(error = %e, "RocksDB iteration error");
+                Some(Err(Error::Get {
+                    key: String::from_utf8_lossy(&self.prefix_dot).into_owned(),
+                    reason: format!("{}", e),
+                }))
             }
         }
-        None
+    }
+}
+
+pub struct RocksDbRangeIterator<'a> {
+    start_key: Vec<u8>,
+    end_key: Vec<u8>,
+    prefix_dot: Vec<u8>,
+    reverse: bool,
+    iter: DBIteratorWithThreadMode<'a, DB>,
+}
+
+impl<'a> RocksDbRangeIterator<'a> {
+    pub fn new(
+        store: &'a Arc<DB>,
+        name: String,
+        prefix: String,
+        start: &str,
+        end: &str,
+        reverse: bool,
+    ) -> Result<Self, Error> {
+        let prefix_dot = format!("{}.", prefix).into_bytes();
+        let start_key = format!("{}.{}", prefix, start).into_bytes();
+        let end_key = format!("{}.{}", prefix, end).into_bytes();
+
+        let Some(handle) = store.cf_handle(&name) else {
+            return Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                reason: "RocksDB column for the store does not exist."
+                    .to_owned(),
+            });
+        };
+
+        let mode = if reverse {
+            IteratorMode::From(&end_key, Direction::Reverse)
+        } else {
+            IteratorMode::From(&start_key, Direction::Forward)
+        };
+
+        let iter = store.iterator_cf(&handle, mode);
+        Ok(Self {
+            start_key,
+            end_key,
+            prefix_dot,
+            reverse,
+            iter,
+        })
+    }
+}
+
+impl Iterator for RocksDbRangeIterator<'_> {
+    type Item = Result<(String, Vec<u8>), Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.iter.next()?;
+        match item {
+            Ok((key, value)) => {
+                if !key.starts_with(&self.prefix_dot) {
+                    return None;
+                }
+                if !self.reverse && key.as_ref() > self.end_key.as_slice() {
+                    return None;
+                }
+                if self.reverse && key.as_ref() < self.start_key.as_slice() {
+                    return None;
+                }
+                let suffix = &key[self.prefix_dot.len()..];
+                let key_str = match std::str::from_utf8(suffix) {
+                    Ok(s) => s.to_owned(),
+                    Err(error) => {
+                        return Some(Err(Error::Get {
+                            key: String::from_utf8_lossy(&key).into_owned(),
+                            reason: format!("{}", error),
+                        }));
+                    }
+                };
+                Some(Ok((key_str, value.to_vec())))
+            }
+            Err(e) => {
+                error!(error = %e, "RocksDB range iteration error");
+                Some(Err(Error::Get {
+                    key: String::from_utf8_lossy(&self.prefix_dot).into_owned(),
+                    reason: format!("{}", e),
+                }))
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    /// Retains every `TempDir` created during tests so they are cleaned up
+    /// automatically when the test process exits.
+    static TEMP_DIRS: Mutex<Vec<tempfile::TempDir>> = Mutex::new(Vec::new());
+
     impl Default for RocksDbManager {
         fn default() -> Self {
             let dir = tempfile::tempdir()
                 .expect("Can not create temporal directory.");
-            let path = dir.keep();
-            RocksDbManager::new(&path, false, None)
-                .expect("Can not create the database.")
+            let path = dir.path().to_path_buf();
+            TEMP_DIRS.lock().unwrap().push(dir);
+            Self::new(&path, false, None).expect("Can not create the database.")
         }
     }
 
@@ -676,5 +847,171 @@ mod tests {
     use ave_actors_store::test_store_trait;
     test_store_trait! {
         unit_test_rocksdb_manager:crate::db::RocksDbManager:RocksDbStore
+    }
+
+    #[test]
+    fn test_missing_cf_state_and_collection() {
+        let manager = RocksDbManager::default();
+        let mut store = RocksDbStore {
+            name: "no_such_cf".to_owned(),
+            prefix: "pref".to_owned(),
+            store: manager.raw_db(),
+            strong_durability: false,
+        };
+
+        assert!(matches!(
+            State::get(&store),
+            Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            State::put(&mut store, b"x"),
+            Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            State::del(&mut store),
+            Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            State::purge(&mut store),
+            Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            Collection::last(&store),
+            Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::get(&store, "k"),
+            Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::put(&mut store, "k", b"v"),
+            Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::del(&mut store, "k"),
+            Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::purge(&mut store),
+            Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::iter(&store, false),
+            Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::iter_range(&store, "a", "z", false),
+            Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Collection::del_range(&mut store, "a", "z"),
+            Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_missing_cf_iterators() {
+        let manager = RocksDbManager::default();
+        let db = manager.raw_db();
+        assert!(
+            RocksDbIterator::new(
+                &db,
+                "missing".to_owned(),
+                "p".to_owned(),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            RocksDbRangeIterator::new(
+                &db,
+                "missing".to_owned(),
+                "p".to_owned(),
+                "a",
+                "z",
+                false
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_iterator_invalid_utf8() {
+        let manager = RocksDbManager::default();
+        let mut store = manager.create_collection("c", "pref").unwrap();
+        Collection::put(&mut store, "a", b"1").unwrap();
+
+        let db = manager.raw_db();
+        let handle = db.cf_handle("c").unwrap();
+        let bad_key = b"pref.\xFE";
+        db.put_cf(&handle, bad_key, b"bad").unwrap();
+
+        let mut iter = store.iter(false).unwrap();
+        assert_eq!(
+            iter.next().unwrap().unwrap(),
+            ("a".to_string(), b"1".to_vec())
+        );
+        let err = iter.next().unwrap().unwrap_err();
+        assert!(matches!(err, Error::Get { .. }));
+
+        let mut iter = store.iter(true).unwrap();
+        let err = iter.next().unwrap().unwrap_err();
+        assert!(matches!(err, Error::Get { .. }));
+    }
+
+    #[test]
+    fn test_ensure_cf_null_name_fails() {
+        let manager = RocksDbManager::default();
+        let result = manager.ensure_cf("test\0name");
+        assert!(result.is_err());
     }
 }

@@ -7,27 +7,34 @@ use crate::{
         Actor, ActorContext, ActorLifecycle, ActorRef, ChildAction, ChildError,
         ChildErrorReceiver, ChildErrorSender, Handler,
     },
-    handler::{BoxedMessageHandler, HandleHelper, MailboxReceiver, mailbox},
+    handler::{Envelope, HandleHelper, MailboxReceiver, mailbox},
+    sink::Sink,
     supervision::{RetryStrategy, SupervisionStrategy},
-    system::{SystemEvent, SystemRef},
+    system::SystemRef,
 };
 
-use std::time::Duration;
+use dashmap::DashMap;
+use std::{
+    any::Any,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::{
     select,
-    sync::{
-        broadcast::{self, Sender as EventSender},
-        mpsc, oneshot,
-    },
+    sync::{mpsc, oneshot},
 };
 use tracing::{debug, error, warn};
 
-/// Inner sender and receiver types.
-pub type InnerSender<A> = mpsc::Sender<InnerAction<A>>;
-pub type InnerReceiver<A> = mpsc::Receiver<InnerAction<A>>;
+/// Signal received through the actor's stop channel.
+pub enum StopSignal {
+    /// Normal stop request with optional acknowledgement sender.
+    Stop(Option<oneshot::Sender<()>>),
+    /// Stop caused by a fatal fault reported to the parent.
+    Fault(Box<dyn Any + Send + Sync>, Option<oneshot::Sender<()>>),
+}
 
-pub type StopReceiver = mpsc::Receiver<Option<oneshot::Sender<()>>>;
-pub type StopSender = mpsc::Sender<Option<oneshot::Sender<()>>>;
+pub type StopReceiver = mpsc::Receiver<StopSignal>;
+pub type StopSender = mpsc::Sender<StopSignal>;
 
 /// Stop channel plus optional acknowledgement timeout for this actor.
 #[derive(Clone)]
@@ -62,20 +69,20 @@ pub struct ActorRunner<A: Actor> {
     supervision_strategy: SupervisionStrategy,
     receiver: MailboxReceiver<A>,
 
-    event_sender: EventSender<A::Event>,
-
     // Root actors are stopped by operators/system shutdown; children by their parent.
     stop_receiver: StopReceiver,
     // Shared with children so they can report errors/faults back to this actor.
-    error_sender: ChildErrorSender,
-    // Used to escalate faults to the parent when this actor is a child.
-    parent_sender: Option<ChildErrorSender>,
+    error_sender: ChildErrorSender<A::ChildError, A::ChildFault>,
+    // Parent information passed by this actor's parent; used by `get_parent` and
+    // to report faults.
+    parent_info: Option<crate::parent_ref::ParentInfo>,
+    // Fault received through StopSignal::Fault; reported to the parent in Failed.
+    pending_fault: Option<Box<dyn Any + Send + Sync>>,
     // Receives error/fault notifications from child actors.
-    error_receiver: ChildErrorReceiver,
+    error_receiver: ChildErrorReceiver<A::ChildError, A::ChildFault>,
 
-    inner_sender: InnerSender<A>,
-    inner_receiver: InnerReceiver<A>,
     stop_signal: bool,
+    sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
 }
 
 impl<A> ActorRunner<A>
@@ -86,20 +93,20 @@ where
     pub(crate) fn create(
         path: ActorPath,
         actor: A,
-        parent_sender: Option<ChildErrorSender>,
+        parent_info: Option<crate::parent_ref::ParentInfo>,
     ) -> (Self, ActorRef<A>, StopSender) {
         let (sender, receiver) = mailbox();
         let (stop_sender, stop_receiver) = mpsc::channel(4);
-        let (error_sender, error_receiver) = mpsc::channel(256);
-        let (event_sender, event_receiver) = broadcast::channel(1024);
-        let (inner_sender, inner_receiver) = mpsc::channel(1024);
+        let (error_sender, error_receiver) =
+            crate::parent_ref::child_error_channel();
         let helper = HandleHelper::new(sender);
+        let sinks = Arc::new(DashMap::<String, Sink<A::SinkEvent>>::new());
 
         let actor_ref = ActorRef::new(
-            path.clone(),
+            Arc::new(path.clone()),
             helper,
             stop_sender.clone(),
-            event_receiver,
+            sinks.clone(),
         );
         let runner: Self = Self {
             path,
@@ -108,13 +115,12 @@ where
             supervision_strategy: A::supervision_strategy(),
             receiver,
             stop_receiver,
-            event_sender,
             error_sender,
-            parent_sender,
+            parent_info,
+            pending_fault: None,
             error_receiver,
-            inner_sender,
-            inner_receiver,
             stop_signal: false,
+            sinks,
         };
         (runner, actor_ref, stop_sender)
     }
@@ -124,18 +130,29 @@ where
         &mut self,
         system: SystemRef,
         stop_sender: StopSender,
-        mut sender: Option<oneshot::Sender<bool>>,
+        mut sender: Option<oneshot::Sender<Result<(), Error>>>,
         span: tracing::Span,
     ) {
-        // Create the actor context.
-        let mut ctx: ActorContext<A> = ActorContext::new(
-            stop_sender,
-            self.path.clone(),
+        let timer_scheduler = crate::timer::TimerScheduler::<A>::new(
             system.clone(),
-            self.error_sender.clone(),
-            self.inner_sender.clone(),
-            span,
+            self.path.clone(),
+            A::max_timers(),
         );
+        let spawned_tasks = Arc::new(Mutex::new(Vec::new()));
+
+        // Create the actor context.
+        let mut ctx: ActorContext<A> =
+            ActorContext::new(crate::actor::ActorContextParams {
+                stop: stop_sender,
+                path: self.path.clone(),
+                system,
+                error_sender: self.error_sender.clone(),
+                parent_info: self.parent_info.clone(),
+                timer_scheduler,
+                sinks: self.sinks.clone(),
+                spawned_tasks: spawned_tasks.clone(),
+                span,
+            });
 
         // Main loop of the actor.
         let mut retries = 0;
@@ -144,6 +161,7 @@ where
             match self.lifecycle {
                 // State: CREATED
                 ActorLifecycle::Created => {
+                    ctx.timer_scheduler.set_accepting(true);
                     // Pre-start hook.
                     match self.actor.pre_start(&mut ctx).await {
                         Ok(_) => {
@@ -152,25 +170,33 @@ where
                         }
                         Err(err) => {
                             error!(error = %err, "Actor failed to start");
-                            ctx.set_error(err);
-                            self.lifecycle = ActorLifecycle::Failed;
+                            ctx.set_startup_error(err);
+                            if self.parent_info.is_some() {
+                                // Child actor: notify synchronously via the
+                                // init oneshot only; the parent already sees
+                                // the failure through create_child Err.
+                                self.lifecycle = ActorLifecycle::Terminated;
+                            } else {
+                                self.lifecycle = ActorLifecycle::Failed;
+                            }
                         }
                     }
                 }
                 // State: STARTED
                 ActorLifecycle::Started => {
                     if let Some(sender) = sender.take()
-                        && let Err(err) = sender.send(true)
+                        && let Err(err) = sender.send(Ok(()))
                     {
-                        error!(error = %err, "Failed to send start signal");
+                        error!(error = ?err, "Failed to send start signal");
                     }
                     pending_stop_ack = self.run(&mut ctx).await;
-                    if ctx.error().is_some() {
+                    if self.pending_fault.is_some() {
                         self.lifecycle = ActorLifecycle::Failed;
                     }
                 }
                 // State: RESTARTED
                 ActorLifecycle::Restarted => {
+                    ctx.timer_scheduler.set_accepting(true);
                     // Apply supervision strategy.
                     self.apply_supervision_strategy(&mut ctx, &mut retries)
                         .await;
@@ -189,50 +215,46 @@ where
                 // State: FAILED
                 ActorLifecycle::Failed => {
                     warn!("Actor failed");
-                    if self.parent_sender.is_none() {
+                    if self.parent_info.is_none() {
                         self.lifecycle = ActorLifecycle::Restarted;
                     } else {
-                        let error = ctx.error().unwrap_or_else(|| Error::FunctionalCritical {
-                            description: format!(
-                                "Actor '{}' entered Failed without error context",
-                                self.path
-                            ),
-                        });
+                        let fault = self.pending_fault.take().unwrap_or_else(
+                            || {
+                                Box::new(Error::FunctionalCritical {
+                                    description: format!(
+                                        "Actor '{}' entered Failed without fault context",
+                                        self.path
+                                    ),
+                                }) as Box<dyn Any + Send + Sync>
+                            },
+                        );
 
-                        let (action_sender, action_receiver) =
-                            oneshot::channel();
-                        if let Some(parent_sender) = self.parent_sender.as_mut()
-                        {
-                            if let Err(err) = parent_sender
-                                .send(ChildError::Fault {
-                                    error,
-                                    sender: action_sender,
-                                })
-                                .await
+                        if let Some(parent_info) = self.parent_info.as_ref() {
+                            match parent_info.notifier.notify_fault(fault).await
                             {
-                                error!(error = %err, "Failed to send fail to parent");
-                                self.lifecycle = ActorLifecycle::Terminated;
-                            } else {
-                                match action_receiver.await {
-                                    Ok(ChildAction::Stop) => {
-                                        self.lifecycle =
-                                            ActorLifecycle::Terminated;
+                                Ok(ChildAction::Stop) => {
+                                    if let Some(ack) = pending_stop_ack.take() {
+                                        let _ = ack.send(());
                                     }
-                                    Ok(
-                                        ChildAction::Restart
-                                        | ChildAction::Delegate,
-                                    ) => {
-                                        debug!(
-                                            "Parent requested actor restart"
-                                        );
-                                        self.lifecycle =
-                                            ActorLifecycle::Restarted;
+                                    ctx.remove_actor().await;
+                                    self.receiver.close();
+                                    self.lifecycle = ActorLifecycle::Terminated;
+                                }
+                                Ok(
+                                    ChildAction::Restart
+                                    | ChildAction::Delegate,
+                                ) => {
+                                    debug!("Parent requested actor restart");
+                                    self.lifecycle = ActorLifecycle::Restarted;
+                                }
+                                Err(err) => {
+                                    error!(error = %err, "Failed to send fail to parent");
+                                    if let Some(ack) = pending_stop_ack.take() {
+                                        let _ = ack.send(());
                                     }
-                                    Err(err) => {
-                                        error!(error = %err, "Failed to receive parent action");
-                                        self.lifecycle =
-                                            ActorLifecycle::Terminated;
-                                    }
+                                    ctx.remove_actor().await;
+                                    self.receiver.close();
+                                    self.lifecycle = ActorLifecycle::Terminated;
                                 }
                             }
                         }
@@ -241,10 +263,20 @@ where
                 // State: TERMINATED
                 ActorLifecycle::Terminated => {
                     debug!("Actor terminated");
+                    ctx.timer_scheduler.shutdown();
+                    ctx.abort_spawned_tasks();
+                    let init_err = ctx.startup_error().unwrap_or_else(|| {
+                        Error::FunctionalCritical {
+                            description: format!(
+                                "Actor '{}' terminated without startup error context",
+                                self.path
+                            ),
+                        }
+                    });
                     if let Some(sender) = sender.take()
-                        && let Err(err) = sender.send(false)
+                        && let Err(err) = sender.send(Err(init_err))
                     {
-                        error!(error = %err, "Failed to send termination signal");
+                        error!(error = ?err, "Failed to send termination signal");
                     }
                     break;
                 }
@@ -265,35 +297,66 @@ where
                 biased;
 
                 stop = self.stop_receiver.recv() => {
-                    let restarting = self.should_restart_after_stop(ctx);
+                    let (ack, is_fault) = match stop {
+                        Some(StopSignal::Stop(ack)) => (ack, false),
+                        Some(StopSignal::Fault(fault, ack)) => {
+                            warn!("Actor received fatal fault, stopping");
+                            self.pending_fault = Some(fault);
+                            (ack, true)
+                        }
+                        None => {
+                            ctx.stop(None).await;
+                            self.stop_signal = true;
+                            continue;
+                        }
+                    };
 
-                    // 1. Pre-stop hook.
+                    // 1. Cancel pending timers so they cannot fire while the
+                    // actor is shutting down or after it restarts.
+                    ctx.timer_scheduler.cancel_all();
+
+                    // 2. Abort tasks spawned via ActorContext::spawn so they
+                    // do not outlive the actor.
+                    ctx.abort_spawned_tasks();
+
+                    // 3. Pre-stop hook.
                     if let Err(e) = self.actor.pre_stop(ctx).await {
                         error!(error = %e, "pre_stop failed");
                     }
 
-                    // 2. Drain mailbox: process critical, discard non-critical.
-                    self.drain_mailbox(ctx, !restarting).await;
-
-                    // 3. Drain internal actions emitted by mailbox handlers
-                    // and pre_stop hooks before continuing shutdown.
-                    self.drain_inner_actions(ctx).await;
+                    // 3. Drain mailbox: process critical, discard non-critical.
+                    // For a fault we do not close the mailbox yet; the parent may
+                    // decide to restart the actor, in which case message delivery
+                    // must resume on the same channel.
+                    self.drain_mailbox(ctx, !is_fault).await;
 
                     // 4. Stop children.
-                    ctx.stop_childs().await;
+                    ctx.stop_children().await;
 
-                    // Keep the actor registered while it restarts so lookups by path
-                    // and pre-existing ActorRef handles remain valid.
-                    if !restarting {
+                    // 5. Drain sinks: give them a grace period to finish
+                    // pending events.
+                    if !is_fault {
+                        self.drain_sinks().await;
+                    }
+
+                    // Keep the actor registered while it restarts so lookups by
+                    // path and pre-existing ActorRef handles remain valid.
+                    if !is_fault {
                         ctx.remove_actor().await;
                     }
 
-                    if let Some(Some(stop_sender)) = stop {
+                    if let Some(stop_sender) = ack {
                         stop_ack = Some(stop_sender);
                     }
 
                     if self.lifecycle == ActorLifecycle::Started {
-                        self.lifecycle = ActorLifecycle::Stopped;
+                        self.lifecycle = if is_fault {
+                            // Remain Started: init will transition to Failed and
+                            // ask the parent for the ChildAction.
+                            ActorLifecycle::Started
+                        } else {
+                            ActorLifecycle::Stopped
+                        };
                     }
                     break;
                 }
@@ -302,26 +365,20 @@ where
                     if let Some(error) = error {
                         match error {
                             ChildError::Error { error } => {
-                                debug!(error = %error, "Child error received");
+                                debug!(error = ?error, "Child error received");
                                 self.actor.on_child_error(error, ctx).await
                             },
                             ChildError::Fault { error, sender } => {
-                                warn!(error = %error, "Child fault received");
+                                warn!(error = ?error, "Child fault received");
                                 let action = self.actor.on_child_fault(error, ctx).await;
                                 if sender.send(action).is_err() {
                                     error!("Failed to send action to child");
                                 }
                             },
+                            ChildError::ChildStopped(path) => {
+                                ctx.remove_closed_child(&path);
+                            }
                         }
-                    } else {
-                        ctx.stop(None).await;
-                        self.stop_signal = true;
-                    }
-                }
-                // Handle inner event from `inner_receiver`.
-                recv = self.inner_receiver.recv(), if !self.stop_signal => {
-                    if let Some(event) = recv {
-                        self.inner_handle(event, ctx).await;
                     } else {
                         ctx.stop(None).await;
                         self.stop_signal = true;
@@ -341,21 +398,6 @@ where
         stop_ack
     }
 
-    /// Returns true when the current stop path is part of a restart rather than
-    /// a terminal shutdown.
-    fn should_restart_after_stop(&self, ctx: &ActorContext<A>) -> bool {
-        if self.lifecycle == ActorLifecycle::Restarted {
-            return true;
-        }
-
-        self.parent_sender.is_none()
-            && ctx.error().is_some()
-            && matches!(
-                self.supervision_strategy,
-                SupervisionStrategy::Retry(_)
-            )
-    }
-
     /// Drains pending mailbox messages on stop.
     ///
     /// Terminal shutdown closes the receiver first so new sends fail fast. During
@@ -370,7 +412,7 @@ where
             self.receiver.close();
         }
 
-        let mut critical: Vec<BoxedMessageHandler<A>> = Vec::new();
+        let mut critical: Vec<Envelope<A>> = Vec::new();
 
         while let Ok(mut msg) = self.receiver.try_recv() {
             if msg.is_critical() {
@@ -384,8 +426,7 @@ where
             return;
         }
 
-        let deadline =
-            tokio::time::Instant::now() + A::mailbox_drain_timeout();
+        let deadline = tokio::time::Instant::now() + A::mailbox_drain_timeout();
         let mut timed_out = false;
 
         for mut msg in critical {
@@ -416,125 +457,33 @@ where
         }
     }
 
-    /// Drains pending inner actions on stop.
+    /// Gracefully drain all registered sinks.
     ///
-    /// This keeps the publish_event pipeline alive long enough to flush
-    /// inner actions already emitted by mailbox handlers. It only drains
-    /// actions that are already queued; it does not wait for future actions
-    /// on the still-open channel.
-    async fn drain_inner_actions(&mut self, ctx: &mut ActorContext<A>) {
-        let deadline =
-            tokio::time::Instant::now() + A::event_drain_timeout();
-        let mut drained = 0usize;
+    /// Closes each sink's channel and waits up to
+    /// `A::event_drain_timeout()` for the worker to finish pending
+    /// events.  All sinks are shut down concurrently; each gets its own
+    /// independent deadline so one slow sink does not steal time from
+    /// the others.
+    async fn drain_sinks(&self) {
+        // Collect sinks first so we release DashMap shards before awaiting.
+        let sinks: Vec<Sink<A::SinkEvent>> =
+            self.sinks.iter().map(|e| e.value().clone()).collect();
 
-        loop {
-            let event = match self.inner_receiver.try_recv() {
-                Ok(event) => event,
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    if drained > 0 {
-                        debug!(
-                            drained,
-                            "Inner action channel disconnected during drain"
-                        );
-                    }
-                    break;
-                }
-            };
-
-            let remaining =
-                deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                if drained > 0 {
+        let mut set = tokio::task::JoinSet::new();
+        for sink in sinks {
+            let deadline = std::time::Instant::now() + A::event_drain_timeout();
+            set.spawn(async move {
+                if !sink.shutdown(deadline).await {
                     warn!(
-                        drained,
-                        "Inner action drain timeout exceeded after processing pending actions"
+                        sink = %sink.name(),
+                        timeout_ms = A::event_drain_timeout().as_millis(),
+                        "Sink drain timed out, aborting worker"
                     );
                 }
-                break;
-            }
-
-            match tokio::time::timeout(remaining, self.inner_handle(event, ctx))
-                .await
-            {
-                Ok(()) => {
-                    drained += 1;
-                }
-                Err(_) => {
-                    if drained > 0 {
-                        warn!(
-                            drained,
-                            "Inner action drain timed out while processing pending actions"
-                        );
-                    }
-                    break;
-                }
-            }
+            });
         }
-    }
 
-    /// Inner message handler.
-    async fn inner_handle(
-        &mut self,
-        event: InnerAction<A>,
-        ctx: &mut ActorContext<A>,
-    ) {
-        match event {
-            InnerAction::Event(event) => {
-                if self.event_sender.send(event).is_err() {
-                    error!("Failed to broadcast event");
-                }
-            }
-            InnerAction::Error(error) => {
-                if let Some(parent_helper) = self.parent_sender.as_mut() {
-                    if let Err(err) =
-                        parent_helper.send(ChildError::Error { error }).await
-                    {
-                        error!(error = %err, "Failed to send error to parent");
-                    }
-                } else {
-                    ctx.system().publish_system_event(
-                        SystemEvent::ActorError {
-                            path: self.path.clone(),
-                            error,
-                        },
-                    );
-                }
-            }
-            InnerAction::Fail(error) => {
-                // If the actor has a parent, send the fail to the parent.
-                if let Some(parent_helper) = self.parent_sender.as_mut() {
-                    let (action_sender, action_receiver) = oneshot::channel();
-                    if let Err(err) = parent_helper
-                        .send(ChildError::Fault {
-                            error,
-                            sender: action_sender,
-                        })
-                        .await
-                    {
-                        error!(error = %err, "Failed to send fail to parent");
-                    } else {
-                        // Sets the state from action.
-                        if let Ok(action) = action_receiver.await {
-                            ctx.clean_error();
-                            match action {
-                                ChildAction::Stop => {}
-                                ChildAction::Restart
-                                | ChildAction::Delegate => {
-                                    debug!("Parent requested actor restart");
-                                    self.lifecycle = ActorLifecycle::Restarted;
-                                }
-                            }
-                        }
-                    }
-                }
-                ctx.stop(None).await;
-                self.stop_signal = true;
-            }
-            InnerAction::ChildStopped(path) => {
-                ctx.remove_closed_child(&path);
-            }
-        }
+        while set.join_next().await.is_some() {}
     }
 
     /// Apply supervision strategy.
@@ -572,17 +521,17 @@ where
                         tokio::time::sleep(duration).await;
                     }
                     *retries += 1;
-                    let error = ctx.error();
-                    match ctx.restart(&mut self.actor, error.as_ref()).await {
+                    match ctx.restart(&mut self.actor).await {
                         Ok(_) => {
-                            ctx.clean_error();
+                            self.pending_fault = None;
+                            ctx.clean_startup_error();
                             self.lifecycle = ActorLifecycle::Started;
                             *retries = 0;
                             self.supervision_strategy =
                                 A::supervision_strategy();
                         }
                         Err(err) => {
-                            ctx.set_error(err);
+                            ctx.set_startup_error(err);
                             self.supervision_strategy =
                                 SupervisionStrategy::Retry(retry_strategy);
                         }
@@ -601,19 +550,6 @@ where
     }
 }
 
-/// Inner error.
-#[derive(Debug, Clone)]
-pub enum InnerAction<A: Actor> {
-    /// Event
-    Event(A::Event),
-    /// Error
-    Error(Error),
-    /// Fail
-    Fail(Error),
-    /// Child actor channel closed notification.
-    ChildStopped(ActorPath),
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -622,7 +558,9 @@ mod tests {
     use crate::{
         Error,
         actor::{Actor, ActorContext, Event, Handler, Message},
-        supervision::{FixedIntervalStrategy, Strategy, SupervisionStrategy},
+        supervision::{
+            IntervalStrategy, NoIntervalStrategy, Strategy, SupervisionStrategy,
+        },
         system::SystemRef,
     };
     use async_trait::async_trait;
@@ -662,6 +600,9 @@ mod tests {
         type Message = TestMessage;
         type Response = ();
         type Event = TestEvent;
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(
             id: &str,
@@ -671,8 +612,8 @@ mod tests {
         }
 
         fn supervision_strategy() -> SupervisionStrategy {
-            SupervisionStrategy::Retry(Strategy::FixedInterval(
-                FixedIntervalStrategy::new(3, Duration::from_secs(1)),
+            SupervisionStrategy::Retry(Strategy::Interval(
+                IntervalStrategy::new(3, Duration::from_secs(1)),
             ))
         }
 
@@ -692,7 +633,6 @@ mod tests {
         async fn pre_restart(
             &mut self,
             _ctx: &mut ActorContext<Self>,
-            _error: Option<&Error>,
         ) -> Result<(), Error> {
             if self.failed {
                 self.failed = false;
@@ -710,7 +650,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<TestActor> for TestActor {
+    impl Handler<Self> for TestActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
@@ -731,13 +671,8 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_actor_root_failed() {
-        let (event_sender, _) = mpsc::channel(100);
-
-        let system = SystemRef::new(
-            event_sender,
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let (system, _) =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
 
         let actor = TestActor { failed: false };
         let (mut runner, actor_ref, stop_sender) =
@@ -813,7 +748,10 @@ mod tests {
     impl Actor for DrainActor {
         type Message = DrainMsg;
         type Event = DrainEvent;
+        type SinkEvent = Self::Event;
         type Response = ();
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(id: &str, _parent: Option<tracing::Span>) -> tracing::Span {
             info_span!("DrainActor", id = %id)
@@ -821,12 +759,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<DrainActor> for DrainActor {
+    impl Handler<Self> for DrainActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: DrainMsg,
-            _ctx: &mut ActorContext<DrainActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             match msg {
                 DrainMsg::Block => {
@@ -874,7 +812,10 @@ mod tests {
     impl Actor for SlowActor {
         type Message = SlowMsg;
         type Event = SlowEvent;
+        type SinkEvent = Self::Event;
         type Response = ();
+        type ChildError = Error;
+        type ChildFault = Error;
 
         fn get_span(id: &str, _parent: Option<tracing::Span>) -> tracing::Span {
             info_span!("SlowActor", id = %id)
@@ -886,12 +827,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<SlowActor> for SlowActor {
+    impl Handler<Self> for SlowActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: SlowMsg,
-            _ctx: &mut ActorContext<SlowActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
             match msg {
                 SlowMsg::Block => {
@@ -912,12 +853,8 @@ mod tests {
     /// tell/ask to a fully stopped actor must return Error::ActorStopped.
     #[test(tokio::test)]
     async fn test_send_to_stopped_actor_returns_actor_stopped() {
-        let (tx, _rx) = tokio::sync::mpsc::channel(100);
-        let system = SystemRef::new(
-            tx,
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let (system, _) =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
 
         let actor = DrainActor {
             started: Arc::new(Notify::new()),
@@ -952,12 +889,8 @@ mod tests {
     ///     drain runs → Normal discarded, Critical processed.
     #[test(tokio::test)]
     async fn test_drain_critical_processed_normal_stopped() {
-        let (tx, _rx) = tokio::sync::mpsc::channel(100);
-        let system = SystemRef::new(
-            tx,
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let (system, _) =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
 
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -1002,8 +935,11 @@ mod tests {
             "critical message should be processed: {critical_result:?}"
         );
 
-        let done = processed.lock().await;
-        assert_eq!(*done, vec!["critical"]);
+        {
+            let done = processed.lock().await;
+            assert_eq!(*done, vec!["critical"]);
+            drop(done);
+        }
     }
 
     /// When mailbox_drain_timeout expires while processing a slow critical
@@ -1011,12 +947,8 @@ mod tests {
     /// callers receive Error::ActorStopped.
     #[test(tokio::test)]
     async fn test_mailbox_drain_timeout_drops_slow_critical() {
-        let (tx, _rx) = tokio::sync::mpsc::channel(100);
-        let system = SystemRef::new(
-            tx,
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
+        let (system, _) =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
 
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -1049,5 +981,397 @@ mod tests {
         // -> timeout fires
         let result = slow_join.await.unwrap();
         assert_eq!(result, Err(Error::ActorStopped));
+    }
+
+    // Actor that always fails pre_start with Retry strategy (1 retry).
+    #[derive(Debug, Clone)]
+    struct MaxRetriesActor;
+
+    impl crate::NotPersistentActor for MaxRetriesActor {}
+
+    #[async_trait]
+    impl Actor for MaxRetriesActor {
+        type Message = ();
+        type Response = ();
+        type Event = TestEvent;
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("MaxRetriesActor", id = %id)
+        }
+
+        fn supervision_strategy() -> SupervisionStrategy {
+            SupervisionStrategy::Retry(Strategy::NoInterval(
+                NoIntervalStrategy::new(1),
+            ))
+        }
+
+        async fn pre_start(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Err(Error::FunctionalCritical {
+                description: "always fail".to_owned(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Self> for MaxRetriesActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_max_retries_exceeded() {
+        let (system, _) =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/max_retries"),
+            MaxRetriesActor,
+            None,
+        );
+        let inner_system = system.clone();
+        let handle = tokio::spawn(async move {
+            runner
+                .init(
+                    inner_system,
+                    stop_sender,
+                    None,
+                    MaxRetriesActor::get_span("id", None),
+                )
+                .await;
+        });
+        tokio::time::timeout(Duration::from_secs(2), actor_ref.closed())
+            .await
+            .expect("actor should stop after max retries exceeded");
+        handle.await.unwrap();
+    }
+
+    // Actor with Stop supervision that emits fail in pre_start.
+    #[derive(Debug, Clone)]
+    struct StopStrategyActor;
+
+    impl crate::NotPersistentActor for StopStrategyActor {}
+
+    #[async_trait]
+    impl Actor for StopStrategyActor {
+        type Message = ();
+        type Response = ();
+        type Event = TestEvent;
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("StopStrategyActor", id = %id)
+        }
+
+        fn supervision_strategy() -> SupervisionStrategy {
+            SupervisionStrategy::Stop
+        }
+
+        async fn pre_start(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Err(Error::FunctionalCritical {
+                description: "fail".to_owned(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Self> for StopStrategyActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_apply_stop_strategy() {
+        let (system, _) =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/stop_strategy"),
+            StopStrategyActor,
+            None,
+        );
+        let inner_system = system.clone();
+        let handle = tokio::spawn(async move {
+            runner
+                .init(
+                    inner_system,
+                    stop_sender,
+                    None,
+                    StopStrategyActor::get_span("id", None),
+                )
+                .await;
+        });
+        tokio::time::timeout(Duration::from_secs(2), actor_ref.closed())
+            .await
+            .expect("actor should stop with stop strategy");
+        handle.await.unwrap();
+    }
+
+    // Simple actor for mailbox-close test.
+    #[derive(Debug, Clone)]
+    struct SimpleRunningActor;
+
+    impl crate::NotPersistentActor for SimpleRunningActor {}
+
+    #[async_trait]
+    impl Actor for SimpleRunningActor {
+        type Message = ();
+        type Response = ();
+        type Event = TestEvent;
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("SimpleRunningActor", id = %id)
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Self> for SimpleRunningActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_mailbox_closed_stops_actor() {
+        let (system, _) =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/simple"),
+            SimpleRunningActor,
+            None,
+        );
+        let inner_system = system.clone();
+        let handle = tokio::spawn(async move {
+            runner
+                .init(
+                    inner_system,
+                    stop_sender,
+                    None,
+                    SimpleRunningActor::get_span("id", None),
+                )
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(actor_ref);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("actor task should finish when mailbox closes")
+            .unwrap();
+    }
+
+    // ========== pre_restart error path ==========
+
+    #[derive(Debug, Clone)]
+    struct PreRestartErrorActor;
+
+    impl crate::NotPersistentActor for PreRestartErrorActor {}
+
+    #[async_trait]
+    impl Actor for PreRestartErrorActor {
+        type Message = ();
+        type Response = ();
+        type Event = TestEvent;
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("PreRestartErrorActor", id = %id)
+        }
+
+        fn supervision_strategy() -> SupervisionStrategy {
+            SupervisionStrategy::Retry(Strategy::NoInterval(
+                NoIntervalStrategy::new(3),
+            ))
+        }
+
+        async fn pre_start(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Err(Error::FunctionalCritical {
+                description: "pre_start fail".to_owned(),
+            })
+        }
+
+        async fn pre_restart(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Err(Error::FunctionalCritical {
+                description: "pre_restart fail".to_owned(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Self> for PreRestartErrorActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_pre_restart_error() {
+        let (system, _) =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/pre_restart_err"),
+            PreRestartErrorActor,
+            None,
+        );
+        let inner_system = system.clone();
+        let handle = tokio::spawn(async move {
+            runner
+                .init(
+                    inner_system,
+                    stop_sender,
+                    None,
+                    PreRestartErrorActor::get_span("id", None),
+                )
+                .await;
+        });
+        tokio::time::timeout(Duration::from_secs(2), actor_ref.closed())
+            .await
+            .expect("actor should stop after max retries exceeded");
+        handle.await.unwrap();
+    }
+
+    // ========== Retry strategy success path ==========
+
+    #[derive(Debug, Clone)]
+    struct RetryOnceActor {
+        failed: Arc<Mutex<bool>>,
+    }
+
+    impl crate::NotPersistentActor for RetryOnceActor {}
+
+    #[async_trait]
+    impl Actor for RetryOnceActor {
+        type Message = ();
+        type Response = ();
+        type Event = TestEvent;
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("RetryOnceActor", id = %id)
+        }
+
+        fn supervision_strategy() -> SupervisionStrategy {
+            SupervisionStrategy::Retry(Strategy::NoInterval(
+                NoIntervalStrategy::new(3),
+            ))
+        }
+
+        async fn pre_start(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            {
+                let mut guard = self.failed.lock().await;
+                if !*guard {
+                    return Ok(());
+                }
+                *guard = false;
+            }
+            Err(Error::FunctionalCritical {
+                description: "fail once".into(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Self> for RetryOnceActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_apply_retry_strategy_success() {
+        let (system, _) =
+            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let actor = RetryOnceActor {
+            failed: Arc::new(Mutex::new(true)),
+        };
+        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/retry_success"),
+            actor,
+            None,
+        );
+        let inner_system = system.clone();
+        let handle = tokio::spawn(async move {
+            runner
+                .init(
+                    inner_system,
+                    stop_sender,
+                    None,
+                    RetryOnceActor::get_span("id", None),
+                )
+                .await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        actor_ref.tell_stop().await;
+
+        tokio::time::timeout(Duration::from_secs(2), actor_ref.closed())
+            .await
+            .expect("actor should stop");
+        handle.await.unwrap();
     }
 }

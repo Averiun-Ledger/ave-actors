@@ -3,10 +3,10 @@
 pub use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction,
     CustomIntervalStrategy, EncryptedKey, Error as ActorError, Event,
-    FixedIntervalStrategy, Handler, Message, NoIntervalStrategy,
-    NotPersistentActor, Response, RetryActor, RetryMessage, RetryStrategy,
-    Sink, Strategy, Subscriber, SupervisionStrategy, SystemEvent, SystemRef,
-    SystemRunner,
+    ExponentialBackoffStrategy, Handler, IntervalStrategy, Message,
+    NoIntervalStrategy, NotPersistentActor, Response, RetryActor, RetryMessage,
+    RetryPolicy, RetryStrategy, Sink, SinkEntry, Strategy, Subscriber,
+    SupervisionStrategy, SystemEvent, SystemRef, SystemRunner, TimerKey,
 };
 
 #[cfg(any(feature = "rocksdb", feature = "sqlite"))]

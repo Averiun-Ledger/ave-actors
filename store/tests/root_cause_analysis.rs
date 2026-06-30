@@ -7,27 +7,29 @@ use ave_actors_store::{
     },
 };
 
-use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler,
     Message, Response,
 };
-use serde::{Deserialize, Serialize};
 use test_log::test;
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
+// State struct
 #[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    borsh::BorshSerialize,
-    borsh::BorshDeserialize,
-    Default,
+    Debug, Clone, Default, borsh::BorshSerialize, borsh::BorshDeserialize,
 )]
-struct TestActor {
+struct TestActorState {
     value: i32,
+}
+
+#[derive(Debug)]
+struct TestActor {
+    state_ptr: Arc<TestActorState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +58,9 @@ impl Actor for TestActor {
     type Message = TestMessage;
     type Response = TestResponse;
     type Event = TestEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -66,12 +71,12 @@ impl Actor for TestActor {
 }
 
 #[async_trait]
-impl Handler<TestActor> for TestActor {
+impl Handler<Self> for TestActor {
     async fn handle_message(
         &mut self,
         _sender: ave_actors_actor::ActorPath,
         _msg: TestMessage,
-        _ctx: &mut ActorContext<TestActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, ActorError> {
         Ok(TestResponse)
     }
@@ -81,14 +86,29 @@ impl Handler<TestActor> for TestActor {
 impl PersistentActor for TestActor {
     type Persistence = LightPersistence;
     type InitParams = ();
+    type State = TestActorState;
 
     fn create_initial(_: ()) -> Self {
-        Self::default()
+        Self {
+            state_ptr: Arc::new(TestActorState::default()),
+        }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        self.value += event.delta;
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).value += event.delta;
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
@@ -104,7 +124,7 @@ async fn test_root_cause_persist_state_doesnt_increment_counter() {
         "root_cause",
         memory_manager.clone(),
         None,
-        TestActor::create_initial(()),
+        Arc::new(TestActorState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -129,22 +149,28 @@ async fn test_root_cause_persist_state_doesnt_increment_counter() {
     println!("\n🔧 PERSISTING EVENT:");
     println!("   Creating actor with value=0");
     println!("   Creating event with delta=10");
-    let mut actor = TestActor { value: 0 };
+    let actor = TestActor {
+        state_ptr: Arc::new(TestActorState { value: 0 }),
+    };
 
     // This is what happens in the user's code:
     // 1. User calls persist()
     // 2. persist() calls apply() on the actor (actor.value becomes 10)
     // 3. persist() calls store.ask(PersistLight(event, actor_with_value_10))
-    actor.apply(&TestEvent { delta: 10 }).unwrap();
+    let state = TestActor::apply(
+        Arc::clone(&actor.state_ptr),
+        &TestEvent { delta: 10 },
+    )
+    .unwrap();
     println!(
         "   After apply(): actor.value = {} (event already applied!)",
-        actor.value
+        state.value
     );
 
     let event = TestEvent { delta: 10 };
     println!("   Calling PersistLight...");
     store_ref
-        .ask(StoreCommand::PersistLight(event, actor.clone()))
+        .ask(StoreCommand::PersistLight(Arc::new(event), state))
         .await
         .unwrap();
 
@@ -170,7 +196,7 @@ async fn test_root_cause_persist_state_doesnt_increment_counter() {
         "root_cause",
         memory_manager.clone(),
         None,
-        TestActor::create_initial(()),
+        Arc::new(TestActorState::default()),
     )
     .unwrap();
     let store_ref2 = system.create_root_actor("store2", store2).await.unwrap();

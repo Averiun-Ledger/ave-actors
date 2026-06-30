@@ -17,11 +17,15 @@ use tracing::info_span;
 
 static SHARED: OnceLock<Arc<TokioMutex<MemoryManager>>> = OnceLock::new();
 
-#[derive(
-    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
-struct PathActor {
+// State struct
+#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
+struct PathActorState {
     value: i32,
+}
+
+#[derive(Debug)]
+struct PathActor {
+    state_ptr: Arc<PathActorState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +47,11 @@ impl Actor for PathActor {
     type Message = PathMsg;
     type Response = PathResp;
     type Event = PathEvent;
+    type SinkEvent = Self::Event;
+
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
+
     fn get_span(
         id: &str,
         _parent_span: Option<tracing::Span>,
@@ -73,15 +82,15 @@ impl Actor for PathActor {
 }
 
 #[async_trait]
-impl Handler<PathActor> for PathActor {
+impl Handler<Self> for PathActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         msg: PathMsg,
-        ctx: &mut ActorContext<PathActor>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<PathResp, ActorError> {
-        self.persist(&PathEvent(msg.0), ctx).await?;
-        Ok(PathResp(self.value))
+        self.persist(PathEvent(msg.0), ctx).await?;
+        Ok(PathResp(self.state_ptr.value))
     }
 }
 
@@ -89,21 +98,30 @@ impl Handler<PathActor> for PathActor {
 impl PersistentActor for PathActor {
     type Persistence = FullPersistence;
     type InitParams = ();
+    type State = PathActorState;
 
     fn create_initial(_params: ()) -> Self {
         println!("  [CREATE_INITIAL]");
-        Self { value: 0 }
+        Self {
+            state_ptr: Arc::new(PathActorState::default()),
+        }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        println!(
-            "  [APPLY] {} + {} = {}",
-            self.value,
-            event.0,
-            self.value + event.0
-        );
-        self.value += event.0;
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).value += event.0;
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
@@ -160,11 +178,15 @@ async fn test_explicit_prefix_usage() {
     println!("║  Scenario: Using explicit prefix instead of path         ║");
     println!("╚═══════════════════════════════════════════════════════════╝\n");
 
-    #[derive(
-        Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-    )]
-    struct PrefixActor {
+    // State struct
+    #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
+    struct PrefixActorState {
         value: i32,
+    }
+
+    #[derive(Debug)]
+    struct PrefixActor {
+        state_ptr: Arc<PrefixActorState>,
     }
 
     #[async_trait]
@@ -172,6 +194,9 @@ async fn test_explicit_prefix_usage() {
         type Message = PathMsg;
         type Response = PathResp;
         type Event = PathEvent;
+        type SinkEvent = Self::Event;
+        type ChildError = ActorError;
+        type ChildFault = ActorError;
 
         fn get_span(
             id: &str,
@@ -193,7 +218,7 @@ async fn test_explicit_prefix_usage() {
             println!("  [PRE_START] Using EXPLICIT prefix='my_fixed_prefix'");
             self.start_store(
                 "prefix_test",
-                Some("my_fixed_prefix".to_string()),
+                Some("my_fixed_prefix"),
                 ctx,
                 manager,
                 None,
@@ -203,15 +228,15 @@ async fn test_explicit_prefix_usage() {
     }
 
     #[async_trait]
-    impl Handler<PrefixActor> for PrefixActor {
+    impl Handler<Self> for PrefixActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             msg: PathMsg,
-            ctx: &mut ActorContext<PrefixActor>,
+            ctx: &mut ActorContext<Self>,
         ) -> Result<PathResp, ActorError> {
-            self.persist(&PathEvent(msg.0), ctx).await?;
-            Ok(PathResp(self.value))
+            self.persist(PathEvent(msg.0), ctx).await?;
+            Ok(PathResp(self.state_ptr.value))
         }
     }
 
@@ -219,14 +244,29 @@ async fn test_explicit_prefix_usage() {
     impl PersistentActor for PrefixActor {
         type Persistence = FullPersistence;
         type InitParams = ();
+        type State = PrefixActorState;
 
         fn create_initial(_params: ()) -> Self {
-            Self { value: 0 }
+            Self {
+                state_ptr: Arc::new(PrefixActorState::default()),
+            }
         }
 
-        fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-            self.value += event.0;
-            Ok(())
+        fn apply(
+            state: Arc<Self::State>,
+            event: &Self::Event,
+        ) -> Result<Arc<Self::State>, ActorError> {
+            let mut new_state = state;
+            Arc::make_mut(&mut new_state).value += event.0;
+            Ok(new_state)
+        }
+
+        fn state(&self) -> Arc<Self::State> {
+            Arc::clone(&self.state_ptr)
+        }
+
+        fn set_state(&mut self, state: Arc<Self::State>) {
+            self.state_ptr = state;
         }
     }
 

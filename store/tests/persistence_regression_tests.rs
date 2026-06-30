@@ -42,6 +42,7 @@ impl State for FailingStateStore {
         Err(StoreError::Store {
             operation: StoreOperation::Test,
             reason: "forced snapshot failure".to_owned(),
+            source: None,
         })
     }
 
@@ -71,7 +72,7 @@ impl DbManager<MemoryStore, FailingStateStore> for FailingStateManager {
         Ok(FailingStateStore)
     }
 
-    fn stop(&mut self) -> Result<(), StoreError> {
+    fn stop(self) -> Result<(), StoreError> {
         Ok(())
     }
 }
@@ -107,6 +108,7 @@ impl Collection for FailingCompactionCollection {
         Err(StoreError::Store {
             operation: StoreOperation::Test,
             reason: "forced compaction failure".to_owned(),
+            source: None,
         })
     }
 
@@ -146,7 +148,7 @@ impl DbManager<FailingCompactionCollection, MemoryStore>
         self.memory.create_state(name, prefix)
     }
 
-    fn stop(&mut self) -> Result<(), StoreError> {
+    fn stop(self) -> Result<(), StoreError> {
         Ok(())
     }
 }
@@ -229,7 +231,7 @@ impl DbManager<LoggingCollection, MemoryStore> for LoggingCompactionManager {
         self.memory.create_state(name, prefix)
     }
 
-    fn stop(&mut self) -> Result<(), StoreError> {
+    fn stop(self) -> Result<(), StoreError> {
         Ok(())
     }
 }
@@ -247,6 +249,7 @@ impl Collection for RangeCollection {
             return Err(StoreError::Store {
                 operation: StoreOperation::Test,
                 reason: "forced last failure".to_owned(),
+                source: None,
             });
         }
         Ok(self
@@ -298,6 +301,7 @@ impl Collection for RangeCollection {
             return Err(StoreError::Store {
                 operation: StoreOperation::Test,
                 reason: "forced iter failure".to_owned(),
+                source: None,
             });
         }
 
@@ -342,7 +346,7 @@ impl DbManager<RangeCollection, MemoryStore> for LastErrorManager {
         self.memory.create_state(name, prefix)
     }
 
-    fn stop(&mut self) -> Result<(), StoreError> {
+    fn stop(self) -> Result<(), StoreError> {
         Ok(())
     }
 }
@@ -378,17 +382,16 @@ struct ValueEvent(i32);
 
 impl Event for ValueEvent {}
 
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    BorshSerialize,
-    BorshDeserialize,
-    Default,
-)]
-struct RollbackLightActor {
+// State structs and actors
+
+#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
+struct RollbackLightActorState {
     value: i32,
+}
+
+#[derive(Debug)]
+struct RollbackLightActor {
+    state_ptr: Arc<RollbackLightActorState>,
 }
 
 #[async_trait]
@@ -396,6 +399,9 @@ impl Actor for RollbackLightActor {
     type Message = ValueMessage;
     type Response = ValueResponse;
     type Event = ValueEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -423,19 +429,34 @@ impl Actor for RollbackLightActor {
 impl PersistentActor for RollbackLightActor {
     type Persistence = LightPersistence;
     type InitParams = ();
+    type State = RollbackLightActorState;
 
     fn create_initial(_: ()) -> Self {
-        Self { value: 0 }
+        Self {
+            state_ptr: Arc::new(RollbackLightActorState::default()),
+        }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        self.value += event.0;
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).value += event.0;
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
 #[async_trait]
-impl Handler<RollbackLightActor> for RollbackLightActor {
+impl Handler<Self> for RollbackLightActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -444,25 +465,24 @@ impl Handler<RollbackLightActor> for RollbackLightActor {
     ) -> Result<ValueResponse, ActorError> {
         match msg {
             ValueMessage::Increment(delta) => {
-                self.persist(&ValueEvent(delta), ctx).await?;
+                self.persist(ValueEvent(delta), ctx).await?;
                 Ok(ValueResponse::Ack)
             }
-            ValueMessage::GetValue => Ok(ValueResponse::Value(self.value)),
+            ValueMessage::GetValue => {
+                Ok(ValueResponse::Value(self.state_ptr.value))
+            }
         }
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    BorshSerialize,
-    BorshDeserialize,
-    Default,
-)]
-struct GapActor {
+#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
+struct GapActorState {
     value: i32,
+}
+
+#[derive(Debug)]
+struct GapActor {
+    state_ptr: Arc<GapActorState>,
 }
 
 #[async_trait]
@@ -470,6 +490,9 @@ impl Actor for GapActor {
     type Message = ValueMessage;
     type Response = ValueResponse;
     type Event = ValueEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -483,19 +506,34 @@ impl Actor for GapActor {
 impl PersistentActor for GapActor {
     type Persistence = FullPersistence;
     type InitParams = ();
+    type State = GapActorState;
 
     fn create_initial(_: ()) -> Self {
-        Self { value: 0 }
+        Self {
+            state_ptr: Arc::new(GapActorState::default()),
+        }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        self.value += event.0;
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).value += event.0;
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
 #[async_trait]
-impl Handler<GapActor> for GapActor {
+impl Handler<Self> for GapActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -504,25 +542,26 @@ impl Handler<GapActor> for GapActor {
     ) -> Result<ValueResponse, ActorError> {
         match msg {
             ValueMessage::Increment(delta) => {
-                self.value += delta;
+                let mut new_state = Arc::clone(&self.state_ptr);
+                Arc::make_mut(&mut new_state).value += delta;
+                self.state_ptr = new_state;
                 Ok(ValueResponse::Ack)
             }
-            ValueMessage::GetValue => Ok(ValueResponse::Value(self.value)),
+            ValueMessage::GetValue => {
+                Ok(ValueResponse::Value(self.state_ptr.value))
+            }
         }
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    BorshSerialize,
-    BorshDeserialize,
-    Default,
-)]
-struct CompactingActor {
+#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
+struct CompactingActorState {
     value: i32,
+}
+
+#[derive(Debug)]
+struct CompactingActor {
+    state_ptr: Arc<CompactingActorState>,
 }
 
 #[async_trait]
@@ -530,6 +569,9 @@ impl Actor for CompactingActor {
     type Message = ValueMessage;
     type Response = ValueResponse;
     type Event = ValueEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -543,23 +585,38 @@ impl Actor for CompactingActor {
 impl PersistentActor for CompactingActor {
     type Persistence = FullPersistence;
     type InitParams = ();
+    type State = CompactingActorState;
 
     fn create_initial(_: ()) -> Self {
-        Self { value: 0 }
+        Self {
+            state_ptr: Arc::new(CompactingActorState::default()),
+        }
     }
 
     fn compact_on_snapshot() -> bool {
         true
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        self.value += event.0;
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).value += event.0;
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
 #[async_trait]
-impl Handler<CompactingActor> for CompactingActor {
+impl Handler<Self> for CompactingActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -568,10 +625,14 @@ impl Handler<CompactingActor> for CompactingActor {
     ) -> Result<ValueResponse, ActorError> {
         match msg {
             ValueMessage::Increment(delta) => {
-                self.value += delta;
+                let mut new_state = Arc::clone(&self.state_ptr);
+                Arc::make_mut(&mut new_state).value += delta;
+                self.state_ptr = new_state;
                 Ok(ValueResponse::Ack)
             }
-            ValueMessage::GetValue => Ok(ValueResponse::Value(self.value)),
+            ValueMessage::GetValue => {
+                Ok(ValueResponse::Value(self.state_ptr.value))
+            }
         }
     }
 }
@@ -605,7 +666,7 @@ async fn test_light_persistence_rolls_back_written_event_when_snapshot_fails() {
         "prefix",
         FailingStateManager::default(),
         None,
-        RollbackLightActor::create_initial(()),
+        Arc::new(RollbackLightActorState::default()),
     )
     .unwrap();
 
@@ -616,17 +677,21 @@ async fn test_light_persistence_rolls_back_written_event_when_snapshot_fails() {
 
     let response = store_ref
         .ask(StoreCommand::PersistLight(
-            ValueEvent(5),
-            RollbackLightActor { value: 5 },
+            Arc::new(ValueEvent(5)),
+            Arc::new(RollbackLightActorState { value: 5 }),
         ))
         .await;
     assert!(matches!(response, Err(ActorError::StoreOperation { .. })));
 
     let counter = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
-    assert!(matches!(counter, StoreResponse::LastEventNumber(0)));
+    // Event is the authoritative write; it persists even when snapshot fails.
+    assert!(matches!(counter, StoreResponse::LastEventNumber(1)));
 
     let recovered = store_ref.ask(StoreCommand::Recover).await.unwrap();
-    assert!(matches!(recovered, StoreResponse::State(None)));
+    match recovered {
+        StoreResponse::State(Some(state)) => assert_eq!(state.value, 5),
+        _ => panic!("expected recovered state from persisted event"),
+    }
 }
 
 #[test(tokio::test)]
@@ -641,7 +706,7 @@ async fn test_recover_fails_when_event_log_has_gap() {
         "prefix",
         manager.clone(),
         None,
-        GapActor::create_initial(()),
+        Arc::new(GapActorState::default()),
     )
     .unwrap();
     let store_ref: ActorRef<Store<GapActor>> =
@@ -649,14 +714,14 @@ async fn test_recover_fails_when_event_log_has_gap() {
 
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::Persist(ValueEvent(1)))
+            .ask(StoreCommand::Persist(Arc::new(ValueEvent(1))))
             .await
             .unwrap(),
         StoreResponse::Persisted
     ));
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::Persist(ValueEvent(2)))
+            .ask(StoreCommand::Persist(Arc::new(ValueEvent(2))))
             .await
             .unwrap(),
         StoreResponse::Persisted
@@ -712,7 +777,7 @@ async fn test_full_persistence_compacts_events_after_snapshot_when_enabled() {
         "prefix",
         manager.clone(),
         None,
-        CompactingActor::create_initial(()),
+        Arc::new(CompactingActorState::default()),
     )
     .unwrap();
     let store_ref: ActorRef<Store<CompactingActor>> = system
@@ -723,8 +788,8 @@ async fn test_full_persistence_compacts_events_after_snapshot_when_enabled() {
     assert!(matches!(
         store_ref
             .ask(StoreCommand::PersistFull {
-                event: ValueEvent(2),
-                actor: CompactingActor { value: 2 },
+                event: Arc::new(ValueEvent(2)),
+                state: Arc::new(CompactingActorState { value: 2 }),
                 snapshot_every: Some(1),
             })
             .await
@@ -734,8 +799,8 @@ async fn test_full_persistence_compacts_events_after_snapshot_when_enabled() {
     assert!(matches!(
         store_ref
             .ask(StoreCommand::PersistFull {
-                event: ValueEvent(3),
-                actor: CompactingActor { value: 5 },
+                event: Arc::new(ValueEvent(3)),
+                state: Arc::new(CompactingActorState { value: 5 }),
                 snapshot_every: Some(1),
             })
             .await
@@ -768,7 +833,7 @@ async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
         "prefix",
         manager.clone(),
         None,
-        CompactingActor::create_initial(()),
+        Arc::new(CompactingActorState::default()),
     )
     .unwrap();
     let store_ref: ActorRef<Store<CompactingActor>> = system
@@ -779,8 +844,8 @@ async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
     assert!(matches!(
         store_ref
             .ask(StoreCommand::PersistFull {
-                event: ValueEvent(2),
-                actor: CompactingActor { value: 2 },
+                event: Arc::new(ValueEvent(2)),
+                state: Arc::new(CompactingActorState { value: 2 }),
                 snapshot_every: Some(1),
             })
             .await
@@ -790,8 +855,8 @@ async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
     assert!(matches!(
         store_ref
             .ask(StoreCommand::PersistFull {
-                event: ValueEvent(3),
-                actor: CompactingActor { value: 5 },
+                event: Arc::new(ValueEvent(3)),
+                state: Arc::new(CompactingActorState { value: 5 }),
                 snapshot_every: Some(1),
             })
             .await
@@ -813,7 +878,7 @@ async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
         "prefix",
         manager.clone(),
         None,
-        CompactingActor::create_initial(()),
+        Arc::new(CompactingActorState::default()),
     )
     .unwrap();
     let restarted_ref: ActorRef<Store<CompactingActor>> = system2
@@ -829,8 +894,8 @@ async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
     assert!(matches!(
         restarted_ref
             .ask(StoreCommand::PersistFull {
-                event: ValueEvent(4),
-                actor: CompactingActor { value: 9 },
+                event: Arc::new(ValueEvent(4)),
+                state: Arc::new(CompactingActorState { value: 9 }),
                 snapshot_every: Some(1),
             })
             .await
@@ -846,7 +911,7 @@ async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
                 "prefix",
                 manager,
                 None,
-                CompactingActor::create_initial(()),
+                Arc::new(CompactingActorState::default()),
             )
             .unwrap(),
         )
@@ -872,7 +937,7 @@ async fn test_compaction_watermark_is_persisted_across_restart() {
         "prefix",
         manager.clone(),
         None,
-        CompactingActor::create_initial(()),
+        Arc::new(CompactingActorState::default()),
     )
     .unwrap();
     let store_ref: ActorRef<Store<CompactingActor>> = system
@@ -883,8 +948,8 @@ async fn test_compaction_watermark_is_persisted_across_restart() {
     assert!(matches!(
         store_ref
             .ask(StoreCommand::PersistFull {
-                event: ValueEvent(2),
-                actor: CompactingActor { value: 2 },
+                event: Arc::new(ValueEvent(2)),
+                state: Arc::new(CompactingActorState { value: 2 }),
                 snapshot_every: Some(1),
             })
             .await
@@ -901,7 +966,7 @@ async fn test_compaction_watermark_is_persisted_across_restart() {
         "prefix",
         manager.clone(),
         None,
-        CompactingActor::create_initial(()),
+        Arc::new(CompactingActorState::default()),
     )
     .unwrap();
     let restarted_ref: ActorRef<Store<CompactingActor>> = system2
@@ -912,8 +977,8 @@ async fn test_compaction_watermark_is_persisted_across_restart() {
     assert!(matches!(
         restarted_ref
             .ask(StoreCommand::PersistFull {
-                event: ValueEvent(3),
-                actor: CompactingActor { value: 5 },
+                event: Arc::new(ValueEvent(3)),
+                state: Arc::new(CompactingActorState { value: 5 }),
                 snapshot_every: Some(1),
             })
             .await
@@ -944,7 +1009,7 @@ async fn test_repeated_compaction_only_deletes_newly_covered_events() {
         "prefix",
         manager.clone(),
         None,
-        CompactingActor::create_initial(()),
+        Arc::new(CompactingActorState::default()),
     )
     .unwrap();
     let store_ref: ActorRef<Store<CompactingActor>> = system
@@ -955,8 +1020,8 @@ async fn test_repeated_compaction_only_deletes_newly_covered_events() {
     assert!(matches!(
         store_ref
             .ask(StoreCommand::PersistFull {
-                event: ValueEvent(1),
-                actor: CompactingActor { value: 1 },
+                event: Arc::new(ValueEvent(1)),
+                state: Arc::new(CompactingActorState { value: 1 }),
                 snapshot_every: Some(1),
             })
             .await
@@ -966,8 +1031,8 @@ async fn test_repeated_compaction_only_deletes_newly_covered_events() {
     assert!(matches!(
         store_ref
             .ask(StoreCommand::PersistFull {
-                event: ValueEvent(2),
-                actor: CompactingActor { value: 3 },
+                event: Arc::new(ValueEvent(2)),
+                state: Arc::new(CompactingActorState { value: 3 }),
                 snapshot_every: Some(1),
             })
             .await
@@ -977,8 +1042,8 @@ async fn test_repeated_compaction_only_deletes_newly_covered_events() {
     assert!(matches!(
         store_ref
             .ask(StoreCommand::PersistFull {
-                event: ValueEvent(3),
-                actor: CompactingActor { value: 6 },
+                event: Arc::new(ValueEvent(3)),
+                state: Arc::new(CompactingActorState { value: 6 }),
                 snapshot_every: Some(1),
             })
             .await
@@ -1014,7 +1079,7 @@ fn test_get_by_range_reports_requested_missing_key() {
     collection.put("a", b"1").unwrap();
     collection.put("b", b"2").unwrap();
 
-    let result = collection.get_by_range(Some("missing".to_owned()), 1);
+    let result = collection.get_by_range(Some("missing"), 1);
     assert_eq!(
         result,
         Err(StoreError::EntryNotFound {
@@ -1047,7 +1112,7 @@ fn test_store_new_propagates_collection_last_error() {
         "prefix",
         LastErrorManager::default(),
         None,
-        GapActor::create_initial(()),
+        Arc::new(GapActorState::default()),
     );
 
     assert!(matches!(
@@ -1072,7 +1137,7 @@ async fn test_recover_falls_back_when_metadata_state_is_missing() {
         "prefix",
         manager.clone(),
         None,
-        CompactingActor::create_initial(()),
+        Arc::new(CompactingActorState::default()),
     )
     .unwrap();
     let store_ref: ActorRef<Store<CompactingActor>> = system
@@ -1083,8 +1148,8 @@ async fn test_recover_falls_back_when_metadata_state_is_missing() {
     assert!(matches!(
         store_ref
             .ask(StoreCommand::PersistFull {
-                event: ValueEvent(4),
-                actor: CompactingActor { value: 4 },
+                event: Arc::new(ValueEvent(4)),
+                state: Arc::new(CompactingActorState { value: 4 }),
                 snapshot_every: Some(1),
             })
             .await
@@ -1106,7 +1171,7 @@ async fn test_recover_falls_back_when_metadata_state_is_missing() {
         "prefix",
         manager,
         None,
-        CompactingActor::create_initial(()),
+        Arc::new(CompactingActorState::default()),
     )
     .unwrap();
     let restarted_ref: ActorRef<Store<CompactingActor>> = system2
@@ -1133,7 +1198,7 @@ async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
         "prefix",
         manager.clone(),
         Some(encrypt_key),
-        GapActor::create_initial(()),
+        Arc::new(GapActorState::default()),
     )
     .unwrap();
     let store_ref: ActorRef<Store<GapActor>> = system
@@ -1144,8 +1209,8 @@ async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
     assert!(matches!(
         store_ref
             .ask(StoreCommand::PersistFull {
-                event: ValueEvent(2),
-                actor: GapActor { value: 2 },
+                event: Arc::new(ValueEvent(2)),
+                state: Arc::new(GapActorState { value: 2 }),
                 snapshot_every: Some(1),
             })
             .await
@@ -1154,7 +1219,7 @@ async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
     ));
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::Persist(ValueEvent(3)))
+            .ask(StoreCommand::Persist(Arc::new(ValueEvent(3))))
             .await
             .unwrap(),
         StoreResponse::Persisted
@@ -1182,7 +1247,7 @@ async fn test_snapshot_compaction_failure_is_best_effort() {
         "prefix",
         manager.clone(),
         None,
-        CompactingActor::create_initial(()),
+        Arc::new(CompactingActorState::default()),
     )
     .unwrap();
     let store_ref: ActorRef<Store<CompactingActor>> = system
@@ -1192,8 +1257,8 @@ async fn test_snapshot_compaction_failure_is_best_effort() {
 
     let response = store_ref
         .ask(StoreCommand::PersistFull {
-            event: ValueEvent(7),
-            actor: CompactingActor { value: 7 },
+            event: Arc::new(ValueEvent(7)),
+            state: Arc::new(CompactingActorState { value: 7 }),
             snapshot_every: Some(1),
         })
         .await
@@ -1227,7 +1292,7 @@ async fn test_persist_full_event_requests_snapshot_only_when_due() {
         "prefix",
         manager,
         None,
-        GapActor::create_initial(()),
+        Arc::new(GapActorState::default()),
     )
     .unwrap();
     let store_ref: ActorRef<Store<GapActor>> = system
@@ -1235,10 +1300,12 @@ async fn test_persist_full_event_requests_snapshot_only_when_due() {
         .await
         .unwrap();
 
+    // First event: no snapshot yet (event_counter will be 1, not multiple of 2)
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::PersistFullEvent {
-                event: ValueEvent(2),
+            .ask(StoreCommand::PersistFull {
+                event: Arc::new(ValueEvent(2)),
+                state: Arc::new(GapActorState { value: 2 }),
                 snapshot_every: Some(2),
             })
             .await
@@ -1246,24 +1313,30 @@ async fn test_persist_full_event_requests_snapshot_only_when_due() {
         StoreResponse::Persisted
     ));
 
+    // Second event: snapshot is triggered inline (event_counter = 2, multiple of 2)
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::PersistFullEvent {
-                event: ValueEvent(3),
+            .ask(StoreCommand::PersistFull {
+                event: Arc::new(ValueEvent(3)),
+                state: Arc::new(GapActorState { value: 5 }),
                 snapshot_every: Some(2),
             })
             .await
             .unwrap(),
-        StoreResponse::SnapshotRequired
+        StoreResponse::Persisted
     ));
 
-    assert!(matches!(
-        store_ref
-            .ask(StoreCommand::Snapshot(GapActor { value: 5 }))
-            .await
-            .unwrap(),
-        StoreResponse::Snapshotted
-    ));
+    // Verify snapshot happened by recovering
+    let recovered = store_ref.ask(StoreCommand::Recover).await.unwrap();
+    match recovered {
+        StoreResponse::State(Some(state)) => {
+            assert_eq!(
+                state.value, 5,
+                "snapshot should have been created inline"
+            );
+        }
+        _ => panic!("expected recovered state after inline snapshot"),
+    }
 }
 
 #[test]
@@ -1279,7 +1352,7 @@ fn test_store_new_fails_when_last_event_key_is_corrupted() {
         "prefix",
         manager,
         None,
-        GapActor::create_initial(()),
+        Arc::new(GapActorState::default()),
     );
 
     assert!(matches!(

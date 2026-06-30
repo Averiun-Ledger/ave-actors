@@ -13,21 +13,22 @@ use ave_actors_actor::{
     Message, Response,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use test_log::test;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
+// State struct
 #[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    borsh::BorshSerialize,
-    borsh::BorshDeserialize,
-    Default,
+    Debug, Clone, Default, borsh::BorshSerialize, borsh::BorshDeserialize,
 )]
-struct TestActor {
+struct TestActorState {
     value: i32,
+}
+
+#[derive(Debug)]
+struct TestActor {
+    state_ptr: Arc<TestActorState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +57,9 @@ impl Actor for TestActor {
     type Message = TestMessage;
     type Response = TestResponse;
     type Event = TestEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
 
     fn get_span(
         id: &str,
@@ -66,12 +70,12 @@ impl Actor for TestActor {
 }
 
 #[async_trait]
-impl Handler<TestActor> for TestActor {
+impl Handler<Self> for TestActor {
     async fn handle_message(
         &mut self,
         _sender: ave_actors_actor::ActorPath,
         _msg: TestMessage,
-        _ctx: &mut ActorContext<TestActor>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<TestResponse, ActorError> {
         Ok(TestResponse)
     }
@@ -81,14 +85,29 @@ impl Handler<TestActor> for TestActor {
 impl PersistentActor for TestActor {
     type Persistence = FullPersistence;
     type InitParams = ();
+    type State = TestActorState;
 
     fn create_initial(_: ()) -> Self {
-        Self::default()
+        Self {
+            state_ptr: Arc::new(TestActorState::default()),
+        }
     }
 
-    fn apply(&mut self, event: &Self::Event) -> Result<(), ActorError> {
-        self.value += event.delta;
-        Ok(())
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = state;
+        Arc::make_mut(&mut new_state).value += event.delta;
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state_ptr)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state_ptr = state;
     }
 }
 
@@ -115,7 +134,7 @@ async fn test_full_persistence_recovery_without_snapshot() {
         "no_snapshot",
         memory_manager.clone(),
         None,
-        TestActor::create_initial(()),
+        Arc::new(TestActorState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -124,7 +143,10 @@ async fn test_full_persistence_recovery_without_snapshot() {
     for i in 1..=3 {
         let event = TestEvent { delta: i };
         println!("   Persisting event {}", i);
-        store_ref.ask(StoreCommand::Persist(event)).await.unwrap();
+        store_ref
+            .ask(StoreCommand::Persist(Arc::new(event)))
+            .await
+            .unwrap();
     }
 
     // Check event count
@@ -145,7 +167,7 @@ async fn test_full_persistence_recovery_without_snapshot() {
         "no_snapshot",
         memory_manager.clone(),
         None,
-        TestActor::create_initial(()),
+        Arc::new(TestActorState::default()),
     )
     .unwrap();
     let store_ref2 = system.create_root_actor("store2", store2).await.unwrap();
@@ -207,7 +229,7 @@ async fn test_full_persistence_recovery_logic_investigation() {
         "logic_test",
         memory_manager.clone(),
         None,
-        TestActor::create_initial(()),
+        Arc::new(TestActorState::default()),
     )
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
@@ -215,11 +237,11 @@ async fn test_full_persistence_recovery_logic_investigation() {
     println!("📝 Scenario: Events exist, but NO snapshot");
     println!("   Persisting 2 events...");
     store_ref
-        .ask(StoreCommand::Persist(TestEvent { delta: 5 }))
+        .ask(StoreCommand::Persist(Arc::new(TestEvent { delta: 5 })))
         .await
         .unwrap();
     store_ref
-        .ask(StoreCommand::Persist(TestEvent { delta: 7 }))
+        .ask(StoreCommand::Persist(Arc::new(TestEvent { delta: 7 })))
         .await
         .unwrap();
 
@@ -254,14 +276,14 @@ async fn test_full_persistence_recovery_logic_investigation() {
         "logic_test",
         memory_manager.clone(),
         None,
-        TestActor::create_initial(()),
+        Arc::new(TestActorState::default()),
     )
     .unwrap();
     let store_ref2 = system.create_root_actor("store2", store2).await.unwrap();
 
     let result = store_ref2.ask(StoreCommand::Recover).await.unwrap();
 
-    if let StoreResponse::State(None) = result {
+    if matches!(result, StoreResponse::State(None)) {
         println!(
             "\n❌ CONFIRMED: recover() returned None even though events exist"
         );

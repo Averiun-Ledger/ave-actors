@@ -1,6 +1,6 @@
 [package]
 name = "ave-actors-actor"
-version = "0.5.0"
+version = "0.6.0"
 edition.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -21,7 +21,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+dashmap = { workspace = true }
+fastrand = { workspace = true }
 
 
 [dev-dependencies]
 test-log = { workspace = true }
+serde_json = "1.0"

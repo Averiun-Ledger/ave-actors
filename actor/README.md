@@ -46,8 +46,11 @@ tracing = "0.1"
 | `ActorRef::ask_timeout` | one message and a `Duration` | `Result<Response, Error>` | Same as `ask`, but fails with `Error::Timeout` |
 | `ActorRef::ask_stop` | nothing | `Result<(), Error>` | Requests graceful shutdown and waits for confirmation |
 | `ActorRef::tell_stop` | nothing | `()` | Requests shutdown without waiting |
-| `ActorRef::subscribe` | nothing | `broadcast::Receiver<Event>` | Subscribes to future actor events |
-| `SystemRef::run_sink` | `Sink<E>` | `()` | Spawns an event subscriber task |
+| `ActorRef::register_sink` | `Sink<SinkEvent>` | `()` | Registers a named sink from external code |
+| `ActorRef::remove_sink` | `&str` | `Option<Sink<SinkEvent>>` | Removes a previously registered sink |
+| `ActorContext::publish_to` | `&str` + `SinkEvent` | `()` | Publishes an event to a specific sink (fire-and-forget) |
+| `ActorContext::publish_all` | `SinkEvent` | `Result<(), Error>` | Publishes an event to all registered sinks |
+| `ActorContext::publish_filtered` | `Fn(&str) -> bool` + `SinkEvent` | `()` | Publishes to sinks whose name matches a predicate (fire-and-forget) |
 
 ---
 
@@ -132,7 +135,7 @@ Override any hook in the `Actor` trait:
 
 ```rust,ignore
 async fn pre_start(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), Error> { .. }
-async fn pre_restart(&mut self, ctx: &mut ActorContext<Self>, err: Option<&Error>) -> Result<(), Error> { .. }
+async fn pre_restart(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), Error> { .. }
 async fn pre_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), Error> { .. }
 async fn post_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), Error> { .. }
 ```
@@ -144,12 +147,12 @@ async fn post_stop(&mut self, ctx: &mut ActorContext<Self>) -> Result<(), Error>
 Root actors can restart automatically on failure:
 
 ```rust,ignore
-use ave_actors_actor::{SupervisionStrategy, Strategy, FixedIntervalStrategy};
+use ave_actors_actor::{IntervalStrategy, SupervisionStrategy, Strategy};
 use std::time::Duration;
 
 fn supervision_strategy(&self) -> SupervisionStrategy {
-    SupervisionStrategy::Retry(Strategy::FixedInterval(
-        FixedIntervalStrategy::new(5, Duration::from_secs(1)),
+    SupervisionStrategy::Retry(Strategy::Interval(
+        IntervalStrategy::new(5, Duration::from_secs(1)),
     ))
 }
 ```
@@ -178,22 +181,38 @@ actor_ref.ask_stop().await?;
 
 ## Events
 
-Actors broadcast typed events to subscribers:
+Actors broadcast typed events to subscribers via named **sinks** that survive
+actor restarts.  Sinks are registered externally through [`ActorRef`] and
+processed in parallel.
 
 ```rust,ignore
 // Inside the actor:
-ctx.publish_event(MyEvent::SomethingHappened).await;
+ctx.publish_event(MyEvent::SomethingHappened);
 
-// Subscriber outside:
-let mut rx = actor_ref.subscribe();
-while let Ok(event) = rx.recv().await { .. }
+// Legacy broadcast subscription (still available):
+// Sinks are now the only event mechanism.
 
-// Or run a sink task:
-use ave_actors_actor::Sink;
-system.run_sink(Sink::new(actor_ref.subscribe(), my_subscriber)).await;
+// Modern sink API — register from outside the actor:
+use ave_actors_actor::{Sink, SinkEntry, Subscriber};
+
+let mut sink = Sink::new("analytics", None);
+sink.add("logger", my_subscriber);
+sink.add_entry(
+    SinkEntry::new("filter", my_filtered_subscriber)
+        .filter(|e| e.is_critical())
+        .retry(RetryPolicy::AtMost { max: 3, backoff: Duration::from_millis(100) }),
+);
+actor_ref.register_sink(sink);
+
+// Publishing from inside the actor:
+ctx.publish_to("analytics", MyEvent::SomethingHappened);
+ctx.publish_all(MyEvent::SomethingHappened).await?;
+ctx.publish_filtered(|name| name.starts_with("audit"), MyEvent::SomethingHappened);
 ```
 
-`Subscriber<E>` is a trait with a single `notify(&self, event: E)` method.
+`Subscriber<E>` is a trait with a single `notify(&self, event: E) -> Result<(), Error>`
+method.  Returning an `Err` triggers the sink's retry policy (if any) without
+stopping the actor.
 
 ---
 
