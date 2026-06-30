@@ -12,7 +12,7 @@ keywords.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-rusqlite = { version = "0.39.0", features = ["bundled"]}
+rusqlite = { version = "0.40.1", features = ["bundled"]}
 ave-actors-store = { workspace = true }
 tracing = {workspace = true }
 

@@ -440,7 +440,7 @@ pub struct SystemRunner {
 }
 
 impl SystemRunner {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
         shutdown_complete: oneshot::Receiver<()>,

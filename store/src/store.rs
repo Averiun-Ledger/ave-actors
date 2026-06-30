@@ -19,8 +19,9 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
 };
+use getrandom::fill as fill_random;
 
 use tracing::{debug, error, info_span, warn};
 
@@ -940,8 +941,14 @@ where
             });
         }
 
-        let cipher = XChaCha20Poly1305::new(key.as_ref().into());
-        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
+            .map_err(|e| store_error(StoreOperation::ValidateKeyLength, e))?;
+        let mut nonce_bytes = [0u8; NONCE_SIZE];
+        fill_random(&mut nonce_bytes).map_err(|e| {
+            error!(error = %e, "Failed to generate encryption nonce");
+            store_error(StoreOperation::EncryptData, e)
+        })?;
+        let nonce = XNonce::from(nonce_bytes);
         let ciphertext: Vec<u8> =
             cipher.encrypt(&nonce, bytes.as_ref()).map_err(|e| {
                 error!(error = %e, "Encryption failed");
@@ -997,12 +1004,14 @@ where
             ));
         }
 
-        let nonce = XNonce::from_slice(&ciphertext[..NONCE_SIZE]);
+        let nonce = XNonce::try_from(&ciphertext[..NONCE_SIZE])
+            .map_err(|e| store_error(StoreOperation::DecryptData, e))?;
         let ciphertext_data = &ciphertext[NONCE_SIZE..];
 
-        let cipher = XChaCha20Poly1305::new(key.as_ref().into());
+        let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
+            .map_err(|e| store_error(StoreOperation::ValidateKeyLength, e))?;
         let plaintext =
-            cipher.decrypt(nonce, ciphertext_data).map_err(|e| {
+            cipher.decrypt(&nonce, ciphertext_data).map_err(|e| {
                 warn!(
                     error = %e,
                     "Decryption failed, possible tampering or corruption"

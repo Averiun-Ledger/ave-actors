@@ -58,17 +58,17 @@ ave-actors-actor = { path = "actor", version = "0.6.0"}
 ave-actors-store = { path = "store", version = "0.6.0" }
 ave-actors-rocksdb = { path = "databases/rocksdb_db", version = "0.5.0"}
 ave-actors-sqlite = { path = "databases/sqlite_db", version = "0.7.0"}
-zeroize = "1.8.2"
+zeroize = "1.9.0"
 memsecurity = { version = "3.5.2", features = ["encryption"] }
 async-trait = { version = "0.1.89" }
-borsh = { version = "1.6.1", features = ["derive"] }
+borsh = { version = "1.7.0", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 tempfile = "3.27.0"
 thiserror = { version = "2.0.18" }
 tokio = { version = "1.52.3" }
 tokio-util = { version = "0.7.18" }
 tracing ={ version = "0.1.44" }
-dashmap = "6.1.0"
-fastrand = "2.3.0"
+dashmap = "6.2.1"
+fastrand = "2.4.1"
 tracing-test = "0.2.6"
-test-log = {version = "0.2.20", features = ["trace"] }
+test-log = {version = "0.2.21", features = ["trace"] }
