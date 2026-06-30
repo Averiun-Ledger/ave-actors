@@ -459,7 +459,7 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
         }
     }
 
-    fn stop(&mut self) -> Result<(), StoreError> {
+    fn stop(self) -> Result<(), StoreError> {
         Ok(())
     }
 

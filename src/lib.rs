@@ -6,7 +6,7 @@ pub use ave_actors_actor::{
     ExponentialBackoffStrategy, Handler, IntervalStrategy, Message,
     NoIntervalStrategy, NotPersistentActor, Response, RetryActor, RetryMessage,
     RetryPolicy, RetryStrategy, Sink, SinkEntry, Strategy, Subscriber,
-    SupervisionStrategy, SystemEvent, SystemRef, SystemRunner,
+    SupervisionStrategy, SystemEvent, SystemRef, SystemRunner, TimerKey,
 };
 
 #[cfg(any(feature = "rocksdb", feature = "sqlite"))]

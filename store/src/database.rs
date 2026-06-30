@@ -17,7 +17,7 @@ pub type CollectionIter<'a> =
 /// Implement this trait to plug in a custom database (SQLite, RocksDB, etc.).
 /// The type parameters `C` and `S` are the concrete collection and state types
 /// your backend produces.
-pub trait DbManager<C, S>: Sync + Send + Clone
+pub trait DbManager<C, S>: Sync + Send
 where
     C: Collection + 'static,
     S: State + 'static,
@@ -39,7 +39,10 @@ where
     ///
     /// Backends that need to flush WAL buffers or close connections should override
     /// this. The default implementation is a no-op and always returns `Ok(())`.
-    fn stop(&mut self) -> Result<(), Error> {
+    fn stop(self) -> Result<(), Error>
+    where
+        Self: Sized,
+    {
         Ok(())
     }
 }
@@ -216,7 +219,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_create_collection() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let store: $type2 =
                     manager.create_collection("test", "test").unwrap();
                 assert_eq!(Collection::name(&store), "test");
@@ -225,7 +228,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_create_state() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let store: $type2 =
                     manager.create_state("test", "test").unwrap();
                 assert_eq!(State::name(&store), "test");
@@ -234,7 +237,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_put_get_collection() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let mut store: $type2 =
                     manager.create_collection("test", "test").unwrap();
                 Collection::put(&mut store, "key", b"value").unwrap();
@@ -244,7 +247,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_put_get_state() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let mut store: $type2 =
                     manager.create_state("test", "test").unwrap();
                 State::put(&mut store, b"value").unwrap();
@@ -254,7 +257,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_del_collection() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let mut store: $type2 =
                     manager.create_collection("test", "test").unwrap();
                 Collection::put(&mut store, "key", b"value").unwrap();
@@ -270,7 +273,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_del_state() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let mut store: $type2 =
                     manager.create_state("test", "test").unwrap();
                 State::put(&mut store, b"value").unwrap();
@@ -286,7 +289,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_iter() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let mut store: $type2 =
                     manager.create_collection("test", "test").unwrap();
                 Collection::put(&mut store, "key1", b"value1").unwrap();
@@ -310,7 +313,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_iter_reverse() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let mut store: $type2 =
                     manager.create_collection("test", "test").unwrap();
                 Collection::put(&mut store, "key1", b"value1").unwrap();
@@ -334,7 +337,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_iter_range() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let mut store: $type2 =
                     manager.create_collection("test", "test").unwrap();
                 Collection::put(&mut store, "key1", b"value1").unwrap();
@@ -357,7 +360,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_iter_range_reverse() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let mut store: $type2 =
                     manager.create_collection("test", "test").unwrap();
                 Collection::put(&mut store, "key1", b"value1").unwrap();
@@ -380,7 +383,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_last() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let mut store: $type2 =
                     manager.create_collection("test", "test").unwrap();
                 Collection::put(&mut store, "key1", b"value1").unwrap();
@@ -396,7 +399,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_get_by_range() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let mut store: $type2 =
                     manager.create_collection("test", "test").unwrap();
                 Collection::put(&mut store, "key1", b"value1").unwrap();
@@ -417,7 +420,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_del_range() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let mut store: $type2 =
                     manager.create_collection("test", "test").unwrap();
                 Collection::put(&mut store, "key1", b"value1").unwrap();
@@ -445,7 +448,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_purge_collection() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let mut store: $type2 =
                     manager.create_collection("test", "test").unwrap();
                 Collection::put(&mut store, "key1", b"value1").unwrap();
@@ -487,7 +490,7 @@ macro_rules! test_store_trait {
 
             #[test]
             fn test_purge_state() {
-                let mut manager = <$type>::default();
+                let manager = <$type>::default();
                 let mut store: $type2 =
                     manager.create_state("test", "test").unwrap();
                 State::put(&mut store, b"value1").unwrap();

@@ -72,7 +72,7 @@ impl DbManager<MemoryStore, FailingStateStore> for FailingStateManager {
         Ok(FailingStateStore)
     }
 
-    fn stop(&mut self) -> Result<(), StoreError> {
+    fn stop(self) -> Result<(), StoreError> {
         Ok(())
     }
 }
@@ -148,7 +148,7 @@ impl DbManager<FailingCompactionCollection, MemoryStore>
         self.memory.create_state(name, prefix)
     }
 
-    fn stop(&mut self) -> Result<(), StoreError> {
+    fn stop(self) -> Result<(), StoreError> {
         Ok(())
     }
 }
@@ -231,7 +231,7 @@ impl DbManager<LoggingCollection, MemoryStore> for LoggingCompactionManager {
         self.memory.create_state(name, prefix)
     }
 
-    fn stop(&mut self) -> Result<(), StoreError> {
+    fn stop(self) -> Result<(), StoreError> {
         Ok(())
     }
 }
@@ -346,7 +346,7 @@ impl DbManager<RangeCollection, MemoryStore> for LastErrorManager {
         self.memory.create_state(name, prefix)
     }
 
-    fn stop(&mut self) -> Result<(), StoreError> {
+    fn stop(self) -> Result<(), StoreError> {
         Ok(())
     }
 }

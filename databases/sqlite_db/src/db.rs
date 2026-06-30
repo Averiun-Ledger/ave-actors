@@ -354,7 +354,7 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
         Ok(SqliteCollection::new(self.clone(), identifier, prefix))
     }
 
-    fn stop(&mut self) -> Result<(), Error> {
+    fn stop(self) -> Result<(), Error> {
         debug!("Stopping SQLite manager, draining pool and flushing WAL");
         self.pool.drain().map_err(|e| {
             error!(error = %e, "Failed to drain connection pool on stop");
@@ -1241,7 +1241,7 @@ mod tests {
             condvar: Condvar::new(),
         });
 
-        let mut manager = SqliteManager {
+        let manager = SqliteManager {
             admin_conn: Arc::new(Mutex::new(admin_conn)),
             pool,
         };

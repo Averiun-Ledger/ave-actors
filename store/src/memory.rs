@@ -58,7 +58,7 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
         self.get_or_create_store(name, prefix)
     }
 
-    fn stop(&mut self) -> Result<(), Error> {
+    fn stop(self) -> Result<(), Error> {
         Ok(())
     }
 

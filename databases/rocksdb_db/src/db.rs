@@ -30,7 +30,6 @@ use std::{
 /// - **Connection**: Thread-safe shared DB instance using Arc<DB>
 /// - **Column Families**: Separate namespaces for different actors
 ///
-#[derive(Clone)]
 pub struct RocksDbManager {
     /// RocksDB configuration options.
     opts: Options,
@@ -132,6 +131,11 @@ impl RocksDbManager {
             db: Arc::new(db),
             strong_durability,
         })
+    }
+
+    #[cfg(test)]
+    fn raw_db(&self) -> Arc<DB> {
+        Arc::clone(&self.db)
     }
 }
 
@@ -240,7 +244,7 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         Ok(RocksDbStore {
             name: name.to_owned(),
             prefix: prefix.to_owned(),
-            store: self.db.clone(),
+            store: Arc::clone(&self.db),
             strong_durability: self.strong_durability,
         })
     }
@@ -255,12 +259,12 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         Ok(RocksDbStore {
             name: name.to_owned(),
             prefix: prefix.to_owned(),
-            store: self.db.clone(),
+            store: Arc::clone(&self.db),
             strong_durability: self.strong_durability,
         })
     }
 
-    fn stop(&mut self) -> Result<(), Error> {
+    fn stop(self) -> Result<(), Error> {
         debug!("Stopping RocksDB manager, flushing memtables and WAL");
 
         // Sync WAL first: ensures all committed writes survive even if the
@@ -291,6 +295,9 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
             }
         }
 
+        // Dropping `self` (and therefore `self.db`) releases the last strong
+        // reference held by this manager, which closes RocksDB and frees the
+        // file lock.
         debug!("RocksDB stop complete");
         Ok(())
     }
@@ -848,7 +855,7 @@ mod tests {
         let mut store = RocksDbStore {
             name: "no_such_cf".to_owned(),
             prefix: "pref".to_owned(),
-            store: manager.db,
+            store: manager.raw_db(),
             strong_durability: false,
         };
 
@@ -954,7 +961,7 @@ mod tests {
     #[test]
     fn test_missing_cf_iterators() {
         let manager = RocksDbManager::default();
-        let db = manager.db;
+        let db = manager.raw_db();
         assert!(
             RocksDbIterator::new(
                 &db,
@@ -983,9 +990,10 @@ mod tests {
         let mut store = manager.create_collection("c", "pref").unwrap();
         Collection::put(&mut store, "a", b"1").unwrap();
 
-        let handle = manager.db.cf_handle("c").unwrap();
+        let db = manager.raw_db();
+        let handle = db.cf_handle("c").unwrap();
         let bad_key = b"pref.\xFE";
-        manager.db.put_cf(&handle, bad_key, b"bad").unwrap();
+        db.put_cf(&handle, bad_key, b"bad").unwrap();
 
         let mut iter = store.iter(false).unwrap();
         assert_eq!(

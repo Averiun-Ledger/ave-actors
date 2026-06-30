@@ -871,7 +871,7 @@ mod test {
 
     #[test(tokio::test)]
     async fn test_actor() {
-        let system =
+        let (system, _) =
             SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let actor = TestActor { counter: 0 };
         let actor_ref = system.create_root_actor("test", actor).await.unwrap();

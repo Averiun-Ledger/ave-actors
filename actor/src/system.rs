@@ -52,9 +52,10 @@ impl ActorSystem {
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
     ) -> (SystemRef, SystemRunner) {
-        let system =
+        let (system, shutdown_complete) =
             SystemRef::new(graceful_token.clone(), crash_token.clone());
-        let runner = SystemRunner::new(graceful_token, crash_token);
+        let runner =
+            SystemRunner::new(graceful_token, crash_token, shutdown_complete);
         (system, runner)
     }
 }
@@ -101,7 +102,7 @@ impl SystemRef {
     pub(crate) fn new(
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
-    ) -> Self {
+    ) -> (Self, oneshot::Receiver<()>) {
         let root_senders =
             Arc::new(RwLock::new(HashMap::<ActorPath, StopHandle>::new()));
         let child_index = Arc::new(DashMap::new());
@@ -112,6 +113,7 @@ impl SystemRef {
         let shutting_down_clone = shutting_down.clone();
         let graceful_clone = graceful_token.clone();
         let crash_clone = crash_token.clone();
+        let (shutdown_complete_tx, shutdown_complete_rx) = oneshot::channel();
 
         tokio::spawn(async move {
             let reason = tokio::select! {
@@ -164,18 +166,22 @@ impl SystemRef {
 
             let _ =
                 system_event_sender_clone.send(SystemEvent::StopSystem(reason));
+            let _ = shutdown_complete_tx.send(());
         });
 
-        Self {
-            actors: Arc::new(DashMap::new()),
-            child_index,
-            helpers: Arc::new(DashMap::new()),
-            graceful_token,
-            crash_token,
-            root_senders,
-            system_event_sender,
-            shutting_down,
-        }
+        (
+            Self {
+                actors: Arc::new(DashMap::new()),
+                child_index,
+                helpers: Arc::new(DashMap::new()),
+                graceful_token,
+                crash_token,
+                root_senders,
+                system_event_sender,
+                shutting_down,
+            },
+            shutdown_complete_rx,
+        )
     }
 
     fn is_shutting_down(&self) -> bool {
@@ -411,29 +417,45 @@ impl SystemRef {
             .get(name)
             .and_then(|any| any.value().downcast_ref::<H>().cloned())
     }
+
+    /// Removes the helper stored under `name` and returns it, or `None` if not
+    /// found or if the type does not match.
+    pub async fn remove_helper<H>(&self, name: &str) -> Option<H>
+    where
+        H: Any + Send + Sync + 'static,
+    {
+        self.helpers.remove(name).and_then(|(_key, any)| {
+            any.downcast::<H>().ok().map(|boxed| *boxed)
+        })
+    }
 }
 
 /// Drives the actor system event loop; block on [`SystemRunner::run`] to keep the system alive until shutdown.
 pub struct SystemRunner {
     graceful_token: CancellationToken,
     crash_token: CancellationToken,
+    /// Fires once the shutdown task has stopped all root actors and released
+    /// all system resources.
+    shutdown_complete: Option<oneshot::Receiver<()>>,
 }
 
 impl SystemRunner {
-    pub(crate) const fn new(
+    pub(crate) fn new(
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
+        shutdown_complete: oneshot::Receiver<()>,
     ) -> Self {
         Self {
             graceful_token,
             crash_token,
+            shutdown_complete: Some(shutdown_complete),
         }
     }
 
     /// Runs the system event loop until shutdown, returning the [`ShutdownReason`] for use as a process exit code.
     pub async fn run(&mut self) -> ShutdownReason {
         debug!("Running actor system");
-        tokio::select! {
+        let reason = tokio::select! {
             _ = self.graceful_token.cancelled() => {
                 debug!("Actor system stopped gracefully");
                 ShutdownReason::Graceful
@@ -442,7 +464,16 @@ impl SystemRunner {
                 debug!("Actor system crashed");
                 ShutdownReason::Crash
             }
+        };
+
+        // Do not return until the shutdown task has finished stopping all
+        // root actors. This guarantees that persistent actors (and their
+        // stores) have been dropped before the caller tears down shared
+        // resources such as the RocksDB database manager.
+        if let Some(rx) = self.shutdown_complete.take() {
+            let _ = rx.await;
         }
+        reason
     }
 }
 
@@ -468,7 +499,8 @@ mod tests {
     async fn test_system_runner_graceful() {
         let graceful = CancellationToken::new();
         let crash = CancellationToken::new();
-        let mut runner = SystemRunner::new(graceful.clone(), crash.clone());
+        let (_, mut runner) =
+            ActorSystem::create(graceful.clone(), crash.clone());
         graceful.cancel();
         let reason = runner.run().await;
         assert_eq!(reason, ShutdownReason::Graceful);
@@ -478,8 +510,8 @@ mod tests {
     async fn test_system_runner_stop_system() {
         let graceful = CancellationToken::new();
         let crash = CancellationToken::new();
-        let system = SystemRef::new(graceful.clone(), crash.clone());
-        let mut runner = SystemRunner::new(graceful, crash);
+        let (system, mut runner) =
+            ActorSystem::create(graceful.clone(), crash.clone());
         let system_clone = system.clone();
         tokio::spawn(async move {
             system_clone.stop_system();
@@ -492,8 +524,8 @@ mod tests {
     async fn test_system_runner_crash() {
         let graceful = CancellationToken::new();
         let crash = CancellationToken::new();
-        let system = SystemRef::new(graceful.clone(), crash.clone());
-        let mut runner = SystemRunner::new(graceful, crash);
+        let (system, mut runner) =
+            ActorSystem::create(graceful.clone(), crash.clone());
         let system_clone = system.clone();
         tokio::spawn(async move {
             system_clone.crash_system();

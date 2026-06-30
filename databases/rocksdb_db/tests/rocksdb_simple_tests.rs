@@ -175,7 +175,7 @@ fn test_rocksdb_reopen_existing_cfs() {
 fn test_rocksdb_strong_durability() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("durability");
-    let mut manager = RocksDbManager::new(&db_path, true, None).unwrap();
+    let manager = RocksDbManager::new(&db_path, true, None).unwrap();
 
     let mut collection = manager.create_collection("c", "p").unwrap();
     Collection::put(&mut collection, "k", b"v").unwrap();

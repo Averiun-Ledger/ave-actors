@@ -671,7 +671,7 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_actor_root_failed() {
-        let system =
+        let (system, _) =
             SystemRef::new(CancellationToken::new(), CancellationToken::new());
 
         let actor = TestActor { failed: false };
@@ -853,7 +853,7 @@ mod tests {
     /// tell/ask to a fully stopped actor must return Error::ActorStopped.
     #[test(tokio::test)]
     async fn test_send_to_stopped_actor_returns_actor_stopped() {
-        let system =
+        let (system, _) =
             SystemRef::new(CancellationToken::new(), CancellationToken::new());
 
         let actor = DrainActor {
@@ -889,7 +889,7 @@ mod tests {
     ///     drain runs → Normal discarded, Critical processed.
     #[test(tokio::test)]
     async fn test_drain_critical_processed_normal_stopped() {
-        let system =
+        let (system, _) =
             SystemRef::new(CancellationToken::new(), CancellationToken::new());
 
         let started = Arc::new(Notify::new());
@@ -947,7 +947,7 @@ mod tests {
     /// callers receive Error::ActorStopped.
     #[test(tokio::test)]
     async fn test_mailbox_drain_timeout_drops_slow_critical() {
-        let system =
+        let (system, _) =
             SystemRef::new(CancellationToken::new(), CancellationToken::new());
 
         let started = Arc::new(Notify::new());
@@ -1035,7 +1035,7 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_max_retries_exceeded() {
-        let system =
+        let (system, _) =
             SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
             ActorPath::from("/user/max_retries"),
@@ -1109,7 +1109,7 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_apply_stop_strategy() {
-        let system =
+        let (system, _) =
             SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
             ActorPath::from("/user/stop_strategy"),
@@ -1170,7 +1170,7 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_mailbox_closed_stops_actor() {
-        let system =
+        let (system, _) =
             SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
             ActorPath::from("/user/simple"),
@@ -1258,7 +1258,7 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_pre_restart_error() {
-        let system =
+        let (system, _) =
             SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
             ActorPath::from("/user/pre_restart_err"),
@@ -1344,7 +1344,7 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_apply_retry_strategy_success() {
-        let system =
+        let (system, _) =
             SystemRef::new(CancellationToken::new(), CancellationToken::new());
         let actor = RetryOnceActor {
             failed: Arc::new(Mutex::new(true)),
