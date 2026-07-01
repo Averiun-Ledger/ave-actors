@@ -16,7 +16,7 @@ mod timer;
 
 pub use actor::{
     Actor, ActorContext, ActorRef, ChildAction, Event, Handler, Message,
-    Response,
+    OverflowStrategy, Response,
 };
 pub use error::Error;
 pub use into_actor::{IntoActor, NotPersistentActor};

@@ -495,6 +495,20 @@ pub enum ChildError<E, F> {
     ChildStopped(ActorPath),
 }
 
+/// Strategy applied when an actor's mailbox reaches its capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverflowStrategy {
+    /// Block the sender until there is room in the mailbox.
+    Backpressure,
+    /// Silently discard the message being sent.
+    ///
+    /// This only applies to `tell`; `ask` uses backpressure because it must
+    /// return a response to the caller.
+    DropNewest,
+    /// Return `Error::MailboxFull` to the sender immediately.
+    Fail,
+}
+
 /// Defines the identity and associated types of an actor.
 ///
 /// Implement this trait together with [`Handler`] on your actor struct.
@@ -563,6 +577,16 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
     /// Timers created beyond this limit are ignored and logged as a warning.
     fn max_timers() -> usize {
         usize::MAX
+    }
+
+    /// Maximum number of messages that can be queued in this actor's mailbox.
+    fn mailbox_capacity() -> usize {
+        1024
+    }
+
+    /// Strategy to apply when the mailbox is full.
+    fn mailbox_overflow_strategy() -> OverflowStrategy {
+        OverflowStrategy::Backpressure
     }
 
     /// Called once before the actor begins processing messages.

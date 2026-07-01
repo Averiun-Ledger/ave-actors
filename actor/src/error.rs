@@ -103,6 +103,11 @@ pub enum Error {
     #[error("actor stopped before processing message")]
     ActorStopped,
 
+    /// The actor's mailbox is full and the configured overflow strategy is
+    /// `Fail`.
+    #[error("actor mailbox is full")]
+    MailboxFull,
+
     /// The ask request timed out before the actor responded.
     #[error("ask timed out after {ms}ms")]
     Timeout {

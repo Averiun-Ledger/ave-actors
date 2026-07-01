@@ -1,5 +1,5 @@
 use crate::{
-    ActorPath, Error,
+    ActorPath, Error, OverflowStrategy,
     actor::{Actor, ActorContext, Handler, Message},
 };
 
@@ -100,12 +100,12 @@ pub type MailboxSender<A> = mpsc::Sender<Envelope<A>>;
 /// Complete mailbox tuple containing both sender and receiver sides.
 pub type Mailbox<A> = (MailboxSender<A>, MailboxReceiver<A>);
 
-/// Creates a new mailbox for an actor.
-pub fn mailbox<A>() -> Mailbox<A>
+/// Creates a new mailbox for an actor with the given capacity.
+pub fn mailbox<A>(capacity: usize) -> Mailbox<A>
 where
     A: Actor + Handler<A>,
 {
-    mpsc::channel(1024)
+    mpsc::channel(capacity)
 }
 
 /// Handle helper for sending messages to an actor.
@@ -115,14 +115,19 @@ where
 {
     /// The underlying mailbox sender for this actor.
     sender: MailboxSender<A>,
+    /// Strategy to apply when the mailbox is full.
+    strategy: OverflowStrategy,
 }
 
 impl<A> HandleHelper<A>
 where
     A: Actor + Handler<A>,
 {
-    pub(crate) const fn new(sender: MailboxSender<A>) -> Self {
-        Self { sender }
+    pub(crate) const fn new(
+        sender: MailboxSender<A>,
+        strategy: OverflowStrategy,
+    ) -> Self {
+        Self { sender, strategy }
     }
 
     /// Sends a message to the actor without expecting a response
@@ -132,10 +137,39 @@ where
         sender: ActorPath,
         message: A::Message,
     ) -> Result<(), Error> {
-        self.sender
-            .send(Envelope::tell(message, sender))
-            .await
-            .map_err(|_| Error::ActorStopped)
+        match self.strategy {
+            OverflowStrategy::Backpressure => self
+                .sender
+                .send(Envelope::tell(message, sender))
+                .await
+                .map_err(|_| Error::ActorStopped),
+            OverflowStrategy::DropNewest => {
+                match self.sender.try_send(Envelope::tell(message, sender)) {
+                    Ok(()) => Ok(()),
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::debug!(
+                            strategy = ?self.strategy,
+                            "Mailbox full, dropping message"
+                        );
+                        Ok(())
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        Err(Error::ActorStopped)
+                    }
+                }
+            }
+            OverflowStrategy::Fail => {
+                match self.sender.try_send(Envelope::tell(message, sender)) {
+                    Ok(()) => Ok(()),
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        Err(Error::MailboxFull)
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        Err(Error::ActorStopped)
+                    }
+                }
+            }
+        }
     }
 
     /// Sends a message to the actor and waits for a response
@@ -145,11 +179,33 @@ where
         sender: ActorPath,
         message: A::Message,
     ) -> Result<A::Response, Error> {
+        // Ask requires a response, so `DropNewest` cannot silently discard the
+        // message. Use backpressure for asks under `DropNewest`; only `Fail`
+        // returns `MailboxFull` immediately.
         let (response_sender, response_receiver) = oneshot::channel();
-        self.sender
-            .send(Envelope::ask(message, sender, response_sender))
-            .await
-            .map_err(|_| Error::ActorStopped)?;
+        match self.strategy {
+            OverflowStrategy::Backpressure | OverflowStrategy::DropNewest => {
+                self.sender
+                    .send(Envelope::ask(message, sender, response_sender))
+                    .await
+                    .map_err(|_| Error::ActorStopped)?;
+            }
+            OverflowStrategy::Fail => {
+                match self.sender.try_send(Envelope::ask(
+                    message,
+                    sender,
+                    response_sender,
+                )) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        return Err(Error::MailboxFull);
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        return Err(Error::ActorStopped);
+                    }
+                }
+            }
+        }
         response_receiver.await.map_err(|_| Error::ActorStopped)?
     }
 
@@ -171,6 +227,7 @@ where
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
+            strategy: self.strategy,
         }
     }
 }

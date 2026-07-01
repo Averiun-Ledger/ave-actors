@@ -95,11 +95,11 @@ where
         actor: A,
         parent_info: Option<crate::parent_ref::ParentInfo>,
     ) -> (Self, ActorRef<A>, StopSender) {
-        let (sender, receiver) = mailbox();
+        let (sender, receiver) = mailbox(A::mailbox_capacity());
         let (stop_sender, stop_receiver) = mpsc::channel(4);
         let (error_sender, error_receiver) =
             crate::parent_ref::child_error_channel();
-        let helper = HandleHelper::new(sender);
+        let helper = HandleHelper::new(sender, A::mailbox_overflow_strategy());
         let sinks = Arc::new(DashMap::<String, Sink<A::SinkEvent>>::new());
 
         let actor_ref = ActorRef::new(
