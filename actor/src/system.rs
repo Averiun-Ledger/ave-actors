@@ -21,6 +21,17 @@ use std::{
     },
 };
 
+/// Entry in the watch-index for a target actor.
+///
+/// Stores enough information to send a termination notification to the watcher
+/// without keeping a strong reference to the watcher actor itself.
+struct WatchEntry {
+    /// Path of the watching actor.
+    watcher_path: ActorPath,
+    /// Function that spawns a task to deliver the termination message.
+    notify: Arc<dyn Fn(ActorPath) + Send + Sync>,
+}
+
 /// The reason why the actor system stopped, returned by [`SystemRunner::run`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShutdownReason {
@@ -89,6 +100,9 @@ pub struct SystemRef {
     root_senders: Arc<RwLock<HashMap<ActorPath, StopHandle>>>,
     /// Broadcast bus for observable system-level events such as root actor errors.
     system_event_sender: broadcast::Sender<SystemEvent>,
+    /// Inverse index: for each target actor path, the list of watchers that
+    /// should receive a termination notification.
+    watchers: Arc<DashMap<ActorPath, Vec<WatchEntry>>>,
 
     /// Cancelled by an external signal (SIGTERM, operator). Exit code 0.
     graceful_token: CancellationToken,
@@ -106,6 +120,7 @@ impl SystemRef {
         let root_senders =
             Arc::new(RwLock::new(HashMap::<ActorPath, StopHandle>::new()));
         let child_index = Arc::new(DashMap::new());
+        let watchers = Arc::new(DashMap::new());
         let (system_event_sender, _) = broadcast::channel::<SystemEvent>(256);
         let shutting_down = Arc::new(AtomicBool::new(false));
         let root_sender_clone = root_senders.clone();
@@ -178,6 +193,7 @@ impl SystemRef {
                 crash_token,
                 root_senders,
                 system_event_sender,
+                watchers,
                 shutting_down,
             },
             shutdown_complete_rx,
@@ -370,6 +386,57 @@ impl SystemRef {
         let removed = self.actors.remove(path).is_some();
         if removed {
             self.deindex_actor(path);
+        }
+    }
+
+    /// Registers a watcher for the actor at `target_path`.
+    ///
+    /// `notify` is called when the target terminates; it is responsible for
+    /// delivering the notification without blocking the target's runner.
+    ///
+    /// The registration is idempotent: if `watcher_path` already watches
+    /// `target`, the existing entry is kept and the new one is ignored.
+    pub(crate) async fn watch(
+        &self,
+        target: ActorPath,
+        watcher_path: ActorPath,
+        notify: Arc<dyn Fn(ActorPath) + Send + Sync>,
+    ) {
+        let mut entries = self.watchers.entry(target).or_default();
+        if entries
+            .iter()
+            .any(|entry| entry.watcher_path == watcher_path)
+        {
+            return;
+        }
+        entries.push(WatchEntry {
+            watcher_path,
+            notify,
+        });
+    }
+
+    /// Removes all watch entries from `target` to `watcher_path`.
+    ///
+    /// If no such entry exists, this is a no-op.
+    pub(crate) async fn unwatch(
+        &self,
+        target: ActorPath,
+        watcher_path: ActorPath,
+    ) {
+        if let Some(mut entries) = self.watchers.get_mut(&target) {
+            entries.retain(|entry| entry.watcher_path != watcher_path);
+        }
+    }
+
+    /// Notifies every watcher of `target` that it has terminated.
+    ///
+    /// The watch index for `target` is cleared atomically so each watcher is
+    /// notified at most once.
+    pub(crate) async fn notify_watchers(&self, target: &ActorPath) {
+        if let Some((_, entries)) = self.watchers.remove(target) {
+            for entry in entries {
+                (entry.notify)(target.clone());
+            }
         }
     }
 

@@ -127,6 +127,63 @@ where
         self.timer_scheduler.cancel(key);
     }
 
+    /// Watches `target` and delivers a termination message to this actor when
+    /// `target` stops.
+    ///
+    /// `msg_factory` is called with the terminated actor's path to build the
+    /// message that will be sent to this actor. It allows the watcher to model
+    /// the notification with its own message type.
+    ///
+    /// Returns `Error::ActorStopped` if `target` has already stopped.
+    pub async fn watch<B, F>(
+        &self,
+        target: &ActorRef<B>,
+        msg_factory: F,
+    ) -> Result<(), Error>
+    where
+        B: Actor + Handler<B>,
+        F: Fn(ActorPath) -> A::Message + Send + Sync + 'static,
+    {
+        if target.is_closed() {
+            return Err(Error::ActorStopped);
+        }
+
+        let watcher_ref = self.reference().await?;
+        let watcher_path = self.path.clone();
+        let factory = Arc::new(msg_factory);
+
+        let notify = Arc::new(move |terminated: ActorPath| {
+            let actor_ref = watcher_ref.clone();
+            let factory = Arc::clone(&factory);
+            let watcher = watcher_path.clone();
+            tokio::spawn(async move {
+                let msg = factory(terminated);
+                if let Err(err) = actor_ref.tell(msg).await {
+                    tracing::debug!(
+                        error = %err,
+                        watcher = %watcher,
+                        "Failed to deliver termination notification to watcher"
+                    );
+                }
+            });
+        });
+
+        self.system
+            .watch(target.path(), self.path.clone(), notify)
+            .await;
+        Ok(())
+    }
+
+    /// Stops watching `target` from this actor.
+    ///
+    /// If this actor was not watching `target`, this is a no-op.
+    pub async fn unwatch<B>(&self, target: &ActorRef<B>)
+    where
+        B: Actor + Handler<B>,
+    {
+        self.system.unwatch(target.path(), self.path.clone()).await;
+    }
+
     /// Spawns an asynchronous task whose lifetime is bound to this actor.
     ///
     /// The task runs on the Tokio runtime, but it is automatically aborted when
@@ -773,6 +830,17 @@ where
             stop_sender: self.stop_sender.clone(),
             sinks: self.sinks.clone(),
         }
+    }
+}
+
+impl<A> std::fmt::Debug for ActorRef<A>
+where
+    A: Actor + Handler<A>,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActorRef")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
     }
 }
 

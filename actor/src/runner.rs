@@ -265,6 +265,7 @@ where
                     debug!("Actor terminated");
                     ctx.timer_scheduler.shutdown();
                     ctx.abort_spawned_tasks();
+                    ctx.system().notify_watchers(&self.path).await;
                     let init_err = ctx.startup_error().unwrap_or_else(|| {
                         Error::FunctionalCritical {
                             description: format!(
