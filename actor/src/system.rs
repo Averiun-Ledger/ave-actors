@@ -345,6 +345,8 @@ impl SystemRef {
     where
         A: Actor + Handler<A>,
     {
+        path.validate()?;
+
         if self.is_shutting_down() {
             debug!(path = %path, "Rejecting actor creation during shutdown");
             return Err(Error::SystemStopped);
@@ -451,6 +453,8 @@ impl SystemRef {
         A: Actor + Handler<A>,
         I: crate::IntoActor<A>,
     {
+        ActorPath::validate_segment(name)?;
+
         let actor = actor_init.into_actor();
         let path = ActorPath::from("/user") / name;
         let id = path.key();

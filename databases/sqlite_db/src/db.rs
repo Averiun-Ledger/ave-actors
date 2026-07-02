@@ -96,7 +96,12 @@ impl Drop for PooledConnection {
         // is alive, and this is the only place that moves it out. After this
         // call the value is no longer used, satisfying ManuallyDrop's contract.
         let conn = unsafe { std::mem::ManuallyDrop::take(&mut self.conn) };
-        self.pool.checkin(conn);
+        if let Err(err) = self.pool.checkin(conn) {
+            error!(
+                error = %err,
+                "Failed to return SQLite connection to pool on drop"
+            );
+        }
     }
 }
 
@@ -135,7 +140,14 @@ impl SqlitePool {
                 Ok(conn) => conn,
                 Err(e) => {
                     let mut state =
-                        self.state.lock().unwrap_or_else(|e| e.into_inner());
+                        self.state.lock().map_err(|poison| Error::Store {
+                            source: None,
+                            operation: StoreOperation::LockManagerData,
+                            reason: format!(
+                                "connection pool mutex poisoned: {}",
+                                poison
+                            ),
+                        })?;
                     state.total -= 1;
                     drop(state);
                     self.condvar.notify_one();
@@ -151,8 +163,12 @@ impl SqlitePool {
 
     /// Returns a connection to the idle set, discarding it if the pool is
     /// already at capacity.
-    fn checkin(&self, conn: Connection) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+    fn checkin(&self, conn: Connection) -> Result<(), Error> {
+        let mut state = self.state.lock().map_err(|poison| Error::Store {
+            source: None,
+            operation: StoreOperation::LockManagerData,
+            reason: format!("connection pool mutex poisoned: {}", poison),
+        })?;
         if state.available.len() < self.max_size {
             state.available.push(conn);
         } else {
@@ -160,6 +176,7 @@ impl SqlitePool {
         }
         drop(state);
         self.condvar.notify_one();
+        Ok(())
     }
 
     /// Wait until all checked-out connections have been returned.

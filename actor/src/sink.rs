@@ -23,6 +23,12 @@ const DEFAULT_SINK_CONCURRENCY: usize = 10;
 /// Maximum number of subscribers notified concurrently by a [`Sink`].
 const MAX_SINK_CONCURRENCY: usize = 1_000_000;
 
+/// Default event buffer capacity for a [`Sink`].
+const DEFAULT_SINK_BUFFER_CAPACITY: usize = 1024;
+
+/// Maximum event buffer capacity allowed for a [`Sink`].
+const MAX_SINK_BUFFER_CAPACITY: usize = 1_000_000;
+
 /// Maximum number of retries allowed in a [`RetryPolicy::AtMost`].
 const MAX_RETRY_ATTEMPTS: u32 = 100;
 
@@ -194,7 +200,8 @@ impl<E: Event> Sink<E> {
     ///
     /// `max_concurrent` controls how many subscribers are notified
     /// concurrently for a single event.  If `None`, a default of 10 is
-    /// used.
+    /// used. The internal event buffer uses [`DEFAULT_SINK_BUFFER_CAPACITY`]
+    /// slots.
     ///
     /// # Errors
     ///
@@ -203,6 +210,25 @@ impl<E: Event> Sink<E> {
     pub fn new(
         name: impl Into<String>,
         max_concurrent: Option<usize>,
+    ) -> Result<Self, Error> {
+        Self::with_buffer(name, max_concurrent, DEFAULT_SINK_BUFFER_CAPACITY)
+    }
+
+    /// Create a new sink with the given name and event buffer capacity.
+    ///
+    /// `max_concurrent` controls how many subscribers are notified
+    /// concurrently for a single event. If `None`, a default of 10 is used.
+    /// `buffer_capacity` sets the size of the internal bounded channel; it
+    /// must be between 1 and [`MAX_SINK_BUFFER_CAPACITY`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` or
+    /// `buffer_capacity` are out of range.
+    pub fn with_buffer(
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+        buffer_capacity: usize,
     ) -> Result<Self, Error> {
         let name = name.into();
         let max_concurrent = max_concurrent.unwrap_or(DEFAULT_SINK_CONCURRENCY);
@@ -221,7 +247,23 @@ impl<E: Event> Sink<E> {
                 ),
             });
         }
-        let (sender, mut receiver) = tokio::sync::mpsc::channel::<Arc<E>>(1024);
+        if buffer_capacity == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "Sink".to_owned(),
+                reason: "buffer_capacity must be >= 1".to_owned(),
+            });
+        }
+        if buffer_capacity > MAX_SINK_BUFFER_CAPACITY {
+            return Err(Error::InvalidConfiguration {
+                component: "Sink".to_owned(),
+                reason: format!(
+                    "buffer_capacity cannot exceed {}",
+                    MAX_SINK_BUFFER_CAPACITY
+                ),
+            });
+        }
+        let (sender, mut receiver) =
+            tokio::sync::mpsc::channel::<Arc<E>>(buffer_capacity);
 
         let inner = Arc::new_cyclic(|weak: &std::sync::Weak<SinkInner<E>>| {
             let worker_name = name.clone();
@@ -422,8 +464,9 @@ impl<E: Event> Sink<E> {
 
     /// Send `event` to every subscriber whose filter accepts it.
     ///
-    /// The event is placed on an unbounded channel and processed by a
-    /// persistent worker task so the caller never blocks.
+    /// The event is placed on a bounded channel and processed by a
+    /// persistent worker task so the caller never blocks. If the channel is
+    /// full the event is dropped and a warning is logged.
     pub fn send(&self, event: Arc<E>) {
         if let Some(sender) = self
             .inner
@@ -653,6 +696,38 @@ mod tests {
         let err = sink
             .set_max_concurrent(0)
             .expect_err("zero concurrency should be rejected");
+        assert!(
+            matches!(err, Error::InvalidConfiguration { component, .. } if component == "Sink")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sink_with_buffer_accepts_valid_capacity() {
+        let result = Sink::<()>::with_buffer("test", None, 1);
+        let Ok(sink) = result else {
+            panic!("buffer capacity of 1 should be valid");
+        };
+        assert_eq!(sink.name(), "test");
+    }
+
+    #[test]
+    fn test_sink_with_buffer_rejects_zero_capacity() {
+        let result = Sink::<()>::with_buffer("test", None, 0);
+        let Err(err) = result else {
+            panic!("zero buffer capacity should be rejected");
+        };
+        assert!(
+            matches!(err, Error::InvalidConfiguration { component, .. } if component == "Sink")
+        );
+    }
+
+    #[test]
+    fn test_sink_with_buffer_rejects_excessive_capacity() {
+        let result =
+            Sink::<()>::with_buffer("test", None, MAX_SINK_BUFFER_CAPACITY + 1);
+        let Err(err) = result else {
+            panic!("excessive buffer capacity should be rejected");
+        };
         assert!(
             matches!(err, Error::InvalidConfiguration { component, .. } if component == "Sink")
         );

@@ -1288,6 +1288,13 @@ where
                 state,
                 snapshot_every,
             } => {
+                if snapshot_every == Some(0) {
+                    return Err(ActorError::InvalidConfiguration {
+                        component: "Store PersistFull".to_owned(),
+                        reason: "snapshot_every cannot be Some(0)".to_owned(),
+                    });
+                }
+
                 self.persist(event.as_ref()).map_err(|e| {
                     actor_store_error(StoreOperation::PersistFull, e)
                 })?;

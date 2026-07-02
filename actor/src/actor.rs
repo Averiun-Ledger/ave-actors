@@ -387,6 +387,7 @@ where
         I: crate::IntoActor<C>,
     {
         tracing::debug!(child_name = %name, "Creating child actor");
+        ActorPath::validate_segment(name)?;
         let actor = actor_init.into_actor();
         let path = self.path.clone() / name;
         let parent_info = crate::parent_ref::ParentInfo {

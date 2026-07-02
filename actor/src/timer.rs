@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 use tokio::time::Instant;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{Actor, ActorPath, Error, Handler, SystemRef};
 
@@ -214,8 +214,10 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidConfiguration`] if `delay` is zero or exceeds
-    /// [`MAX_TIMER_DELAY`].
+    /// Returns [`Error::InvalidConfiguration`] if `delay` exceeds
+    /// [`MAX_TIMER_DELAY`] or if the actor has already reached its timer
+    /// limit. If the scheduler is not accepting new timers (e.g. during
+    /// actor shutdown) the call succeeds but the timer is silently ignored.
     pub(crate) fn schedule_once(
         &self,
         delay: Duration,
@@ -228,6 +230,17 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
             return Ok(key);
         }
 
+        let mut heap = self.lock_heap();
+        if heap.len() >= self.max_timers {
+            return Err(Error::InvalidConfiguration {
+                component: "TimerScheduler".to_owned(),
+                reason: format!(
+                    "actor has reached its timer limit of {}",
+                    self.max_timers
+                ),
+            });
+        }
+
         let deadline = Instant::now() + delay;
         let epoch = self.epoch.load(AtomicOrdering::SeqCst);
         let entry = TimerEntry {
@@ -237,15 +250,6 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
             period: None,
             epoch,
         };
-
-        let mut heap = self.lock_heap();
-        if heap.len() >= self.max_timers {
-            warn!(
-                max_timers = self.max_timers,
-                "Actor has reached its timer limit; new timer ignored"
-            );
-            return Ok(key);
-        }
         heap.push(entry);
         drop(heap);
         self.ensure_task_running();
@@ -258,7 +262,9 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfiguration`] if `period` is zero or exceeds
-    /// [`MAX_TIMER_DELAY`].
+    /// [`MAX_TIMER_DELAY`], or if the actor has already reached its timer
+    /// limit. If the scheduler is not accepting new timers (e.g. during
+    /// actor shutdown) the call succeeds but the timer is silently ignored.
     pub(crate) fn schedule(
         &self,
         period: Duration,
@@ -274,6 +280,17 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
             return Ok(key);
         }
 
+        let mut heap = self.lock_heap();
+        if heap.len() >= self.max_timers {
+            return Err(Error::InvalidConfiguration {
+                component: "TimerScheduler".to_owned(),
+                reason: format!(
+                    "actor has reached its timer limit of {}",
+                    self.max_timers
+                ),
+            });
+        }
+
         let deadline = Instant::now() + period;
         let epoch = self.epoch.load(AtomicOrdering::SeqCst);
         let entry = TimerEntry {
@@ -283,15 +300,6 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
             period: Some(period),
             epoch,
         };
-
-        let mut heap = self.lock_heap();
-        if heap.len() >= self.max_timers {
-            warn!(
-                max_timers = self.max_timers,
-                "Actor has reached its timer limit; new timer ignored"
-            );
-            return Ok(key);
-        }
         heap.push(entry);
         drop(heap);
         self.ensure_task_running();

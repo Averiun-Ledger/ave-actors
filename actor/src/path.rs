@@ -1,10 +1,22 @@
 //! Hierarchical path addressing for actors (e.g. `/user/parent/child`).
 
+use crate::Error;
 use serde::{Deserialize, Serialize};
 
 use std::cmp::Ordering;
-use std::fmt::{Error, Formatter};
+use std::fmt::{Error as FmtError, Formatter};
 use std::sync::Arc;
+
+/// Maximum depth allowed for an actor path (number of segments).
+const MAX_PATH_DEPTH: usize = 255;
+
+/// Maximum length of a single path segment.
+const MAX_SEGMENT_LENGTH: usize = 256;
+
+/// Returns `true` if `c` is allowed inside an `ActorPath` segment.
+fn is_valid_segment_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
 
 /// A slash-separated path that uniquely identifies an actor in the system (e.g. `/user/orders/order-42`).
 ///
@@ -102,6 +114,69 @@ impl ActorPath {
     pub fn is_top_level(&self) -> bool {
         self.0.len() == 1
     }
+
+    /// Validates that `segment` is a legal `ActorPath` component.
+    ///
+    /// Allowed characters are ASCII alphanumeric, `_` and `-`. The segment
+    /// must be non-empty and no longer than [`MAX_SEGMENT_LENGTH`].
+    pub fn validate_segment(segment: &str) -> Result<(), Error> {
+        if segment.is_empty() {
+            return Err(Error::InvalidConfiguration {
+                component: "ActorPath".to_owned(),
+                reason: "path segment cannot be empty".to_owned(),
+            });
+        }
+        if segment.len() > MAX_SEGMENT_LENGTH {
+            return Err(Error::InvalidConfiguration {
+                component: "ActorPath".to_owned(),
+                reason: format!(
+                    "path segment length {} exceeds maximum {}",
+                    segment.len(),
+                    MAX_SEGMENT_LENGTH
+                ),
+            });
+        }
+        if let Some(c) = segment.chars().find(|&c| !is_valid_segment_char(c)) {
+            return Err(Error::InvalidConfiguration {
+                component: "ActorPath".to_owned(),
+                reason: format!(
+                    "path segment '{}' contains invalid character '{}'",
+                    segment, c
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates the full path: each segment must be legal and the depth must
+    /// not exceed [`MAX_PATH_DEPTH`].
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.0.len() > MAX_PATH_DEPTH {
+            return Err(Error::InvalidConfiguration {
+                component: "ActorPath".to_owned(),
+                reason: format!(
+                    "path depth {} exceeds maximum {}",
+                    self.0.len(),
+                    MAX_PATH_DEPTH
+                ),
+            });
+        }
+        for segment in self.0.iter() {
+            Self::validate_segment(segment)?;
+        }
+        Ok(())
+    }
+
+    /// Creates a path from a `/`-separated string, validating every segment and
+    /// the overall depth.
+    ///
+    /// Prefer this over [`ActorPath::from`] when the input comes from an
+    /// untrusted source.
+    pub fn try_from_str(str: &str) -> Result<Self, Error> {
+        let path = Self::from(str);
+        path.validate()?;
+        Ok(path)
+    }
 }
 
 /// Creates a path from a `/`-separated string such as `"/user/parent/child"`.
@@ -149,7 +224,7 @@ impl std::ops::Div<&str> for ActorPath {
 }
 
 impl std::fmt::Display for ActorPath {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), FmtError> {
         match self.level().cmp(&1) {
             Ordering::Less => write!(f, "/"),
             Ordering::Equal => write!(f, "/{}", self.0[0]),
@@ -159,7 +234,7 @@ impl std::fmt::Display for ActorPath {
 }
 
 impl std::fmt::Debug for ActorPath {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), FmtError> {
         match self.level().cmp(&1) {
             Ordering::Less => write!(f, "/"),
             Ordering::Equal => write!(f, "/{}", self.0[0]),
@@ -350,5 +425,47 @@ mod tests {
         let json = serde_json::to_string(&path).unwrap();
         let decoded: ActorPath = serde_json::from_str(&json).unwrap();
         assert_eq!(path, decoded);
+    }
+
+    #[test]
+    fn test_validate_segment_accepts_alphanumeric_dash_underscore() {
+        assert!(ActorPath::validate_segment("valid").is_ok());
+        assert!(ActorPath::validate_segment("valid-2").is_ok());
+        assert!(ActorPath::validate_segment("valid_2").is_ok());
+    }
+
+    #[test]
+    fn test_validate_segment_rejects_empty() {
+        assert!(ActorPath::validate_segment("").is_err());
+    }
+
+    #[test]
+    fn test_validate_segment_rejects_invalid_characters() {
+        assert!(ActorPath::validate_segment("with space").is_err());
+        assert!(ActorPath::validate_segment("with/slash").is_err());
+        assert!(ActorPath::validate_segment("with.dot").is_err());
+        assert!(ActorPath::validate_segment("with@symbol").is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_excessive_depth() {
+        let segments: Vec<String> =
+            (0..=255).map(|i| format!("seg{i}")).collect();
+        let path = ActorPath::from(segments.join("/").as_str());
+        assert!(path.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_max_depth() {
+        let segments: Vec<String> =
+            (0..255).map(|i| format!("seg{i}")).collect();
+        let path = ActorPath::from(segments.join("/").as_str());
+        assert!(path.validate().is_ok());
+    }
+
+    #[test]
+    fn test_try_from_str_validates() {
+        assert!(ActorPath::try_from_str("/a/b").is_ok());
+        assert!(ActorPath::try_from_str("/a/b c").is_err());
     }
 }

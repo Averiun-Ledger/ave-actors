@@ -299,7 +299,9 @@ impl Actor for LimitedTimerActor {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         for _ in 0..3 {
-            ctx.schedule_once(Duration::from_millis(20), LimitedMsg::Fire)?;
+            // The third schedule exceeds max_timers and is expected to fail.
+            let _ =
+                ctx.schedule_once(Duration::from_millis(20), LimitedMsg::Fire);
         }
         Ok(())
     }

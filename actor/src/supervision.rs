@@ -88,80 +88,11 @@ impl Strategy {
     /// Validates that the strategy parameters are within safe ranges.
     pub fn validate(&self) -> Result<(), Error> {
         match self {
-            Self::NoInterval(strategy) => {
-                if strategy.max_retries() > MAX_RETRIES {
-                    return Err(Error::InvalidConfiguration {
-                        component: "supervision strategy".to_owned(),
-                        reason: format!(
-                            "max_retries {} exceeds the maximum {}",
-                            strategy.max_retries(),
-                            MAX_RETRIES
-                        ),
-                    });
-                }
-            }
-            Self::Interval(strategy) => {
-                validate_retry_delay(strategy.duration)?;
-                if strategy.max_retries() > MAX_RETRIES {
-                    return Err(Error::InvalidConfiguration {
-                        component: "supervision strategy".to_owned(),
-                        reason: format!(
-                            "max_retries {} exceeds the maximum {}",
-                            strategy.max_retries(),
-                            MAX_RETRIES
-                        ),
-                    });
-                }
-            }
-            Self::Exponential(strategy) => {
-                validate_retry_delay(strategy.base)?;
-                validate_retry_delay(strategy.max)?;
-                if strategy.base > strategy.max {
-                    return Err(Error::InvalidConfiguration {
-                        component: "supervision strategy".to_owned(),
-                        reason: format!(
-                            "exponential backoff base {:?} is greater than max {:?}",
-                            strategy.base, strategy.max
-                        ),
-                    });
-                }
-                if strategy.multiplier < 2 {
-                    return Err(Error::InvalidConfiguration {
-                        component: "supervision strategy".to_owned(),
-                        reason: format!(
-                            "exponential backoff multiplier {} must be at least 2",
-                            strategy.multiplier
-                        ),
-                    });
-                }
-                if strategy.max_retries() > MAX_RETRIES {
-                    return Err(Error::InvalidConfiguration {
-                        component: "supervision strategy".to_owned(),
-                        reason: format!(
-                            "max_retries {} exceeds the maximum {}",
-                            strategy.max_retries(),
-                            MAX_RETRIES
-                        ),
-                    });
-                }
-            }
-            Self::CustomIntervalStrategy(strategy) => {
-                if strategy.max_retries() > MAX_RETRIES {
-                    return Err(Error::InvalidConfiguration {
-                        component: "supervision strategy".to_owned(),
-                        reason: format!(
-                            "custom interval count {} exceeds the maximum {}",
-                            strategy.max_retries(),
-                            MAX_RETRIES
-                        ),
-                    });
-                }
-                for delay in &strategy.durations {
-                    validate_retry_delay(*delay)?;
-                }
-            }
+            Self::NoInterval(strategy) => strategy.validate(),
+            Self::Interval(strategy) => strategy.validate(),
+            Self::Exponential(strategy) => strategy.validate(),
+            Self::CustomIntervalStrategy(strategy) => strategy.validate(),
         }
-        Ok(())
     }
 }
 
@@ -216,8 +147,33 @@ pub struct NoIntervalStrategy {
 
 impl NoIntervalStrategy {
     /// Creates the strategy with up to `max_retries` immediate restart attempts.
+    ///
+    /// The returned strategy is **not** validated. Use [`NoIntervalStrategy::try_new`]
+    /// or wrap it in [`Strategy`] and call [`Strategy::validate`] to check limits.
     pub const fn new(max_retries: usize) -> Self {
         Self { max_retries }
+    }
+
+    /// Creates the strategy, validating that `max_retries` is within the
+    /// allowed range.
+    pub fn try_new(max_retries: usize) -> Result<Self, Error> {
+        let strategy = Self::new(max_retries);
+        strategy.validate()?;
+        Ok(strategy)
+    }
+
+    /// Validates that `max_retries` is within the allowed range.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.max_retries > MAX_RETRIES {
+            return Err(Error::InvalidConfiguration {
+                component: "supervision strategy".to_owned(),
+                reason: format!(
+                    "max_retries {} exceeds the maximum {}",
+                    self.max_retries, MAX_RETRIES
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -247,6 +203,9 @@ pub struct IntervalStrategy {
 
 impl IntervalStrategy {
     /// Creates the strategy with up to `max_retries` attempts and `duration` wait between each.
+    ///
+    /// The returned strategy is **not** validated. Use [`IntervalStrategy::try_new`]
+    /// or wrap it in [`Strategy`] and call [`Strategy::validate`] to check limits.
     pub const fn new(max_retries: usize, duration: Duration) -> Self {
         Self {
             max_retries,
@@ -255,13 +214,53 @@ impl IntervalStrategy {
         }
     }
 
+    /// Creates the strategy, validating `max_retries` and `duration`.
+    pub fn try_new(
+        max_retries: usize,
+        duration: Duration,
+    ) -> Result<Self, Error> {
+        let strategy = Self::new(max_retries, duration);
+        strategy.validate()?;
+        Ok(strategy)
+    }
+
     /// Creates the strategy with jitter enabled.
+    ///
+    /// The returned strategy is **not** validated. Use
+    /// [`IntervalStrategy::try_with_jitter`] or wrap it in [`Strategy`] and
+    /// call [`Strategy::validate`] to check limits.
     pub const fn with_jitter(max_retries: usize, duration: Duration) -> Self {
         Self {
             max_retries,
             duration,
             jitter: true,
         }
+    }
+
+    /// Creates the strategy with jitter enabled, validating `max_retries` and
+    /// `duration`.
+    pub fn try_with_jitter(
+        max_retries: usize,
+        duration: Duration,
+    ) -> Result<Self, Error> {
+        let strategy = Self::with_jitter(max_retries, duration);
+        strategy.validate()?;
+        Ok(strategy)
+    }
+
+    /// Validates that `max_retries` and `duration` are within allowed ranges.
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_retry_delay(self.duration)?;
+        if self.max_retries > MAX_RETRIES {
+            return Err(Error::InvalidConfiguration {
+                component: "supervision strategy".to_owned(),
+                reason: format!(
+                    "max_retries {} exceeds the maximum {}",
+                    self.max_retries, MAX_RETRIES
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -301,6 +300,10 @@ pub struct ExponentialBackoffStrategy {
 
 impl ExponentialBackoffStrategy {
     /// Creates the strategy with exponential backoff.
+    ///
+    /// The returned strategy is **not** validated. Use
+    /// [`ExponentialBackoffStrategy::try_new`] or wrap it in [`Strategy`] and
+    /// call [`Strategy::validate`] to check limits.
     pub const fn new(
         max_retries: usize,
         base: Duration,
@@ -317,7 +320,23 @@ impl ExponentialBackoffStrategy {
         }
     }
 
+    /// Creates the strategy, validating all parameters.
+    pub fn try_new(
+        max_retries: usize,
+        base: Duration,
+        max: Duration,
+        multiplier: u32,
+    ) -> Result<Self, Error> {
+        let strategy = Self::new(max_retries, base, max, multiplier);
+        strategy.validate()?;
+        Ok(strategy)
+    }
+
     /// Creates the strategy with jitter enabled.
+    ///
+    /// The returned strategy is **not** validated. Use
+    /// [`ExponentialBackoffStrategy::try_with_jitter`] or wrap it in
+    /// [`Strategy`] and call [`Strategy::validate`] to check limits.
     pub const fn with_jitter(
         max_retries: usize,
         base: Duration,
@@ -332,6 +351,52 @@ impl ExponentialBackoffStrategy {
             attempt: 0,
             max_retries,
         }
+    }
+
+    /// Creates the strategy with jitter enabled, validating all parameters.
+    pub fn try_with_jitter(
+        max_retries: usize,
+        base: Duration,
+        max: Duration,
+        multiplier: u32,
+    ) -> Result<Self, Error> {
+        let strategy = Self::with_jitter(max_retries, base, max, multiplier);
+        strategy.validate()?;
+        Ok(strategy)
+    }
+
+    /// Validates that all parameters are within allowed ranges.
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_retry_delay(self.base)?;
+        validate_retry_delay(self.max)?;
+        if self.base > self.max {
+            return Err(Error::InvalidConfiguration {
+                component: "supervision strategy".to_owned(),
+                reason: format!(
+                    "exponential backoff base {:?} is greater than max {:?}",
+                    self.base, self.max
+                ),
+            });
+        }
+        if self.multiplier < 2 {
+            return Err(Error::InvalidConfiguration {
+                component: "supervision strategy".to_owned(),
+                reason: format!(
+                    "exponential backoff multiplier {} must be at least 2",
+                    self.multiplier
+                ),
+            });
+        }
+        if self.max_retries > MAX_RETRIES {
+            return Err(Error::InvalidConfiguration {
+                component: "supervision strategy".to_owned(),
+                reason: format!(
+                    "max_retries {} exceeds the maximum {}",
+                    self.max_retries, MAX_RETRIES
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -370,12 +435,41 @@ pub struct CustomIntervalStrategy {
 
 impl CustomIntervalStrategy {
     /// Creates the strategy from `durations`; `max_retries` is set to `durations.len()`.
+    ///
+    /// The returned strategy is **not** validated. Use
+    /// [`CustomIntervalStrategy::try_new`] or wrap it in [`Strategy`] and call
+    /// [`Strategy::validate`] to check limits.
     pub fn new(durations: VecDeque<Duration>) -> Self {
         let max_retries = durations.len();
         Self {
             durations,
             max_retries,
         }
+    }
+
+    /// Creates the strategy, validating the number of durations and each delay.
+    pub fn try_new(durations: VecDeque<Duration>) -> Result<Self, Error> {
+        let strategy = Self::new(durations);
+        strategy.validate()?;
+        Ok(strategy)
+    }
+
+    /// Validates that the number of durations and each delay are within
+    /// allowed ranges.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.max_retries > MAX_RETRIES {
+            return Err(Error::InvalidConfiguration {
+                component: "supervision strategy".to_owned(),
+                reason: format!(
+                    "custom interval count {} exceeds the maximum {}",
+                    self.max_retries, MAX_RETRIES
+                ),
+            });
+        }
+        for delay in &self.durations {
+            validate_retry_delay(*delay)?;
+        }
+        Ok(())
     }
 }
 
@@ -413,7 +507,9 @@ mod tests {
         let mut strategy =
             IntervalStrategy::with_jitter(3, Duration::from_secs(1));
         assert_eq!(strategy.max_retries(), 3);
-        let delay = strategy.next_backoff().unwrap();
+        let Some(delay) = strategy.next_backoff() else {
+            panic!("jittered delay should be present");
+        };
         let expected_range =
             Duration::from_millis(750)..=Duration::from_millis(1250);
         assert!(
@@ -448,7 +544,9 @@ mod tests {
             Duration::from_secs(10),
             2,
         );
-        let delay = strategy.next_backoff().unwrap();
+        let Some(delay) = strategy.next_backoff() else {
+            panic!("jittered delay should be present");
+        };
         let expected_range =
             Duration::from_millis(750)..=Duration::from_millis(1250);
         assert!(
@@ -470,5 +568,32 @@ mod tests {
         assert!(strategy.next_backoff().is_some());
         assert!(strategy.next_backoff().is_some());
         assert!(strategy.next_backoff().is_none());
+    }
+
+    #[test]
+    fn test_custom_interval_try_new_valid() {
+        let strategy = CustomIntervalStrategy::try_new(VecDeque::from([
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        ]));
+        let Ok(strategy) = strategy else {
+            panic!("valid custom interval strategy should be created");
+        };
+        assert_eq!(strategy.max_retries(), 2);
+    }
+
+    #[test]
+    fn test_custom_interval_try_new_invalid_zero_delay() {
+        let result =
+            CustomIntervalStrategy::try_new(VecDeque::from([Duration::ZERO]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_custom_interval_try_new_too_many_durations() {
+        let durations: VecDeque<Duration> =
+            (0..=MAX_RETRIES).map(|_| Duration::from_secs(1)).collect();
+        let result = CustomIntervalStrategy::try_new(durations);
+        assert!(result.is_err());
     }
 }
