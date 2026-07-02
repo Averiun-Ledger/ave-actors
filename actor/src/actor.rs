@@ -108,12 +108,13 @@ where
     }
 
     /// Schedules a single message to be sent to this actor after `delay`.
-    /// Returns a `TimerKey` that can be used to cancel the timer.
+    /// A `delay` of zero means the message is delivered as soon as the
+    /// scheduler task runs. Returns a `TimerKey` that can be used to cancel
+    /// the timer.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidConfiguration`] if `delay` is zero or exceeds
-    /// one year.
+    /// Returns [`Error::InvalidConfiguration`] if `delay` exceeds one year.
     pub fn schedule_once(
         &self,
         delay: Duration,

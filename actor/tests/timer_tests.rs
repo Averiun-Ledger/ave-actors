@@ -17,6 +17,7 @@ use tracing::info_span;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum TimerMsg {
     ScheduleOnce,
+    ScheduleImmediate,
     SchedulePeriodic,
     Cancel,
     Tick,
@@ -77,6 +78,10 @@ impl Handler<Self> for TimerActor {
             TimerMsg::ScheduleOnce => {
                 let key = ctx
                     .schedule_once(Duration::from_millis(50), TimerMsg::Fire)?;
+                *self.last_key.lock().await = Some(key);
+            }
+            TimerMsg::ScheduleImmediate => {
+                let key = ctx.schedule_once(Duration::ZERO, TimerMsg::Fire)?;
                 *self.last_key.lock().await = Some(key);
             }
             TimerMsg::SchedulePeriodic => {
@@ -405,20 +410,36 @@ impl Handler<Self> for ValidateTimerActor {
 }
 
 #[test(tokio::test)]
-async fn test_schedule_once_zero_delay_rejected() -> Result<(), Error> {
+async fn test_schedule_once_zero_delay_delivers_immediately()
+-> Result<(), Error> {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     let runner_handle = tokio::spawn(async move { runner.run().await });
 
-    let actor = system
-        .create_root_actor("validate_zero_delay", ValidateTimerActor)
+    let actor = TimerActor {
+        fires: Arc::new(Mutex::new(0)),
+        ticks: Arc::new(Mutex::new(0)),
+        last_key: Arc::new(Mutex::new(None)),
+    };
+    let actor_ref = system
+        .create_root_actor("schedule_immediate", actor)
         .await?;
 
-    let resp = actor.ask(ValidateMsg::ZeroDelay).await?;
-    assert!(
-        resp.error.is_some(),
-        "zero delay schedule_once should be rejected"
-    );
+    actor_ref.tell(TimerMsg::ScheduleImmediate).await?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let resp = actor_ref.ask(TimerMsg::GetCounts).await?;
+        if resp.fires == 1 {
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            return Err(Error::Functional {
+                description: "zero delay schedule_once did not fire".to_owned(),
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     system.stop_system();
     join_runner(runner_handle).await

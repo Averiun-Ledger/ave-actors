@@ -20,16 +20,29 @@ use crate::{Actor, ActorPath, Error, Handler, SystemRef};
 const MAX_TIMER_DELAY: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 fn validate_timer_delay(delay: Duration, component: &str) -> Result<(), Error> {
-    if delay.is_zero() {
-        return Err(Error::InvalidConfiguration {
-            component: component.to_owned(),
-            reason: "delay/period must be greater than zero".to_owned(),
-        });
-    }
     if delay > MAX_TIMER_DELAY {
         return Err(Error::InvalidConfiguration {
             component: component.to_owned(),
-            reason: format!("delay/period cannot exceed {:?}", MAX_TIMER_DELAY),
+            reason: format!("delay cannot exceed {:?}", MAX_TIMER_DELAY),
+        });
+    }
+    Ok(())
+}
+
+fn validate_timer_period(
+    period: Duration,
+    component: &str,
+) -> Result<(), Error> {
+    if period.is_zero() {
+        return Err(Error::InvalidConfiguration {
+            component: component.to_owned(),
+            reason: "period must be greater than zero".to_owned(),
+        });
+    }
+    if period > MAX_TIMER_DELAY {
+        return Err(Error::InvalidConfiguration {
+            component: component.to_owned(),
+            reason: format!("period cannot exceed {:?}", MAX_TIMER_DELAY),
         });
     }
     Ok(())
@@ -254,7 +267,7 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
     where
         A::Message: Clone,
     {
-        validate_timer_delay(period, "schedule period")?;
+        validate_timer_period(period, "schedule period")?;
 
         let key = self.next_key();
         if !self.accepting.load(AtomicOrdering::SeqCst) {
