@@ -32,6 +32,7 @@ pub use supervision::{
     NoIntervalStrategy, RetryStrategy, Strategy, SupervisionStrategy,
 };
 pub use system::{
-    ActorSystem, ShutdownReason, SystemEvent, SystemRef, SystemRunner,
+    ActorSystem, ActorSystemConfig, ShutdownReason, SystemEvent, SystemRef,
+    SystemRunner,
 };
 pub use timer::TimerKey;

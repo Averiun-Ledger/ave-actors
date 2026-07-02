@@ -32,6 +32,71 @@ struct WatchEntry {
     notify: Arc<dyn Fn(ActorPath) + Send + Sync>,
 }
 
+/// Configuration for the actor system.
+///
+/// All sizes are validated when the system is created; invalid values cause
+/// [`ActorSystem::create_with_config`] to fail with
+/// [`Error::InvalidConfiguration`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActorSystemConfig {
+    /// Buffer size of the broadcast channel used for system-level events.
+    pub system_event_buffer_size: usize,
+    /// Buffer size of the stop signal channel created for every actor.
+    pub actor_stop_channel_size: usize,
+    /// Maximum number of watchers that can observe a single target actor.
+    pub max_watchers_per_actor: usize,
+}
+
+impl ActorSystemConfig {
+    /// Default configuration values used by [`ActorSystem::create`].
+    pub const fn default() -> Self {
+        Self {
+            system_event_buffer_size: 256,
+            actor_stop_channel_size: 4,
+            max_watchers_per_actor: 10_000,
+        }
+    }
+
+    /// Validates that all configuration values are within allowed ranges.
+    pub fn validate(&self) -> Result<(), Error> {
+        const MAX_EVENT_BUFFER: usize = 10_000;
+        const MAX_STOP_CHANNEL_SIZE: usize = 10_000;
+        const MAX_WATCHERS: usize = 1_000_000;
+
+        if self.system_event_buffer_size == 0
+            || self.system_event_buffer_size > MAX_EVENT_BUFFER
+        {
+            return Err(Error::InvalidConfiguration {
+                component: "ActorSystemConfig.system_event_buffer_size"
+                    .to_owned(),
+                reason: format!("must be between 1 and {}", MAX_EVENT_BUFFER),
+            });
+        }
+        if self.actor_stop_channel_size == 0
+            || self.actor_stop_channel_size > MAX_STOP_CHANNEL_SIZE
+        {
+            return Err(Error::InvalidConfiguration {
+                component: "ActorSystemConfig.actor_stop_channel_size"
+                    .to_owned(),
+                reason: format!(
+                    "must be between 1 and {}",
+                    MAX_STOP_CHANNEL_SIZE
+                ),
+            });
+        }
+        if self.max_watchers_per_actor == 0
+            || self.max_watchers_per_actor > MAX_WATCHERS
+        {
+            return Err(Error::InvalidConfiguration {
+                component: "ActorSystemConfig.max_watchers_per_actor"
+                    .to_owned(),
+                reason: format!("must be between 1 and {}", MAX_WATCHERS),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// The reason why the actor system stopped, returned by [`SystemRunner::run`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShutdownReason {
@@ -59,15 +124,35 @@ impl ActorSystem {
     ///
     /// Cancel `graceful_token` for a graceful shutdown (exit code 0) or `crash_token` for a crash
     /// shutdown (exit code 1); the reason is reflected in [`SystemRunner::run`]'s return value.
+    ///
+    /// Uses [`ActorSystemConfig::default`] for the system configuration.
     pub fn create(
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
     ) -> (SystemRef, SystemRunner) {
+        let config = ActorSystemConfig::default();
         let (system, shutdown_complete) =
-            SystemRef::new(graceful_token.clone(), crash_token.clone());
+            SystemRef::new(config, graceful_token.clone(), crash_token.clone());
         let runner =
             SystemRunner::new(graceful_token, crash_token, shutdown_complete);
         (system, runner)
+    }
+
+    /// Creates the actor system with an explicit configuration.
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `config` contains invalid
+    /// values.
+    pub fn create_with_config(
+        graceful_token: CancellationToken,
+        crash_token: CancellationToken,
+        config: ActorSystemConfig,
+    ) -> Result<(SystemRef, SystemRunner), Error> {
+        config.validate()?;
+        let (system, shutdown_complete) =
+            SystemRef::new(config, graceful_token.clone(), crash_token.clone());
+        let runner =
+            SystemRunner::new(graceful_token, crash_token, shutdown_complete);
+        Ok((system, runner))
     }
 }
 
@@ -104,6 +189,9 @@ pub struct SystemRef {
     /// should receive a termination notification.
     watchers: Arc<DashMap<ActorPath, Vec<WatchEntry>>>,
 
+    /// System configuration validated at creation time.
+    config: ActorSystemConfig,
+
     /// Cancelled by an external signal (SIGTERM, operator). Exit code 0.
     graceful_token: CancellationToken,
     /// Cancelled by an actor on unrecoverable failure. Exit code 1.
@@ -114,6 +202,7 @@ pub struct SystemRef {
 
 impl SystemRef {
     pub(crate) fn new(
+        config: ActorSystemConfig,
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
     ) -> (Self, oneshot::Receiver<()>) {
@@ -121,7 +210,8 @@ impl SystemRef {
             Arc::new(RwLock::new(HashMap::<ActorPath, StopHandle>::new()));
         let child_index = Arc::new(DashMap::new());
         let watchers = Arc::new(DashMap::new());
-        let (system_event_sender, _) = broadcast::channel::<SystemEvent>(256);
+        let (system_event_sender, _) =
+            broadcast::channel::<SystemEvent>(config.system_event_buffer_size);
         let shutting_down = Arc::new(AtomicBool::new(false));
         let root_sender_clone = root_senders.clone();
         let system_event_sender_clone = system_event_sender.clone();
@@ -194,6 +284,7 @@ impl SystemRef {
                 root_senders,
                 system_event_sender,
                 watchers,
+                config,
                 shutting_down,
             },
             shutdown_complete_rx,
@@ -262,8 +353,12 @@ impl SystemRef {
         // Create the actor runner and init it.
         let system = self.clone();
         let is_root = parent_info.is_none();
-        let (mut runner, actor_ref, stop_sender) =
-            ActorRunner::create(path.clone(), actor, parent_info);
+        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+            path.clone(),
+            actor,
+            parent_info,
+            self.config.actor_stop_channel_size,
+        )?;
 
         // Atomically check+insert to avoid concurrent duplicate creations
         // for the same path.
@@ -401,18 +496,30 @@ impl SystemRef {
         target: ActorPath,
         watcher_path: ActorPath,
         notify: Arc<dyn Fn(ActorPath) + Send + Sync>,
-    ) {
+    ) -> Result<(), Error> {
         let mut entries = self.watchers.entry(target).or_default();
         if entries
             .iter()
             .any(|entry| entry.watcher_path == watcher_path)
         {
-            return;
+            return Ok(());
+        }
+        if entries.len() >= self.config.max_watchers_per_actor {
+            return Err(Error::InvalidConfiguration {
+                component: "ActorSystemConfig.max_watchers_per_actor"
+                    .to_owned(),
+                reason: format!(
+                    "target actor already has the maximum allowed {} watchers",
+                    self.config.max_watchers_per_actor
+                ),
+            });
         }
         entries.push(WatchEntry {
             watcher_path,
             notify,
         });
+        drop(entries);
+        Ok(())
     }
 
     /// Removes all watch entries from `target` to `watcher_path`.
@@ -604,5 +711,85 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct TestHelper {
         pub value: i32,
+    }
+
+    #[test]
+    fn test_default_config_is_valid() {
+        assert!(ActorSystemConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_zero_system_event_buffer_size_rejected() {
+        let config = ActorSystemConfig {
+            system_event_buffer_size: 0,
+            ..ActorSystemConfig::default()
+        };
+        let err = config.validate().expect_err("zero buffer should fail");
+        assert!(matches!(err, Error::InvalidConfiguration { component, .. }
+            if component == "ActorSystemConfig.system_event_buffer_size"));
+    }
+
+    #[test]
+    fn test_excessive_system_event_buffer_size_rejected() {
+        let config = ActorSystemConfig {
+            system_event_buffer_size: 10_001,
+            ..ActorSystemConfig::default()
+        };
+        let err = config.validate().expect_err("excessive buffer should fail");
+        assert!(matches!(err, Error::InvalidConfiguration { component, .. }
+            if component == "ActorSystemConfig.system_event_buffer_size"));
+    }
+
+    #[test]
+    fn test_zero_actor_stop_channel_size_rejected() {
+        let config = ActorSystemConfig {
+            actor_stop_channel_size: 0,
+            ..ActorSystemConfig::default()
+        };
+        let err = config
+            .validate()
+            .expect_err("zero stop channel should fail");
+        assert!(matches!(err, Error::InvalidConfiguration { component, .. }
+            if component == "ActorSystemConfig.actor_stop_channel_size"));
+    }
+
+    #[test]
+    fn test_zero_max_watchers_rejected() {
+        let config = ActorSystemConfig {
+            max_watchers_per_actor: 0,
+            ..ActorSystemConfig::default()
+        };
+        let err = config.validate().expect_err("zero watchers should fail");
+        assert!(matches!(err, Error::InvalidConfiguration { component, .. }
+            if component == "ActorSystemConfig.max_watchers_per_actor"));
+    }
+
+    #[test(tokio::test)]
+    async fn test_create_with_config_valid() {
+        let config = ActorSystemConfig {
+            system_event_buffer_size: 512,
+            actor_stop_channel_size: 8,
+            max_watchers_per_actor: 100,
+        };
+        let result = ActorSystem::create_with_config(
+            CancellationToken::new(),
+            CancellationToken::new(),
+            config,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_with_config_invalid() {
+        let config = ActorSystemConfig {
+            system_event_buffer_size: 0,
+            ..ActorSystemConfig::default()
+        };
+        let result = ActorSystem::create_with_config(
+            CancellationToken::new(),
+            CancellationToken::new(),
+            config,
+        );
+        assert!(matches!(result, Err(Error::InvalidConfiguration { .. })));
     }
 }

@@ -14,7 +14,26 @@ use tokio::sync::Notify;
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
-use crate::{Actor, ActorPath, Handler, SystemRef};
+use crate::{Actor, ActorPath, Error, Handler, SystemRef};
+
+/// Maximum delay/period allowed for actor timers (365 days).
+const MAX_TIMER_DELAY: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
+fn validate_timer_delay(delay: Duration, component: &str) -> Result<(), Error> {
+    if delay.is_zero() {
+        return Err(Error::InvalidConfiguration {
+            component: component.to_owned(),
+            reason: "delay/period must be greater than zero".to_owned(),
+        });
+    }
+    if delay > MAX_TIMER_DELAY {
+        return Err(Error::InvalidConfiguration {
+            component: component.to_owned(),
+            reason: format!("delay/period cannot exceed {:?}", MAX_TIMER_DELAY),
+        });
+    }
+    Ok(())
+}
 
 /// Opaque identifier returned by `ActorContext::schedule_once` and
 /// `ActorContext::schedule`. It can be passed to
@@ -179,14 +198,21 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
     }
 
     /// Schedules a single message to be delivered after `delay`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `delay` is zero or exceeds
+    /// [`MAX_TIMER_DELAY`].
     pub(crate) fn schedule_once(
         &self,
         delay: Duration,
         msg: A::Message,
-    ) -> TimerKey {
+    ) -> Result<TimerKey, Error> {
+        validate_timer_delay(delay, "schedule_once delay")?;
+
         let key = self.next_key();
         if !self.accepting.load(AtomicOrdering::SeqCst) {
-            return key;
+            return Ok(key);
         }
 
         let deadline = Instant::now() + delay;
@@ -205,23 +231,34 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
                 max_timers = self.max_timers,
                 "Actor has reached its timer limit; new timer ignored"
             );
-            return key;
+            return Ok(key);
         }
         heap.push(entry);
         drop(heap);
         self.ensure_task_running();
         self.notify.notify_one();
-        key
+        Ok(key)
     }
 
     /// Schedules a message to be delivered every `period`.
-    pub(crate) fn schedule(&self, period: Duration, msg: A::Message) -> TimerKey
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `period` is zero or exceeds
+    /// [`MAX_TIMER_DELAY`].
+    pub(crate) fn schedule(
+        &self,
+        period: Duration,
+        msg: A::Message,
+    ) -> Result<TimerKey, Error>
     where
         A::Message: Clone,
     {
+        validate_timer_delay(period, "schedule period")?;
+
         let key = self.next_key();
         if !self.accepting.load(AtomicOrdering::SeqCst) {
-            return key;
+            return Ok(key);
         }
 
         let deadline = Instant::now() + period;
@@ -240,13 +277,13 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
                 max_timers = self.max_timers,
                 "Actor has reached its timer limit; new timer ignored"
             );
-            return key;
+            return Ok(key);
         }
         heap.push(entry);
         drop(heap);
         self.ensure_task_running();
         self.notify.notify_one();
-        key
+        Ok(key)
     }
 
     /// Marks a timer as cancelled. The entry will be discarded when it reaches

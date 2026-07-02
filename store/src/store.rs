@@ -183,6 +183,9 @@ where
     /// - `Some(n)`: after every `n` persisted events since the last snapshot,
     ///   the store snapshots the current actor state automatically.
     ///
+    /// `Some(0)` is invalid and causes actor creation to fail with
+    /// [`ActorError::InvalidConfiguration`].
+    ///
     /// Default: `Some(100)`.
     fn snapshot_every() -> Option<u64> {
         Some(100)
@@ -317,11 +320,27 @@ where
         manager: impl DbManager<C, S>,
         key_box: Option<EncryptedKey>,
     ) -> Result<(), ActorError> {
+        if let Some(snapshot_every) = Self::snapshot_every()
+            && snapshot_every == 0
+        {
+            return Err(ActorError::InvalidConfiguration {
+                component: "actor persistence".to_owned(),
+                reason: "snapshot_every cannot be Some(0)".to_owned(),
+            });
+        }
+
         let prefix = prefix.unwrap_or_else(|| ctx.path().key());
 
         let store =
             Store::<Self>::new(name, prefix, manager, key_box, self.state())
-                .map_err(|e| actor_store_error(StoreOperation::StoreInit, e))?;
+                .map_err(|e| match e {
+                    Error::InvalidConfiguration { component, reason } => {
+                        ActorError::InvalidConfiguration { component, reason }
+                    }
+                    other => {
+                        actor_store_error(StoreOperation::StoreInit, other)
+                    }
+                })?;
         let store = ctx.create_child("store", store).await?;
         let response = store.ask(StoreCommand::Recover).await?;
 
@@ -390,6 +409,54 @@ struct StateSnapshot<S> {
     counter: u64,
 }
 
+fn validate_store_name(name: &str) -> Result<(), Error> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err(Error::InvalidConfiguration {
+            component: "store name".to_owned(),
+            reason: "store name must not be empty".to_owned(),
+        });
+    };
+
+    let valid_start = first == '_' || first.is_ascii_alphabetic();
+    let valid_rest = chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric());
+
+    if valid_start && valid_rest {
+        Ok(())
+    } else {
+        Err(Error::InvalidConfiguration {
+            component: "store name".to_owned(),
+            reason: format!(
+                "store name '{name}' is invalid: allowed pattern is [A-Za-z_][A-Za-z0-9_]*"
+            ),
+        })
+    }
+}
+
+fn validate_store_prefix(prefix: &str) -> Result<(), Error> {
+    if prefix.is_empty() {
+        return Err(Error::InvalidConfiguration {
+            component: "store prefix".to_owned(),
+            reason: "store prefix must not be empty".to_owned(),
+        });
+    }
+
+    let valid = prefix
+        .chars()
+        .all(|ch| ch == '_' || ch == '-' || ch.is_ascii_alphanumeric());
+
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::InvalidConfiguration {
+            component: "store prefix".to_owned(),
+            reason: format!(
+                "store prefix '{prefix}' is invalid: allowed characters are [A-Za-z0-9_-]"
+            ),
+        })
+    }
+}
+
 impl<A> Store<A>
 where
     A: PersistentActor,
@@ -408,6 +475,9 @@ where
         C: Collection + 'static,
         S: State + 'static,
     {
+        validate_store_name(name)?;
+        validate_store_prefix(prefix)?;
+
         let events =
             manager.create_collection(&format!("{}_events", name), prefix)?;
         let states =

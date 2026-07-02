@@ -1,5 +1,6 @@
 use std::fmt::Display;
 
+use crate::Error;
 use serde::{Deserialize, Serialize};
 
 /// How to size the database backend.
@@ -84,6 +85,7 @@ impl Display for MachineProfile {
 
 /// Resolved machine parameters ready to be consumed by database backends.
 /// Database tuning is computed directly from these two values.
+#[derive(Debug)]
 pub struct ResolvedSpec {
     pub ram_mb: u64,
     pub cpu_cores: usize,
@@ -94,19 +96,36 @@ pub struct ResolvedSpec {
 /// - `Profile(p)` → use the profile's canonical RAM and vCPU.
 /// - `Custom { ram_mb, cpu_cores }` → use the supplied values directly.
 /// - `None` → auto-detect total RAM and available CPU cores from the host.
-pub fn resolve_spec(spec: Option<MachineSpec>) -> ResolvedSpec {
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidConfiguration`] when a custom spec declares
+/// `ram_mb == 0` or `cpu_cores == 0`.
+pub fn resolve_spec(spec: Option<MachineSpec>) -> Result<ResolvedSpec, Error> {
     match spec {
-        Some(MachineSpec::Profile(p)) => ResolvedSpec {
+        Some(MachineSpec::Profile(p)) => Ok(ResolvedSpec {
             ram_mb: p.ram_mb(),
             cpu_cores: p.cpu_cores(),
-        },
+        }),
         Some(MachineSpec::Custom { ram_mb, cpu_cores }) => {
-            ResolvedSpec { ram_mb, cpu_cores }
+            if ram_mb == 0 {
+                return Err(Error::InvalidConfiguration {
+                    component: "MachineSpec".to_owned(),
+                    reason: "custom ram_mb must be >= 1".to_owned(),
+                });
+            }
+            if cpu_cores == 0 {
+                return Err(Error::InvalidConfiguration {
+                    component: "MachineSpec".to_owned(),
+                    reason: "custom cpu_cores must be >= 1".to_owned(),
+                });
+            }
+            Ok(ResolvedSpec { ram_mb, cpu_cores })
         }
-        None => ResolvedSpec {
+        None => Ok(ResolvedSpec {
             ram_mb: detect_total_memory_mb().unwrap_or(4096),
             cpu_cores: detect_cpu_cores(),
-        },
+        }),
     }
 }
 
@@ -145,11 +164,13 @@ pub fn detect_cpu_cores() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
 
     #[test]
     fn test_resolve_spec_profile() {
         let spec =
-            resolve_spec(Some(MachineSpec::Profile(MachineProfile::Small)));
+            resolve_spec(Some(MachineSpec::Profile(MachineProfile::Small)))
+                .expect("profile spec should resolve");
         assert_eq!(spec.ram_mb, 2048);
         assert_eq!(spec.cpu_cores, 2);
     }
@@ -159,15 +180,41 @@ mod tests {
         let spec = resolve_spec(Some(MachineSpec::Custom {
             ram_mb: 1024,
             cpu_cores: 4,
-        }));
+        }))
+        .expect("custom spec should resolve");
         assert_eq!(spec.ram_mb, 1024);
         assert_eq!(spec.cpu_cores, 4);
     }
 
     #[test]
     fn test_resolve_spec_none() {
-        let spec = resolve_spec(None);
+        let spec =
+            resolve_spec(None).expect("auto-detected spec should resolve");
         assert!(spec.ram_mb > 0);
         assert!(spec.cpu_cores > 0);
+    }
+
+    #[test]
+    fn test_resolve_spec_custom_ram_zero_fails() {
+        let err = resolve_spec(Some(MachineSpec::Custom {
+            ram_mb: 0,
+            cpu_cores: 2,
+        }))
+        .expect_err("ram_mb == 0 should be rejected");
+        assert!(
+            matches!(err, Error::InvalidConfiguration { component, .. } if component == "MachineSpec")
+        );
+    }
+
+    #[test]
+    fn test_resolve_spec_custom_cpu_zero_fails() {
+        let err = resolve_spec(Some(MachineSpec::Custom {
+            ram_mb: 1024,
+            cpu_cores: 0,
+        }))
+        .expect_err("cpu_cores == 0 should be rejected");
+        assert!(
+            matches!(err, Error::InvalidConfiguration { component, .. } if component == "MachineSpec")
+        );
     }
 }

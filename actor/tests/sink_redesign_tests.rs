@@ -170,7 +170,7 @@ async fn test_external_sink_registration() {
         .unwrap();
 
     let subscriber = CollectingSubscriber::new();
-    let mut sink = Sink::new("ext_sink", None);
+    let mut sink = Sink::new("ext_sink", None).expect("valid sink");
     sink.add("sub1", subscriber.clone());
     actor_ref.register_sink(sink);
 
@@ -253,7 +253,7 @@ async fn test_sink_survives_restart() {
         .unwrap();
 
     let subscriber = CollectingSubscriber::new();
-    let mut sink = Sink::new("survivor", None);
+    let mut sink = Sink::new("survivor", None).expect("valid sink");
     sink.add("sub1", subscriber.clone());
     actor_ref.register_sink(sink);
 
@@ -290,7 +290,7 @@ async fn test_parallel_dispatch() {
         .await
         .unwrap();
 
-    let mut sink = Sink::new("parallel_sink", None);
+    let mut sink = Sink::new("parallel_sink", None).expect("valid sink");
     sink.add("slow1", SlowSubscriber { delay_ms: 200 });
     sink.add("slow2", SlowSubscriber { delay_ms: 200 });
     sink.add("slow3", SlowSubscriber { delay_ms: 200 });
@@ -367,11 +367,11 @@ async fn test_publish_filtered() {
     let audit_sub = CollectingSubscriber::new();
     let metrics_sub = CollectingSubscriber::new();
 
-    let mut audit_sink = Sink::new("audit", None);
+    let mut audit_sink = Sink::new("audit", None).expect("valid sink");
     audit_sink.add("sub1", audit_sub.clone());
     actor_ref.register_sink(audit_sink);
 
-    let mut metrics_sink = Sink::new("metrics", None);
+    let mut metrics_sink = Sink::new("metrics", None).expect("valid sink");
     metrics_sink.add("sub1", metrics_sub.clone());
     actor_ref.register_sink(metrics_sink);
 
@@ -456,7 +456,7 @@ async fn test_sink_entry_filter() {
     let all_sub = CollectingSubscriber::new();
     let high_sub = CollectingSubscriber::new();
 
-    let mut sink = Sink::new("filter_sink", None);
+    let mut sink = Sink::new("filter_sink", None).expect("valid sink");
     sink.add("all", all_sub.clone());
     sink.add_entry(
         SinkEntry::new("high", high_sub.clone())
@@ -489,7 +489,7 @@ async fn test_remove_sink() {
         .unwrap();
 
     let subscriber = CollectingSubscriber::new();
-    let mut sink = Sink::new("tmp", None);
+    let mut sink = Sink::new("tmp", None).expect("valid sink");
     sink.add("sub1", subscriber.clone());
     actor_ref.register_sink(sink);
 
@@ -516,13 +516,15 @@ async fn test_retry_policy_delivers_after_failures() {
         .unwrap();
 
     let subscriber = FailingThenOkSubscriber::new(2);
-    let mut sink = Sink::new("retry_sink", None);
-    sink.add_entry(SinkEntry::new("fragile", subscriber.clone()).retry(
-        ave_actors_actor::RetryPolicy::AtMost {
-            max: 3,
-            backoff: Duration::from_millis(10),
-        },
-    ));
+    let mut sink = Sink::new("retry_sink", None).expect("valid sink");
+    sink.add_entry(
+        SinkEntry::new("fragile", subscriber.clone())
+            .retry(ave_actors_actor::RetryPolicy::AtMost {
+                max: 3,
+                backoff: Duration::from_millis(10),
+            })
+            .expect("valid retry policy"),
+    );
     actor_ref.register_sink(sink);
 
     actor_ref.tell(TestMsg::Emit(100)).await.unwrap();
@@ -595,11 +597,11 @@ async fn test_actor_routes_to_named_sink() {
     let sink_a_sub = CollectingSubscriber::new();
     let sink_b_sub = CollectingSubscriber::new();
 
-    let mut sink_a = Sink::new("sink_a", None);
+    let mut sink_a = Sink::new("sink_a", None).expect("valid sink");
     sink_a.add("sub", sink_a_sub.clone());
     actor_ref.register_sink(sink_a);
 
-    let mut sink_b = Sink::new("sink_b", None);
+    let mut sink_b = Sink::new("sink_b", None).expect("valid sink");
     sink_b.add("sub", sink_b_sub.clone());
     actor_ref.register_sink(sink_b);
 
@@ -648,7 +650,7 @@ async fn test_one_subscriber_fails_others_ok() {
     let ok_sub_b = CollectingSubscriber::new();
     let failing_sub = CollectingSubscriber::new();
 
-    let mut sink = Sink::new("fanout_sink", None);
+    let mut sink = Sink::new("fanout_sink", None).expect("valid sink");
     sink.add("ok_a", ok_sub_a.clone());
     sink.add("failing", FailingSubscriber);
     sink.add("ok_b", ok_sub_b.clone());
@@ -671,7 +673,7 @@ async fn test_sink_entry_remove_and_clear() {
     let sub_b = CollectingSubscriber::new();
     let sub_c = CollectingSubscriber::new();
 
-    let mut sink = Sink::new("mutable_sink", None);
+    let mut sink = Sink::new("mutable_sink", None).expect("valid sink");
     sink.add("a", sub_a.clone());
     sink.add("b", sub_b.clone());
     sink.add("c", sub_c.clone());

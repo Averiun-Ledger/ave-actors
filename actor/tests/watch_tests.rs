@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, Error, Handler,
-    IntervalStrategy, Message, NotPersistentActor, Response, ShutdownReason,
-    Strategy, SupervisionStrategy,
+    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ActorSystemConfig,
+    Error, Handler, IntervalStrategy, Message, NotPersistentActor, Response,
+    ShutdownReason, Strategy, SupervisionStrategy,
 };
 use test_log::test;
 use tokio::sync::Mutex;
@@ -431,6 +431,50 @@ async fn test_no_notification_on_target_restart() -> Result<(), Error> {
 
     let notifications = watcher_ref.ask(WatchMsg::GetNotifications).await?;
     assert!(notifications.notifications.is_empty());
+
+    system.stop_system();
+    join_runner(runner_handle).await
+}
+
+#[test(tokio::test)]
+async fn test_watch_limit_rejected() -> Result<(), Error> {
+    let config = ActorSystemConfig {
+        max_watchers_per_actor: 1,
+        ..ActorSystemConfig::default()
+    };
+    let (system, mut runner) = ActorSystem::create_with_config(
+        CancellationToken::new(),
+        CancellationToken::new(),
+        config,
+    )?;
+    let runner_handle = tokio::spawn(async move { runner.run().await });
+
+    let watcher_a = WatchActor {
+        notifications: Arc::new(Mutex::new(vec![])),
+    };
+    let watcher_a_ref =
+        system.create_root_actor("watcher_a", watcher_a).await?;
+
+    let watcher_b = WatchActor {
+        notifications: Arc::new(Mutex::new(vec![])),
+    };
+    let watcher_b_ref =
+        system.create_root_actor("watcher_b", watcher_b).await?;
+
+    let target = TargetActor {
+        stopped: Arc::new(Mutex::new(false)),
+    };
+    let target_ref = system.create_root_actor("target", target).await?;
+
+    watcher_a_ref
+        .tell(WatchMsg::Watch(target_ref.clone()))
+        .await?;
+    let result = watcher_b_ref.ask(WatchMsg::Watch(target_ref.clone())).await;
+    assert!(
+        matches!(result, Err(Error::InvalidConfiguration { .. })),
+        "expected InvalidConfiguration when watcher limit exceeded, got {:?}",
+        result
+    );
 
     system.stop_system();
     join_runner(runner_handle).await

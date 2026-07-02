@@ -17,6 +17,18 @@ use std::{
 };
 use tracing::{error, warn};
 
+/// Default number of subscribers notified concurrently by a [`Sink`].
+const DEFAULT_SINK_CONCURRENCY: usize = 10;
+
+/// Maximum number of subscribers notified concurrently by a [`Sink`].
+const MAX_SINK_CONCURRENCY: usize = 1_000_000;
+
+/// Maximum number of retries allowed in a [`RetryPolicy::AtMost`].
+const MAX_RETRY_ATTEMPTS: u32 = 100;
+
+/// Maximum backoff duration allowed in a [`RetryPolicy::AtMost`].
+const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(3600);
+
 /// Retry policy applied when a subscriber returns an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RetryPolicy {
@@ -32,6 +44,45 @@ pub enum RetryPolicy {
         /// Fixed backoff duration between retries.
         backoff: Duration,
     },
+}
+
+impl RetryPolicy {
+    /// Validates the policy parameters.
+    ///
+    /// - `AtMost { max, backoff }` requires `max <= 100`,
+    ///   `backoff > 0` and `backoff <= 1 hour`.
+    pub fn validate(&self) -> Result<(), Error> {
+        match self {
+            Self::None => Ok(()),
+            Self::AtMost { max, backoff } => {
+                if *max > MAX_RETRY_ATTEMPTS {
+                    return Err(Error::InvalidConfiguration {
+                        component: "RetryPolicy::AtMost".to_owned(),
+                        reason: format!(
+                            "max retries cannot exceed {}",
+                            MAX_RETRY_ATTEMPTS
+                        ),
+                    });
+                }
+                if backoff.is_zero() {
+                    return Err(Error::InvalidConfiguration {
+                        component: "RetryPolicy::AtMost".to_owned(),
+                        reason: "backoff must be greater than zero".to_owned(),
+                    });
+                }
+                if *backoff > MAX_RETRY_BACKOFF {
+                    return Err(Error::InvalidConfiguration {
+                        component: "RetryPolicy::AtMost".to_owned(),
+                        reason: format!(
+                            "backoff cannot exceed {:?}",
+                            MAX_RETRY_BACKOFF
+                        ),
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// A subscriber that receives events from a [`Sink`].
@@ -53,6 +104,15 @@ pub struct SinkEntry<E: Event> {
     filter: Arc<dyn Fn(&E) -> bool + Send + Sync>,
     /// Retry policy for this subscriber.
     pub retry: RetryPolicy,
+}
+
+impl<E: Event> std::fmt::Debug for SinkEntry<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SinkEntry")
+            .field("id", &self.id)
+            .field("retry", &self.retry)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<E: Event> Clone for SinkEntry<E> {
@@ -88,9 +148,15 @@ impl<E: Event> SinkEntry<E> {
     }
 
     /// Set the retry policy for this subscriber.
-    pub const fn retry(mut self, policy: RetryPolicy) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `policy` contains invalid
+    /// parameters (see [`RetryPolicy::validate`]).
+    pub fn retry(mut self, policy: RetryPolicy) -> Result<Self, Error> {
+        policy.validate()?;
         self.retry = policy;
-        self
+        Ok(self)
     }
 }
 
@@ -107,6 +173,14 @@ pub struct Sink<E: Event> {
     inner: Arc<SinkInner<E>>,
 }
 
+impl<E: Event> std::fmt::Debug for Sink<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sink")
+            .field("name", &self.inner.name)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<E: Event> Clone for Sink<E> {
     fn clone(&self) -> Self {
         Self {
@@ -121,9 +195,32 @@ impl<E: Event> Sink<E> {
     /// `max_concurrent` controls how many subscribers are notified
     /// concurrently for a single event.  If `None`, a default of 10 is
     /// used.
-    pub fn new(name: impl Into<String>, max_concurrent: Option<usize>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` is
+    /// `Some(0)` or exceeds [`MAX_SINK_CONCURRENCY`].
+    pub fn new(
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+    ) -> Result<Self, Error> {
         let name = name.into();
-        let max_concurrent = max_concurrent.unwrap_or(10);
+        let max_concurrent = max_concurrent.unwrap_or(DEFAULT_SINK_CONCURRENCY);
+        if max_concurrent == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "Sink".to_owned(),
+                reason: "max_concurrent must be >= 1".to_owned(),
+            });
+        }
+        if max_concurrent > MAX_SINK_CONCURRENCY {
+            return Err(Error::InvalidConfiguration {
+                component: "Sink".to_owned(),
+                reason: format!(
+                    "max_concurrent cannot exceed {}",
+                    MAX_SINK_CONCURRENCY
+                ),
+            });
+        }
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<Arc<E>>(1024);
 
         let inner = Arc::new_cyclic(|weak: &std::sync::Weak<SinkInner<E>>| {
@@ -229,7 +326,7 @@ impl<E: Event> Sink<E> {
             }
         });
 
-        Self { inner }
+        Ok(Self { inner })
     }
 
     /// Return the sink's name.
@@ -238,8 +335,29 @@ impl<E: Event> Sink<E> {
     }
 
     /// Update the maximum number of concurrent subscriber notifications.
-    pub fn set_max_concurrent(&self, limit: usize) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `limit` is `0` or exceeds
+    /// [`MAX_SINK_CONCURRENCY`].
+    pub fn set_max_concurrent(&self, limit: usize) -> Result<(), Error> {
+        if limit == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "Sink".to_owned(),
+                reason: "max_concurrent must be >= 1".to_owned(),
+            });
+        }
+        if limit > MAX_SINK_CONCURRENCY {
+            return Err(Error::InvalidConfiguration {
+                component: "Sink".to_owned(),
+                reason: format!(
+                    "max_concurrent cannot exceed {}",
+                    MAX_SINK_CONCURRENCY
+                ),
+            });
+        }
         self.inner.max_concurrent.store(limit, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Add a subscriber entry to this sink.
@@ -414,7 +532,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_concurrency_limit() {
-        let mut sink = Sink::new("test", Some(2));
+        let mut sink = Sink::new("test", Some(2)).expect("valid concurrency");
         let done = Arc::new(AtomicUsize::new(0));
         for i in 0..5 {
             sink.add(
@@ -442,7 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_hot_reload_max_concurrent() {
-        let mut sink = Sink::new("test", Some(1));
+        let mut sink = Sink::new("test", Some(1)).expect("valid concurrency");
         let done = Arc::new(AtomicUsize::new(0));
         for i in 0..5 {
             sink.add(
@@ -462,7 +580,7 @@ mod tests {
         let elapsed1 = start.elapsed();
 
         done.store(0, Ordering::SeqCst);
-        sink.set_max_concurrent(5);
+        sink.set_max_concurrent(5).expect("valid concurrency");
 
         let start = Instant::now();
         sink.send(Arc::new(()));
@@ -491,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_no_event_loss() {
-        let mut sink = Sink::new("test", None);
+        let mut sink = Sink::new("test", None).expect("valid concurrency");
         let count = Arc::new(AtomicUsize::new(0));
         sink.add(
             "counter",
@@ -509,5 +627,105 @@ mod tests {
         }
 
         assert_eq!(count.load(Ordering::SeqCst), 1000);
+    }
+
+    #[test]
+    fn test_sink_new_rejects_zero_concurrency() {
+        let err = Sink::<()>::new("test", Some(0))
+            .expect_err("zero concurrency should be rejected");
+        assert!(
+            matches!(err, Error::InvalidConfiguration { component, .. } if component == "Sink")
+        );
+    }
+
+    #[test]
+    fn test_sink_new_rejects_excessive_concurrency() {
+        let err = Sink::<()>::new("test", Some(MAX_SINK_CONCURRENCY + 1))
+            .expect_err("excessive concurrency should be rejected");
+        assert!(
+            matches!(err, Error::InvalidConfiguration { component, .. } if component == "Sink")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sink_set_max_concurrent_rejects_zero() {
+        let sink = Sink::<()>::new("test", Some(1)).expect("valid concurrency");
+        let err = sink
+            .set_max_concurrent(0)
+            .expect_err("zero concurrency should be rejected");
+        assert!(
+            matches!(err, Error::InvalidConfiguration { component, .. } if component == "Sink")
+        );
+    }
+
+    #[test]
+    fn test_retry_policy_at_most_rejects_zero_backoff() {
+        let policy = RetryPolicy::AtMost {
+            max: 1,
+            backoff: Duration::ZERO,
+        };
+        let err = policy
+            .validate()
+            .expect_err("zero backoff should be rejected");
+        assert!(
+            matches!(err, Error::InvalidConfiguration { component, .. } if component == "RetryPolicy::AtMost")
+        );
+    }
+
+    #[test]
+    fn test_retry_policy_at_most_rejects_excessive_backoff() {
+        let policy = RetryPolicy::AtMost {
+            max: 1,
+            backoff: Duration::from_secs(3601),
+        };
+        let err = policy
+            .validate()
+            .expect_err("excessive backoff should be rejected");
+        assert!(
+            matches!(err, Error::InvalidConfiguration { component, .. } if component == "RetryPolicy::AtMost")
+        );
+    }
+
+    #[test]
+    fn test_retry_policy_at_most_rejects_too_many_retries() {
+        let policy = RetryPolicy::AtMost {
+            max: MAX_RETRY_ATTEMPTS + 1,
+            backoff: Duration::from_millis(100),
+        };
+        let err = policy
+            .validate()
+            .expect_err("too many retries should be rejected");
+        assert!(
+            matches!(err, Error::InvalidConfiguration { component, .. } if component == "RetryPolicy::AtMost")
+        );
+    }
+
+    #[test]
+    fn test_retry_policy_valid() {
+        let policy = RetryPolicy::AtMost {
+            max: 5,
+            backoff: Duration::from_millis(100),
+        };
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn test_sink_entry_retry_rejects_invalid_policy() {
+        let entry = SinkEntry::<()>::new(
+            "sub",
+            CountingSubscriber {
+                count: Arc::new(AtomicUsize::new(0)),
+            },
+        );
+        let invalid = RetryPolicy::AtMost {
+            max: 1,
+            backoff: Duration::ZERO,
+        };
+        let err = entry
+            .retry(invalid)
+            .expect_err("invalid retry policy should be rejected");
+        assert!(
+            matches!(err, Error::InvalidConfiguration { component, .. } if component == "RetryPolicy::AtMost")
+        );
     }
 }

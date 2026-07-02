@@ -76,12 +76,12 @@ impl Handler<Self> for TimerActor {
         match msg {
             TimerMsg::ScheduleOnce => {
                 let key = ctx
-                    .schedule_once(Duration::from_millis(50), TimerMsg::Fire);
+                    .schedule_once(Duration::from_millis(50), TimerMsg::Fire)?;
                 *self.last_key.lock().await = Some(key);
             }
             TimerMsg::SchedulePeriodic => {
                 let key =
-                    ctx.schedule(Duration::from_millis(20), TimerMsg::Tick);
+                    ctx.schedule(Duration::from_millis(20), TimerMsg::Tick)?;
                 *self.last_key.lock().await = Some(key);
             }
             TimerMsg::Cancel => {
@@ -294,7 +294,7 @@ impl Actor for LimitedTimerActor {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         for _ in 0..3 {
-            ctx.schedule_once(Duration::from_millis(20), LimitedMsg::Fire);
+            ctx.schedule_once(Duration::from_millis(20), LimitedMsg::Fire)?;
         }
         Ok(())
     }
@@ -335,6 +335,130 @@ async fn test_max_timers_limits_new_timers() -> Result<(), Error> {
 
     let resp = actor_ref.ask(LimitedMsg::GetCount).await?;
     assert_eq!(resp.fires, 2);
+
+    system.stop_system();
+    join_runner(runner_handle).await
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ValidateMsg {
+    ZeroDelay,
+    ZeroPeriod,
+    ExcessiveDelay,
+}
+
+impl Message for ValidateMsg {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ValidateResponse {
+    error: Option<String>,
+}
+
+impl Response for ValidateResponse {}
+
+#[derive(Clone)]
+struct ValidateTimerActor;
+
+impl NotPersistentActor for ValidateTimerActor {}
+
+#[async_trait]
+impl Actor for ValidateTimerActor {
+    type Message = ValidateMsg;
+    type Response = ValidateResponse;
+    type Event = TimerEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("ValidateTimerActor", id = %id)
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for ValidateTimerActor {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: ValidateMsg,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<ValidateResponse, Error> {
+        let result = match msg {
+            ValidateMsg::ZeroDelay => {
+                ctx.schedule_once(Duration::ZERO, ValidateMsg::ZeroDelay)
+            }
+            ValidateMsg::ZeroPeriod => {
+                ctx.schedule(Duration::ZERO, ValidateMsg::ZeroPeriod)
+            }
+            ValidateMsg::ExcessiveDelay => ctx.schedule_once(
+                Duration::from_secs(366 * 24 * 60 * 60),
+                ValidateMsg::ExcessiveDelay,
+            ),
+        };
+        Ok(ValidateResponse {
+            error: result.err().map(|e| e.to_string()),
+        })
+    }
+}
+
+#[test(tokio::test)]
+async fn test_schedule_once_zero_delay_rejected() -> Result<(), Error> {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let runner_handle = tokio::spawn(async move { runner.run().await });
+
+    let actor = system
+        .create_root_actor("validate_zero_delay", ValidateTimerActor)
+        .await?;
+
+    let resp = actor.ask(ValidateMsg::ZeroDelay).await?;
+    assert!(
+        resp.error.is_some(),
+        "zero delay schedule_once should be rejected"
+    );
+
+    system.stop_system();
+    join_runner(runner_handle).await
+}
+
+#[test(tokio::test)]
+async fn test_schedule_zero_period_rejected() -> Result<(), Error> {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let runner_handle = tokio::spawn(async move { runner.run().await });
+
+    let actor = system
+        .create_root_actor("validate_zero_period", ValidateTimerActor)
+        .await?;
+
+    let resp = actor.ask(ValidateMsg::ZeroPeriod).await?;
+    assert!(
+        resp.error.is_some(),
+        "zero period schedule should be rejected"
+    );
+
+    system.stop_system();
+    join_runner(runner_handle).await
+}
+
+#[test(tokio::test)]
+async fn test_schedule_once_excessive_delay_rejected() -> Result<(), Error> {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let runner_handle = tokio::spawn(async move { runner.run().await });
+
+    let actor = system
+        .create_root_actor("validate_excessive", ValidateTimerActor)
+        .await?;
+
+    let resp = actor.ask(ValidateMsg::ExcessiveDelay).await?;
+    assert!(
+        resp.error.is_some(),
+        "excessive delay schedule_once should be rejected"
+    );
 
     system.stop_system();
     join_runner(runner_handle).await

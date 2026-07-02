@@ -109,13 +109,31 @@ where
 
     /// Schedules a single message to be sent to this actor after `delay`.
     /// Returns a `TimerKey` that can be used to cancel the timer.
-    pub fn schedule_once(&self, delay: Duration, msg: A::Message) -> TimerKey {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `delay` is zero or exceeds
+    /// one year.
+    pub fn schedule_once(
+        &self,
+        delay: Duration,
+        msg: A::Message,
+    ) -> Result<TimerKey, Error> {
         self.timer_scheduler.schedule_once(delay, msg)
     }
 
     /// Schedules a message to be sent to this actor every `period`.
     /// Returns a `TimerKey` that can be used to cancel the timer.
-    pub fn schedule(&self, period: Duration, msg: A::Message) -> TimerKey
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `period` is zero or exceeds
+    /// one year.
+    pub fn schedule(
+        &self,
+        period: Duration,
+        msg: A::Message,
+    ) -> Result<TimerKey, Error>
     where
         A::Message: Clone,
     {
@@ -170,7 +188,7 @@ where
 
         self.system
             .watch(target.path(), self.path.clone(), notify)
-            .await;
+            .await?;
         Ok(())
     }
 
@@ -509,6 +527,98 @@ pub enum OverflowStrategy {
     Fail,
 }
 
+/// Minimum allowed mailbox capacity.
+pub const MIN_MAILBOX_CAPACITY: usize = 1;
+
+/// Maximum allowed mailbox capacity.
+pub const MAX_MAILBOX_CAPACITY: usize = 1_000_000;
+
+/// Validates that `capacity` is within the allowed mailbox capacity range.
+pub fn validate_mailbox_capacity(capacity: usize) -> Result<(), Error> {
+    if capacity < MIN_MAILBOX_CAPACITY {
+        return Err(Error::InvalidConfiguration {
+            component: "actor mailbox".to_owned(),
+            reason: format!(
+                "mailbox capacity {capacity} is below the minimum {MIN_MAILBOX_CAPACITY}"
+            ),
+        });
+    }
+    if capacity > MAX_MAILBOX_CAPACITY {
+        return Err(Error::InvalidConfiguration {
+            component: "actor mailbox".to_owned(),
+            reason: format!(
+                "mailbox capacity {capacity} exceeds the maximum {MAX_MAILBOX_CAPACITY}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Minimum allowed value for timeout-related actor configuration.
+pub const MIN_TIMEOUT: Duration = Duration::from_millis(1);
+
+/// Maximum allowed value for timeout-related actor configuration.
+pub const MAX_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Validates that `timeout` is within the allowed timeout range.
+pub fn validate_timeout(name: &str, timeout: Duration) -> Result<(), Error> {
+    if timeout < MIN_TIMEOUT {
+        return Err(Error::InvalidConfiguration {
+            component: name.to_owned(),
+            reason: format!(
+                "timeout {timeout:?} is below the minimum {MIN_TIMEOUT:?}"
+            ),
+        });
+    }
+    if timeout > MAX_TIMEOUT {
+        return Err(Error::InvalidConfiguration {
+            component: name.to_owned(),
+            reason: format!(
+                "timeout {timeout:?} exceeds the maximum {MAX_TIMEOUT:?}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validates an optional timeout, treating `None` as valid.
+pub fn validate_optional_timeout(
+    name: &str,
+    timeout: Option<Duration>,
+) -> Result<(), Error> {
+    if let Some(timeout) = timeout {
+        validate_timeout(name, timeout)?;
+    }
+    Ok(())
+}
+
+/// Minimum allowed value for `Actor::max_timers`.
+pub const MIN_MAX_TIMERS: usize = 1;
+
+/// Maximum allowed value for `Actor::max_timers`.
+pub const MAX_MAX_TIMERS: usize = 100_000;
+
+/// Validates that `max_timers` is within the allowed range.
+pub fn validate_max_timers(max_timers: usize) -> Result<(), Error> {
+    if max_timers < MIN_MAX_TIMERS {
+        return Err(Error::InvalidConfiguration {
+            component: "actor timers".to_owned(),
+            reason: format!(
+                "max_timers {max_timers} is below the minimum {MIN_MAX_TIMERS}"
+            ),
+        });
+    }
+    if max_timers > MAX_MAX_TIMERS {
+        return Err(Error::InvalidConfiguration {
+            component: "actor timers".to_owned(),
+            reason: format!(
+                "max_timers {max_timers} exceeds the maximum {MAX_MAX_TIMERS}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Defines the identity and associated types of an actor.
 ///
 /// Implement this trait together with [`Handler`] on your actor struct.
@@ -574,12 +684,18 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
     }
 
     /// Maximum number of pending timers this actor may have scheduled at once.
+    ///
+    /// Must be between [`MIN_MAX_TIMERS`] and [`MAX_MAX_TIMERS`] inclusive.
     /// Timers created beyond this limit are ignored and logged as a warning.
     fn max_timers() -> usize {
-        usize::MAX
+        MAX_MAX_TIMERS
     }
 
     /// Maximum number of messages that can be queued in this actor's mailbox.
+    ///
+    /// Must be between [`MIN_MAILBOX_CAPACITY`] and [`MAX_MAILBOX_CAPACITY`]
+    /// inclusive. Values outside this range cause actor creation to fail with
+    /// [`Error::InvalidConfiguration`].
     fn mailbox_capacity() -> usize {
         1024
     }
@@ -764,12 +880,17 @@ where
         self.sender.ask(self.path(), message).await
     }
 
-    /// Sends `message` and waits up to `timeout` for a response, returning `Error::Timeout` if the deadline is exceeded.
+    /// Sends `message` and waits up to `timeout` for a response, returning
+    /// `Error::Timeout` if the deadline is exceeded.
+    ///
+    /// `timeout` must be within the allowed range; otherwise an
+    /// [`Error::InvalidConfiguration`] is returned immediately.
     pub async fn ask_timeout(
         &self,
         message: A::Message,
         timeout: std::time::Duration,
     ) -> Result<A::Response, Error> {
+        validate_timeout("ask_timeout", timeout)?;
         tokio::time::timeout(timeout, self.sender.ask(self.path(), message))
             .await
             .map_err(|_| Error::Timeout {
@@ -875,6 +996,7 @@ mod test {
     use test_log::test;
 
     use crate::sink::{Sink, Subscriber};
+    use crate::system::ActorSystemConfig;
 
     use serde::{Deserialize, Serialize};
     use tokio::sync::Mutex;
@@ -963,13 +1085,16 @@ mod test {
 
     #[test(tokio::test)]
     async fn test_actor() {
-        let (system, _) =
-            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (system, _) = SystemRef::new(
+            ActorSystemConfig::default(),
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
         let actor = TestActor { counter: 0 };
         let actor_ref = system.create_root_actor("test", actor).await.unwrap();
 
         let subscriber = TestSubscriber::new();
-        let mut sink = Sink::new("test_sink", None);
+        let mut sink = Sink::new("test_sink", None).expect("valid sink");
         sink.add("sub1", subscriber.clone());
         actor_ref.register_sink(sink);
 

@@ -350,3 +350,235 @@ async fn test_fail_returns_mailbox_full() -> Result<(), Error> {
     system.stop_system();
     join_runner(runner_handle).await
 }
+
+// ============================================================================
+// Mailbox capacity validation tests
+// ============================================================================
+
+#[derive(Clone)]
+struct CapacityActor;
+
+impl NotPersistentActor for CapacityActor {}
+
+#[async_trait]
+impl Actor for CapacityActor {
+    type Message = BoundMsg;
+    type Response = CountResponse;
+    type Event = ();
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("CapacityActor", id = %id)
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for CapacityActor {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: BoundMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<CountResponse, Error> {
+        Ok(CountResponse(0))
+    }
+}
+
+struct ZeroCapacityActor;
+
+impl NotPersistentActor for ZeroCapacityActor {}
+
+#[async_trait]
+impl Actor for ZeroCapacityActor {
+    type Message = BoundMsg;
+    type Response = CountResponse;
+    type Event = ();
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn mailbox_capacity() -> usize {
+        0
+    }
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("ZeroCapacityActor", id = %id)
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for ZeroCapacityActor {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: BoundMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<CountResponse, Error> {
+        Ok(CountResponse(0))
+    }
+}
+
+struct TooLargeCapacityActor;
+
+impl NotPersistentActor for TooLargeCapacityActor {}
+
+#[async_trait]
+impl Actor for TooLargeCapacityActor {
+    type Message = BoundMsg;
+    type Response = CountResponse;
+    type Event = ();
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn mailbox_capacity() -> usize {
+        1_000_001
+    }
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("TooLargeCapacityActor", id = %id)
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for TooLargeCapacityActor {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: BoundMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<CountResponse, Error> {
+        Ok(CountResponse(0))
+    }
+}
+
+#[test(tokio::test)]
+async fn test_mailbox_capacity_zero_is_rejected() -> Result<(), Error> {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let runner_handle = tokio::spawn(async move { runner.run().await });
+
+    let result = system
+        .create_root_actor::<ZeroCapacityActor, _>(
+            "zero_capacity",
+            ZeroCapacityActor,
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(Error::InvalidConfiguration { .. })),
+        "expected InvalidConfiguration for mailbox capacity 0, got {:?}",
+        result
+    );
+
+    system.stop_system();
+    join_runner(runner_handle).await
+}
+
+#[test(tokio::test)]
+async fn test_mailbox_capacity_above_max_is_rejected() -> Result<(), Error> {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let runner_handle = tokio::spawn(async move { runner.run().await });
+
+    let result = system
+        .create_root_actor::<TooLargeCapacityActor, _>(
+            "too_large_capacity",
+            TooLargeCapacityActor,
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(Error::InvalidConfiguration { .. })),
+        "expected InvalidConfiguration for mailbox capacity above max, got {:?}",
+        result
+    );
+
+    system.stop_system();
+    join_runner(runner_handle).await
+}
+
+#[test(tokio::test)]
+async fn test_mailbox_capacity_one_is_accepted() -> Result<(), Error> {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let runner_handle = tokio::spawn(async move { runner.run().await });
+
+    let actor = system
+        .create_root_actor::<CapacityActor, _>("valid_capacity", CapacityActor)
+        .await?;
+
+    let response = actor.ask(BoundMsg::GetCount).await?;
+    assert_eq!(response.0, 0);
+
+    system.stop_system();
+    join_runner(runner_handle).await
+}
+
+#[test(tokio::test)]
+async fn test_mailbox_capacity_at_max_is_accepted() -> Result<(), Error> {
+    struct MaxCapacityActor;
+
+    impl NotPersistentActor for MaxCapacityActor {}
+
+    #[async_trait]
+    impl Actor for MaxCapacityActor {
+        type Message = BoundMsg;
+        type Response = CountResponse;
+        type Event = ();
+        type SinkEvent = Self::Event;
+        type ChildError = Error;
+        type ChildFault = Error;
+
+        fn mailbox_capacity() -> usize {
+            1_000_000
+        }
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("MaxCapacityActor", id = %id)
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Self> for MaxCapacityActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: BoundMsg,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<CountResponse, Error> {
+            Ok(CountResponse(0))
+        }
+    }
+
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let runner_handle = tokio::spawn(async move { runner.run().await });
+
+    let actor = system
+        .create_root_actor::<MaxCapacityActor, _>(
+            "max_capacity",
+            MaxCapacityActor,
+        )
+        .await?;
+
+    let response = actor.ask(BoundMsg::GetCount).await?;
+    assert_eq!(response.0, 0);
+
+    system.stop_system();
+    join_runner(runner_handle).await
+}

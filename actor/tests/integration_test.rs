@@ -295,7 +295,7 @@ async fn test_actor() {
         .unwrap();
 
     let child_sub = CollectingChildSubscriber::new();
-    let mut sink = Sink::new("child_events", None);
+    let mut sink = Sink::new("child_events", None).expect("valid sink");
     sink.add("sub1", child_sub.clone());
     child_actor.register_sink(sink);
 
@@ -342,7 +342,7 @@ async fn test_actor_error() {
     let parent_ref = system.create_root_actor("parent", parent).await.unwrap();
 
     let parent_sub = CollectingParentSubscriber::new();
-    let mut sink = Sink::new("parent_events", None);
+    let mut sink = Sink::new("parent_events", None).expect("valid sink");
     sink.add("sub1", parent_sub.clone());
     parent_ref.register_sink(sink);
 
@@ -376,7 +376,7 @@ async fn test_actor_fault() {
     assert!(child_ref.is_ok());
 
     let parent_sub = CollectingParentSubscriber::new();
-    let mut sink = Sink::new("parent_events", None);
+    let mut sink = Sink::new("parent_events", None).expect("valid sink");
     sink.add("sub1", parent_sub.clone());
     parent_ref.register_sink(sink);
 

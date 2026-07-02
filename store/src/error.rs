@@ -131,4 +131,13 @@ pub enum Error {
         reason: String,
         source: Option<ActorError>,
     },
+
+    /// Invalid store or database configuration supplied by the user.
+    #[error("invalid configuration for {component}: {reason}")]
+    InvalidConfiguration {
+        /// Component affected (e.g. "MachineSpec").
+        component: String,
+        /// Human-readable reason.
+        reason: String,
+    },
 }

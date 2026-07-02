@@ -214,11 +214,12 @@ where
 }
 
 /// Helper to create a typed `ChildErrorSender` / `ChildErrorReceiver` pair.
-pub fn child_error_channel<E, F>()
--> (ChildErrorSender<E, F>, ChildErrorReceiver<E, F>)
+pub fn child_error_channel<E, F>(
+    size: usize,
+) -> (ChildErrorSender<E, F>, ChildErrorReceiver<E, F>)
 where
     E: Debug + Send + Sync + 'static,
     F: Debug + Clone + From<Error> + Send + Sync + 'static,
 {
-    mpsc::channel(256)
+    mpsc::channel(size)
 }

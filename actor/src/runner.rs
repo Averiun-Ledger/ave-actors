@@ -6,6 +6,8 @@ use crate::{
     actor::{
         Actor, ActorContext, ActorLifecycle, ActorRef, ChildAction, ChildError,
         ChildErrorReceiver, ChildErrorSender, Handler,
+        validate_mailbox_capacity, validate_max_timers,
+        validate_optional_timeout, validate_timeout,
     },
     handler::{Envelope, HandleHelper, MailboxReceiver, mailbox},
     sink::Sink,
@@ -90,15 +92,37 @@ where
     A: Actor + Handler<A>,
 {
     /// Creates a new actor runner and the actor reference.
+    ///
+    /// Returns an error if the actor configuration is invalid, for example if
+    /// the requested mailbox capacity is outside the allowed range.
     pub(crate) fn create(
         path: ActorPath,
         actor: A,
         parent_info: Option<crate::parent_ref::ParentInfo>,
-    ) -> (Self, ActorRef<A>, StopSender) {
-        let (sender, receiver) = mailbox(A::mailbox_capacity());
-        let (stop_sender, stop_receiver) = mpsc::channel(4);
+        stop_channel_size: usize,
+    ) -> Result<(Self, ActorRef<A>, StopSender), Error> {
+        let mailbox_capacity = A::mailbox_capacity();
+        validate_mailbox_capacity(mailbox_capacity)?;
+        validate_optional_timeout(
+            "actor startup_timeout",
+            A::startup_timeout(),
+        )?;
+        validate_optional_timeout("actor stop_timeout", A::stop_timeout())?;
+        validate_timeout(
+            "actor mailbox_drain_timeout",
+            A::mailbox_drain_timeout(),
+        )?;
+        validate_timeout(
+            "actor event_drain_timeout",
+            A::event_drain_timeout(),
+        )?;
+        validate_max_timers(A::max_timers())?;
+        A::supervision_strategy().validate()?;
+
+        let (sender, receiver) = mailbox(mailbox_capacity);
+        let (stop_sender, stop_receiver) = mpsc::channel(stop_channel_size);
         let (error_sender, error_receiver) =
-            crate::parent_ref::child_error_channel();
+            crate::parent_ref::child_error_channel(stop_channel_size);
         let helper = HandleHelper::new(sender, A::mailbox_overflow_strategy());
         let sinks = Arc::new(DashMap::<String, Sink<A::SinkEvent>>::new());
 
@@ -122,7 +146,7 @@ where
             stop_signal: false,
             sinks,
         };
-        (runner, actor_ref, stop_sender)
+        Ok((runner, actor_ref, stop_sender))
     }
 
     /// Init the actor runner.
@@ -562,7 +586,7 @@ mod tests {
         supervision::{
             IntervalStrategy, NoIntervalStrategy, Strategy, SupervisionStrategy,
         },
-        system::SystemRef,
+        system::{ActorSystemConfig, SystemRef},
     };
     use async_trait::async_trait;
     use serde::{Deserialize, Serialize};
@@ -672,12 +696,20 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_actor_root_failed() {
-        let (system, _) =
-            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (system, _) = SystemRef::new(
+            ActorSystemConfig::default(),
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
 
         let actor = TestActor { failed: false };
-        let (mut runner, actor_ref, stop_sender) =
-            ActorRunner::create(ActorPath::from("/user/test"), actor, None);
+        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+            ActorPath::from("/user/test"),
+            actor,
+            None,
+            ActorSystemConfig::default().actor_stop_channel_size,
+        )
+        .unwrap();
         let inner_system = system.clone();
 
         // Init the actor runner.
@@ -854,8 +886,11 @@ mod tests {
     /// tell/ask to a fully stopped actor must return Error::ActorStopped.
     #[test(tokio::test)]
     async fn test_send_to_stopped_actor_returns_actor_stopped() {
-        let (system, _) =
-            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (system, _) = SystemRef::new(
+            ActorSystemConfig::default(),
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
 
         let actor = DrainActor {
             started: Arc::new(Notify::new()),
@@ -890,8 +925,11 @@ mod tests {
     ///     drain runs → Normal discarded, Critical processed.
     #[test(tokio::test)]
     async fn test_drain_critical_processed_normal_stopped() {
-        let (system, _) =
-            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (system, _) = SystemRef::new(
+            ActorSystemConfig::default(),
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
 
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -948,8 +986,11 @@ mod tests {
     /// callers receive Error::ActorStopped.
     #[test(tokio::test)]
     async fn test_mailbox_drain_timeout_drops_slow_critical() {
-        let (system, _) =
-            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (system, _) = SystemRef::new(
+            ActorSystemConfig::default(),
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
 
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -1036,13 +1077,18 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_max_retries_exceeded() {
-        let (system, _) =
-            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (system, _) = SystemRef::new(
+            ActorSystemConfig::default(),
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
         let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
             ActorPath::from("/user/max_retries"),
             MaxRetriesActor,
             None,
-        );
+            ActorSystemConfig::default().actor_stop_channel_size,
+        )
+        .unwrap();
         let inner_system = system.clone();
         let handle = tokio::spawn(async move {
             runner
@@ -1110,13 +1156,18 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_apply_stop_strategy() {
-        let (system, _) =
-            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (system, _) = SystemRef::new(
+            ActorSystemConfig::default(),
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
         let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
             ActorPath::from("/user/stop_strategy"),
             StopStrategyActor,
             None,
-        );
+            ActorSystemConfig::default().actor_stop_channel_size,
+        )
+        .unwrap();
         let inner_system = system.clone();
         let handle = tokio::spawn(async move {
             runner
@@ -1171,13 +1222,18 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_mailbox_closed_stops_actor() {
-        let (system, _) =
-            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (system, _) = SystemRef::new(
+            ActorSystemConfig::default(),
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
         let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
             ActorPath::from("/user/simple"),
             SimpleRunningActor,
             None,
-        );
+            ActorSystemConfig::default().actor_stop_channel_size,
+        )
+        .unwrap();
         let inner_system = system.clone();
         let handle = tokio::spawn(async move {
             runner
@@ -1259,13 +1315,18 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_pre_restart_error() {
-        let (system, _) =
-            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (system, _) = SystemRef::new(
+            ActorSystemConfig::default(),
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
         let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
             ActorPath::from("/user/pre_restart_err"),
             PreRestartErrorActor,
             None,
-        );
+            ActorSystemConfig::default().actor_stop_channel_size,
+        )
+        .unwrap();
         let inner_system = system.clone();
         let handle = tokio::spawn(async move {
             runner
@@ -1345,8 +1406,11 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_apply_retry_strategy_success() {
-        let (system, _) =
-            SystemRef::new(CancellationToken::new(), CancellationToken::new());
+        let (system, _) = SystemRef::new(
+            ActorSystemConfig::default(),
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
         let actor = RetryOnceActor {
             failed: Arc::new(Mutex::new(true)),
         };
@@ -1354,7 +1418,9 @@ mod tests {
             ActorPath::from("/user/retry_success"),
             actor,
             None,
-        );
+            ActorSystemConfig::default().actor_stop_channel_size,
+        )
+        .unwrap();
         let inner_system = system.clone();
         let handle = tokio::spawn(async move {
             runner

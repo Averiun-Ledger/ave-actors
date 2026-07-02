@@ -32,6 +32,15 @@ pub enum Error {
     #[error("actor system is stopping or stopped")]
     SystemStopped,
 
+    /// Invalid actor or system configuration supplied by the user.
+    #[error("invalid configuration for {component}: {reason}")]
+    InvalidConfiguration {
+        /// Component affected (e.g. "actor mailbox").
+        component: String,
+        /// Human-readable reason.
+        reason: String,
+    },
+
     // ===== Message Passing Errors =====
     /// Failed to send a message to an actor.
     ///

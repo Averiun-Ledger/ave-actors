@@ -133,7 +133,10 @@ where
         }
     }
 
-    async fn finish_retry_cycle(&mut self, ctx: &ActorContext<Self>) {
+    async fn finish_retry_cycle(
+        &mut self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), Error> {
         self.is_end = true;
         if let Some(key) = self.pending_retry.take() {
             ctx.cancel_timer(key);
@@ -142,23 +145,28 @@ where
             self.completion_notified = true;
         } else {
             ctx.stop(None).await;
-            return;
+            return Ok(());
         }
 
         if let Some(notifier) = self.on_finished.as_ref() {
             notifier.notify(ctx).await;
         }
 
-        self.schedule_completion(ctx).await;
+        self.schedule_completion(ctx).await?;
+        Ok(())
     }
 
-    async fn schedule_completion(&mut self, ctx: &ActorContext<Self>) {
+    async fn schedule_completion(
+        &mut self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), Error> {
         self.completion_pending = true;
         let key = ctx.schedule_once(
             std::time::Duration::from_millis(1),
             RetryMessage::Complete,
-        );
+        )?;
         self.pending_retry = Some(key);
+        Ok(())
     }
 
     async fn handle_retry_attempt(
@@ -171,7 +179,7 @@ where
 
         self.retries += 1;
         if self.retries > self.retry_strategy.max_retries() {
-            self.finish_retry_cycle(ctx).await;
+            self.finish_retry_cycle(ctx).await?;
             return Ok(());
         }
 
@@ -187,20 +195,21 @@ where
             Ok(child) => child,
             Err(err) => {
                 error!(error = %err, "Retry target is not available");
-                self.finish_retry_cycle(ctx).await;
+                self.finish_retry_cycle(ctx).await?;
                 return Ok(());
             }
         };
 
         if let Err(err) = child.tell(self.message.clone()).await {
             error!(error = %err, "Failed to send retry message to target");
-            self.finish_retry_cycle(ctx).await;
+            self.finish_retry_cycle(ctx).await?;
             return Ok(());
         }
 
         match self.retry_strategy.next_backoff() {
             Some(duration) => {
-                let key = ctx.schedule_once(duration, RetryMessage::Continue);
+                let key =
+                    ctx.schedule_once(duration, RetryMessage::Continue)?;
                 self.pending_retry = Some(key);
             }
             None => {
@@ -296,7 +305,7 @@ where
                 self.handle_retry_attempt(ctx).await?;
             }
             RetryMessage::End => {
-                self.finish_retry_cycle(ctx).await;
+                self.finish_retry_cycle(ctx).await?;
             }
             RetryMessage::Complete => {
                 if self.completion_pending {

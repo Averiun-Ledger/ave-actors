@@ -1,5 +1,7 @@
 //! Retry and supervision strategies for actor startup failures.
 
+use crate::Error;
+
 use std::{collections::VecDeque, fmt::Debug, time::Duration};
 
 /// Defines how many times and how quickly a failing actor is restarted.
@@ -25,6 +27,16 @@ pub enum SupervisionStrategy {
     Stop,
     /// Retry startup using the given [`Strategy`].
     Retry(Strategy),
+}
+
+impl SupervisionStrategy {
+    /// Validates the strategy parameters when the strategy is not `Stop`.
+    pub fn validate(&self) -> Result<(), Error> {
+        match self {
+            Self::Stop => Ok(()),
+            Self::Retry(strategy) => strategy.validate(),
+        }
+    }
 }
 
 /// Concrete retry strategy implementations.
@@ -58,6 +70,121 @@ impl RetryStrategy for Strategy {
             Self::CustomIntervalStrategy(strategy) => strategy.next_backoff(),
         }
     }
+}
+
+/// Maximum number of retries allowed in any built-in strategy.
+const MAX_RETRIES: usize = 1000;
+
+/// Minimum delay between retry attempts (must be strictly positive).
+///
+/// One microsecond is the smallest practical value; anything shorter would
+/// effectively busy-loop the executor on retries.
+const MIN_RETRY_DELAY: Duration = Duration::from_micros(1);
+
+/// Maximum delay between retry attempts.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(3600);
+
+impl Strategy {
+    /// Validates that the strategy parameters are within safe ranges.
+    pub fn validate(&self) -> Result<(), Error> {
+        match self {
+            Self::NoInterval(strategy) => {
+                if strategy.max_retries() > MAX_RETRIES {
+                    return Err(Error::InvalidConfiguration {
+                        component: "supervision strategy".to_owned(),
+                        reason: format!(
+                            "max_retries {} exceeds the maximum {}",
+                            strategy.max_retries(),
+                            MAX_RETRIES
+                        ),
+                    });
+                }
+            }
+            Self::Interval(strategy) => {
+                validate_retry_delay(strategy.duration)?;
+                if strategy.max_retries() > MAX_RETRIES {
+                    return Err(Error::InvalidConfiguration {
+                        component: "supervision strategy".to_owned(),
+                        reason: format!(
+                            "max_retries {} exceeds the maximum {}",
+                            strategy.max_retries(),
+                            MAX_RETRIES
+                        ),
+                    });
+                }
+            }
+            Self::Exponential(strategy) => {
+                validate_retry_delay(strategy.base)?;
+                validate_retry_delay(strategy.max)?;
+                if strategy.base > strategy.max {
+                    return Err(Error::InvalidConfiguration {
+                        component: "supervision strategy".to_owned(),
+                        reason: format!(
+                            "exponential backoff base {:?} is greater than max {:?}",
+                            strategy.base, strategy.max
+                        ),
+                    });
+                }
+                if strategy.multiplier < 2 {
+                    return Err(Error::InvalidConfiguration {
+                        component: "supervision strategy".to_owned(),
+                        reason: format!(
+                            "exponential backoff multiplier {} must be at least 2",
+                            strategy.multiplier
+                        ),
+                    });
+                }
+                if strategy.max_retries() > MAX_RETRIES {
+                    return Err(Error::InvalidConfiguration {
+                        component: "supervision strategy".to_owned(),
+                        reason: format!(
+                            "max_retries {} exceeds the maximum {}",
+                            strategy.max_retries(),
+                            MAX_RETRIES
+                        ),
+                    });
+                }
+            }
+            Self::CustomIntervalStrategy(strategy) => {
+                if strategy.max_retries() > MAX_RETRIES {
+                    return Err(Error::InvalidConfiguration {
+                        component: "supervision strategy".to_owned(),
+                        reason: format!(
+                            "custom interval count {} exceeds the maximum {}",
+                            strategy.max_retries(),
+                            MAX_RETRIES
+                        ),
+                    });
+                }
+                for delay in &strategy.durations {
+                    validate_retry_delay(*delay)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_retry_delay(delay: Duration) -> Result<(), Error> {
+    if delay < MIN_RETRY_DELAY {
+        return Err(Error::InvalidConfiguration {
+            component: "supervision strategy".to_owned(),
+            reason: format!(
+                "retry delay {:?} is below the minimum {:?}",
+                delay, MIN_RETRY_DELAY
+            ),
+        });
+    }
+    if delay > MAX_RETRY_DELAY {
+        return Err(Error::InvalidConfiguration {
+            component: "supervision strategy".to_owned(),
+            reason: format!(
+                "retry delay {:?} exceeds the maximum {:?}",
+                delay, MAX_RETRY_DELAY
+            ),
+        });
+    }
+    Ok(())
 }
 
 impl Default for Strategy {

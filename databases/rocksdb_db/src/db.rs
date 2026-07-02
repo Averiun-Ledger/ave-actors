@@ -85,7 +85,10 @@ impl RocksDbManager {
             })?;
         }
 
-        let spec = resolve_spec(spec);
+        let spec = resolve_spec(spec).map_err(|e| {
+            error!(error = %e, "Invalid machine spec for RocksDB manager");
+            e
+        })?;
         let (ram_mb, cores) = (spec.ram_mb, spec.cpu_cores);
         info!("RocksDB tuning: ram_mb={}, cpu_cores={}", ram_mb, cores);
 

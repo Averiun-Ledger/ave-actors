@@ -69,7 +69,7 @@ struct PoolState {
 /// On drop the connection is returned to the pool (or discarded if the pool
 /// already has `max_size` idle connections).
 struct PooledConnection {
-    conn: Option<Connection>,
+    conn: std::mem::ManuallyDrop<Connection>,
     pool: Arc<SqlitePool>,
 }
 
@@ -77,28 +77,26 @@ impl std::ops::Deref for PooledConnection {
     type Target = Connection;
 
     fn deref(&self) -> &Self::Target {
-        // Invariant: `conn` is only `None` after `Drop` has consumed it.
-        // `Deref` is never called after Drop, so this is guaranteed to succeed.
-        self.conn
-            .as_ref()
-            .expect("PooledConnection accessed after drop")
+        // `conn` is never moved out while `self` is alive; Drop is the only
+        // place that consumes it, and Drop cannot run concurrently with Deref.
+        &self.conn
     }
 }
 
 impl std::ops::DerefMut for PooledConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        // Invariant: same as `Deref` — `conn` is `Some` until Drop runs.
-        self.conn
-            .as_mut()
-            .expect("PooledConnection accessed after drop")
+        // Same invariant as `Deref`: the connection is present until Drop.
+        &mut self.conn
     }
 }
 
 impl Drop for PooledConnection {
     fn drop(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            self.pool.checkin(conn);
-        }
+        // SAFETY: `conn` is only accessed through Deref/DerefMut while `self`
+        // is alive, and this is the only place that moves it out. After this
+        // call the value is no longer used, satisfying ManuallyDrop's contract.
+        let conn = unsafe { std::mem::ManuallyDrop::take(&mut self.conn) };
+        self.pool.checkin(conn);
     }
 }
 
@@ -123,7 +121,7 @@ impl SqlitePool {
 
         if let Some(conn) = state.available.pop() {
             return Ok(PooledConnection {
-                conn: Some(conn),
+                conn: std::mem::ManuallyDrop::new(conn),
                 pool: self.clone(),
             });
         }
@@ -146,7 +144,7 @@ impl SqlitePool {
             };
 
         Ok(PooledConnection {
-            conn: Some(conn),
+            conn: std::mem::ManuallyDrop::new(conn),
             pool: self.clone(),
         })
     }
@@ -246,7 +244,10 @@ impl SqliteManager {
 
         let db_path = path.join("database.db");
 
-        let spec = resolve_spec(spec);
+        let spec = resolve_spec(spec).map_err(|e| {
+            error!(error = %e, "Invalid machine spec for SQLite manager");
+            e
+        })?;
         let tuning = tuning_for_ram(spec.ram_mb);
         info!(
             "SQLite tuning: ram_mb={}, cpu_cores={}",
