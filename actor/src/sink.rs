@@ -5,7 +5,12 @@
 //! then explicitly sends events to a sink by name and the sink distributes
 //! the event to every subscriber whose filter accepts it.
 
-use crate::{Error, Event};
+use crate::{ActorPath, Error, Event};
+
+#[cfg(feature = "prometheus")]
+use crate::metrics::{SinkDropLabels, SinkLabels};
+#[cfg(feature = "prometheus")]
+use prometheus_client::metrics::counter::Counter;
 
 use async_trait::async_trait;
 use std::{
@@ -168,10 +173,48 @@ impl<E: Event> SinkEntry<E> {
 
 struct SinkInner<E: Event> {
     name: String,
+    #[cfg(feature = "prometheus")]
+    dropped_full_counter: Option<Counter>,
+    #[cfg(feature = "prometheus")]
+    dropped_closed_counter: Option<Counter>,
+    #[cfg(feature = "prometheus")]
+    delivery_failure_counter: Option<Counter>,
     entries: RwLock<Vec<SinkEntry<E>>>,
     max_concurrent: AtomicUsize,
     sender: Mutex<Option<tokio::sync::mpsc::Sender<Arc<E>>>>,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl<E: Event> SinkInner<E> {
+    #[cfg(feature = "prometheus")]
+    fn inc_dropped_full(&self) {
+        if let Some(c) = &self.dropped_full_counter {
+            c.inc();
+        }
+    }
+
+    #[cfg(feature = "prometheus")]
+    fn inc_dropped_closed(&self) {
+        if let Some(c) = &self.dropped_closed_counter {
+            c.inc();
+        }
+    }
+
+    #[cfg(feature = "prometheus")]
+    fn inc_delivery_failure(&self) {
+        if let Some(c) = &self.delivery_failure_counter {
+            c.inc();
+        }
+    }
+
+    #[cfg(not(feature = "prometheus"))]
+    fn inc_dropped_full(&self) {}
+
+    #[cfg(not(feature = "prometheus"))]
+    fn inc_dropped_closed(&self) {}
+
+    #[cfg(not(feature = "prometheus"))]
+    fn inc_delivery_failure(&self) {}
 }
 
 /// Named sink that routes events to filtered subscribers.
@@ -203,6 +246,11 @@ impl<E: Event> Sink<E> {
     /// used. The internal event buffer uses [`DEFAULT_SINK_BUFFER_CAPACITY`]
     /// slots.
     ///
+    /// Sinks created directly through this constructor do not report
+    /// Prometheus metrics. Actors should use
+    /// [`ActorContext::register_sink`](crate::ActorContext::register_sink)
+    /// or [`crate::ActorRef::register_sink`] when metrics collection is required.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` is
@@ -211,7 +259,14 @@ impl<E: Event> Sink<E> {
         name: impl Into<String>,
         max_concurrent: Option<usize>,
     ) -> Result<Self, Error> {
-        Self::with_buffer(name, max_concurrent, DEFAULT_SINK_BUFFER_CAPACITY)
+        Self::with_buffer_inner(
+            name,
+            max_concurrent,
+            DEFAULT_SINK_BUFFER_CAPACITY,
+            None,
+            #[cfg(feature = "prometheus")]
+            None,
+        )
     }
 
     /// Create a new sink with the given name and event buffer capacity.
@@ -221,6 +276,12 @@ impl<E: Event> Sink<E> {
     /// `buffer_capacity` sets the size of the internal bounded channel; it
     /// must be between 1 and [`MAX_SINK_BUFFER_CAPACITY`].
     ///
+    /// Sinks created directly through this constructor do not report
+    /// Prometheus metrics. Actors should use
+    /// [`ActorContext::register_sink_with_buffer`](crate::ActorContext::register_sink_with_buffer)
+    /// or [`crate::ActorRef::register_sink_with_buffer`] when metrics collection
+    /// is required.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` or
@@ -229,6 +290,68 @@ impl<E: Event> Sink<E> {
         name: impl Into<String>,
         max_concurrent: Option<usize>,
         buffer_capacity: usize,
+    ) -> Result<Self, Error> {
+        Self::with_buffer_inner(
+            name,
+            max_concurrent,
+            buffer_capacity,
+            None,
+            #[cfg(feature = "prometheus")]
+            None,
+        )
+    }
+
+    /// Create a new sink with metrics collection.
+    ///
+    /// This is the internal constructor used by the actor runtime when the
+    /// `prometheus` feature is enabled. External callers should use
+    /// [`Sink::new`] and register the sink through an actor handle or context
+    /// to obtain metrics.
+    #[cfg(feature = "prometheus")]
+    pub(crate) fn new_with_metrics(
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+        path: ActorPath,
+        metrics: Option<Arc<crate::metrics::ActorMetrics>>,
+    ) -> Result<Self, Error> {
+        Self::with_buffer_inner(
+            name,
+            max_concurrent,
+            DEFAULT_SINK_BUFFER_CAPACITY,
+            Some(path),
+            metrics,
+        )
+    }
+
+    /// Create a new sink with a custom buffer capacity and metrics collection.
+    ///
+    /// This is the internal constructor used by the actor runtime when the
+    /// `prometheus` feature is enabled.
+    #[cfg(feature = "prometheus")]
+    pub(crate) fn with_buffer_and_metrics(
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+        buffer_capacity: usize,
+        path: ActorPath,
+        metrics: Option<Arc<crate::metrics::ActorMetrics>>,
+    ) -> Result<Self, Error> {
+        Self::with_buffer_inner(
+            name,
+            max_concurrent,
+            buffer_capacity,
+            Some(path),
+            metrics,
+        )
+    }
+
+    fn with_buffer_inner(
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+        buffer_capacity: usize,
+        _path: Option<ActorPath>,
+        #[cfg(feature = "prometheus")] metrics: Option<
+            Arc<crate::metrics::ActorMetrics>,
+        >,
     ) -> Result<Self, Error> {
         let name = name.into();
         let max_concurrent = max_concurrent.unwrap_or(DEFAULT_SINK_CONCURRENCY);
@@ -262,11 +385,52 @@ impl<E: Event> Sink<E> {
                 ),
             });
         }
+        #[cfg(feature = "prometheus")]
+        let scope = _path.as_ref().map(|p| Arc::from(p.scope_key()));
+
+        #[cfg(feature = "prometheus")]
+        let (
+            dropped_full_counter,
+            dropped_closed_counter,
+            delivery_failure_counter,
+        ) = if let (Some(m), Some(scope)) = (metrics.as_ref(), scope) {
+            let sink_name = name.clone();
+            let dropped_full = m
+                .sink_events_dropped_total
+                .get_or_create(&SinkDropLabels {
+                    scope: Arc::clone(&scope),
+                    sink_name: sink_name.clone(),
+                    reason: "buffer_full",
+                })
+                .clone();
+            let dropped_closed = m
+                .sink_events_dropped_total
+                .get_or_create(&SinkDropLabels {
+                    scope: Arc::clone(&scope),
+                    sink_name: sink_name.clone(),
+                    reason: "closed",
+                })
+                .clone();
+            let delivery_failure = m
+                .sink_delivery_failures_total
+                .get_or_create(&SinkLabels {
+                    scope: Arc::clone(&scope),
+                    sink_name,
+                })
+                .clone();
+            (
+                Some(dropped_full),
+                Some(dropped_closed),
+                Some(delivery_failure),
+            )
+        } else {
+            (None, None, None)
+        };
+
         let (sender, mut receiver) =
             tokio::sync::mpsc::channel::<Arc<E>>(buffer_capacity);
 
         let inner = Arc::new_cyclic(|weak: &std::sync::Weak<SinkInner<E>>| {
-            let worker_name = name.clone();
             let weak = weak.clone();
             let handle = tokio::spawn(async move {
                 while let Some(event) = receiver.recv().await {
@@ -286,7 +450,6 @@ impl<E: Event> Sink<E> {
                             .cloned()
                             .collect()
                     };
-                    drop(inner);
 
                     let semaphore =
                         Arc::new(tokio::sync::Semaphore::new(limit));
@@ -302,7 +465,7 @@ impl<E: Event> Sink<E> {
                         let id = entry.id;
                         let retry = entry.retry;
                         let event = Arc::clone(&event);
-                        let sink_name = worker_name.clone();
+                        let inner = Arc::clone(&inner);
 
                         set.spawn(async move {
                             let _permit = permit;
@@ -313,10 +476,11 @@ impl<E: Event> Sink<E> {
                                     {
                                         error!(
                                             subscriber = %id,
-                                            sink = %sink_name,
+                                            sink = %inner.name,
                                             error = %err,
                                             "Subscriber failed"
                                         );
+                                        inner.inc_delivery_failure();
                                     }
                                 }
                                 RetryPolicy::AtMost { max, backoff } => {
@@ -330,15 +494,16 @@ impl<E: Event> Sink<E> {
                                                 if attempt == max {
                                                     error!(
                                                         subscriber = %id,
-                                                        sink = %sink_name,
+                                                        sink = %inner.name,
                                                         error = %err,
                                                         attempts = max + 1,
                                                         "Subscriber exhausted retries"
                                                     );
+                                                    inner.inc_delivery_failure();
                                                 } else {
                                                     warn!(
                                                         subscriber = %id,
-                                                        sink = %sink_name,
+                                                        sink = %inner.name,
                                                         attempt = attempt + 1,
                                                         "Subscriber failed, retrying"
                                                     );
@@ -361,6 +526,12 @@ impl<E: Event> Sink<E> {
 
             SinkInner {
                 name,
+                #[cfg(feature = "prometheus")]
+                dropped_full_counter,
+                #[cfg(feature = "prometheus")]
+                dropped_closed_counter,
+                #[cfg(feature = "prometheus")]
+                delivery_failure_counter,
                 entries: RwLock::new(Vec::new()),
                 max_concurrent: AtomicUsize::new(max_concurrent),
                 sender: Mutex::new(Some(sender)),
@@ -478,12 +649,14 @@ impl<E: Event> Sink<E> {
             match sender.try_send(event) {
                 Ok(()) => {}
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    self.inner.inc_dropped_full();
                     warn!(
                         sink = %self.inner.name,
                         "Sink buffer full, event dropped"
                     );
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    self.inner.inc_dropped_closed();
                     warn!(
                         sink = %self.inner.name,
                         "Sink is closed, event dropped"
@@ -491,6 +664,7 @@ impl<E: Event> Sink<E> {
                 }
             }
         } else {
+            self.inner.inc_dropped_closed();
             warn!(
                 sink = %self.inner.name,
                 "Sink is closed, event dropped"
@@ -801,6 +975,83 @@ mod tests {
             .expect_err("invalid retry policy should be rejected");
         assert!(
             matches!(err, Error::InvalidConfiguration { component, .. } if component == "RetryPolicy::AtMost")
+        );
+    }
+}
+
+#[cfg(all(test, feature = "prometheus"))]
+mod prometheus_tests {
+    use super::*;
+    use crate::ActorPath;
+    use crate::metrics::{ActorMetrics, SinkDropLabels, SinkLabels};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct FailingSubscriber;
+
+    #[async_trait]
+    impl Subscriber<()> for FailingSubscriber {
+        async fn notify(&self, _event: Arc<()>) -> Result<(), Error> {
+            Err(Error::Functional {
+                description: "intentional failure".to_owned(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sink_events_dropped_metric() {
+        let metrics = Arc::new(ActorMetrics::new());
+        let sink = Sink::with_buffer_and_metrics(
+            "full",
+            None,
+            2,
+            ActorPath::from("/user/test"),
+            Some(Arc::clone(&metrics)),
+        )
+        .expect("valid sink");
+
+        // Flood the channel before the worker task is scheduled.
+        for _ in 0..10 {
+            sink.send(Arc::new(()));
+        }
+
+        let dropped = metrics
+            .sink_events_dropped_total
+            .get_or_create(&SinkDropLabels {
+                scope: Arc::from("user"),
+                sink_name: "full".to_owned(),
+                reason: "buffer_full",
+            })
+            .get();
+        assert!(dropped > 0, "expected some events to be dropped");
+    }
+
+    #[tokio::test]
+    async fn test_sink_delivery_failures_metric() {
+        let metrics = Arc::new(ActorMetrics::new());
+        let mut sink = Sink::new_with_metrics(
+            "fail",
+            None,
+            ActorPath::from("/user/test"),
+            Some(Arc::clone(&metrics)),
+        )
+        .expect("valid sink");
+
+        sink.add("failing", FailingSubscriber);
+        sink.send(Arc::new(()));
+
+        // Give the worker time to process the failed delivery.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            metrics
+                .sink_delivery_failures_total
+                .get_or_create(&SinkLabels {
+                    scope: Arc::from("user"),
+                    sink_name: "fail".to_owned(),
+                })
+                .get(),
+            1
         );
     }
 }

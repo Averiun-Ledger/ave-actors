@@ -1,5 +1,7 @@
 //! Test specific scenario: brand new actor, ONE event, graceful stop, no recovery
 
+#[macro_use]
+mod helpers;
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
@@ -196,7 +198,7 @@ async fn test_single_event_no_recovery() {
 
 #[test(tokio::test)]
 async fn test_debug_event_counter_after_first_event() {
-    use ave_actors_store::store::{Store, StoreCommand, StoreResponse};
+    use ave_actors_store::store::{StoreCommand, StoreResponse};
 
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -212,7 +214,8 @@ async fn test_debug_event_counter_after_first_event() {
         "╚════════════════════════════════════════════════════════════╝\n"
     );
 
-    let store = Store::<SingleEventActor>::new(
+    let store = store_new!(
+        SingleEventActor,
         "test",
         "debug_counter",
         memory_manager.clone(),

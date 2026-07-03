@@ -27,6 +27,8 @@ use tracing::{debug, error, info_span, warn};
 
 use std::fmt::Debug;
 use std::sync::Arc;
+#[cfg(feature = "prometheus")]
+use std::time::Instant;
 
 /// Nonce size for XChaCha20-Poly1305 encryption.
 const NONCE_SIZE: usize = 24;
@@ -331,16 +333,33 @@ where
 
         let prefix = prefix.unwrap_or_else(|| ctx.path().key());
 
+        #[cfg(feature = "prometheus")]
+        let store = {
+            let metrics = ctx
+                .system()
+                .get_helper::<Arc<crate::metrics::StoreMetrics>>(
+                    crate::metrics::STORE_METRICS_HELPER,
+                );
+            Store::<Self>::new(
+                name,
+                prefix,
+                manager,
+                key_box,
+                self.state(),
+                metrics,
+                Arc::from(ctx.path().to_string()),
+            )
+        };
+        #[cfg(not(feature = "prometheus"))]
         let store =
-            Store::<Self>::new(name, prefix, manager, key_box, self.state())
-                .map_err(|e| match e {
-                    Error::InvalidConfiguration { component, reason } => {
-                        ActorError::InvalidConfiguration { component, reason }
-                    }
-                    other => {
-                        actor_store_error(StoreOperation::StoreInit, other)
-                    }
-                })?;
+            Store::<Self>::new(name, prefix, manager, key_box, self.state());
+
+        let store = store.map_err(|e| match e {
+            Error::InvalidConfiguration { component, reason } => {
+                ActorError::InvalidConfiguration { component, reason }
+            }
+            other => actor_store_error(StoreOperation::StoreInit, other),
+        })?;
         let store = ctx.create_child("store", store).await?;
         let response = store.ask(StoreCommand::Recover).await?;
 
@@ -379,6 +398,13 @@ where
     key_box: Option<EncryptedKey>,
     /// Initial state to use when recovering without a snapshot.
     initial_state: Arc<A::State>,
+    /// Actor path of the persistent actor that owns this store, used as a
+    /// Prometheus label.
+    #[cfg(feature = "prometheus")]
+    actor_path: Arc<str>,
+    /// Optional Prometheus metrics collection for the store.
+    #[cfg(feature = "prometheus")]
+    metrics: Option<Arc<crate::metrics::StoreMetrics>>,
 }
 
 impl<A> ave_actors_actor::NotPersistentActor for Store<A>
@@ -470,6 +496,10 @@ where
         manager: impl DbManager<C, S>,
         key_box: Option<EncryptedKey>,
         initial_state: Arc<A::State>,
+        #[cfg(feature = "prometheus")] metrics: Option<
+            Arc<crate::metrics::StoreMetrics>,
+        >,
+        #[cfg(feature = "prometheus")] actor_path: Arc<str>,
     ) -> Result<Self, Error>
     where
         C: Collection + 'static,
@@ -494,6 +524,10 @@ where
             metadata: Box::new(metadata),
             key_box,
             initial_state,
+            #[cfg(feature = "prometheus")]
+            actor_path,
+            #[cfg(feature = "prometheus")]
+            metrics,
         };
 
         let last_event_counter = store
@@ -526,11 +560,75 @@ where
             store.event_counter, store.compacted_until
         );
 
+        #[cfg(feature = "prometheus")]
+        store.record_pending_events();
+
         Ok(store)
+    }
+
+    /// Test-only helper that creates a [`Store`] with a default actor path and,
+    /// when the `prometheus` feature is enabled, no metrics.
+    #[cfg(test)]
+    pub fn test_new<C, S>(
+        name: &str,
+        prefix: &str,
+        manager: impl DbManager<C, S>,
+        key_box: Option<EncryptedKey>,
+        initial_state: Arc<A::State>,
+    ) -> Result<Self, Error>
+    where
+        C: Collection + 'static,
+        S: State + 'static,
+    {
+        #[cfg(feature = "prometheus")]
+        {
+            Store::new(
+                name,
+                prefix,
+                manager,
+                key_box,
+                initial_state,
+                None,
+                Arc::from("/test"),
+            )
+        }
+        #[cfg(not(feature = "prometheus"))]
+        {
+            Store::new(name, prefix, manager, key_box, initial_state)
+        }
     }
 
     const fn pending_events_since_snapshot(&self) -> u64 {
         self.event_counter.saturating_sub(self.state_counter)
+    }
+
+    #[cfg(feature = "prometheus")]
+    fn record_command_metrics(
+        &self,
+        start: Instant,
+        duration_operation: &'static str,
+        error_operation: &'static str,
+        result: &Result<(), &Error>,
+    ) {
+        if let Some(metrics) = self.metrics.as_ref() {
+            let duration = start.elapsed().as_secs_f64();
+            metrics.observe_operation_duration(
+                &self.actor_path,
+                duration_operation,
+                duration,
+            );
+            if result.is_err() {
+                metrics.inc_errors(&self.actor_path, error_operation);
+            }
+        }
+    }
+
+    #[cfg(feature = "prometheus")]
+    fn record_pending_events(&self) {
+        if let Some(metrics) = &self.metrics {
+            let pending = self.pending_events_since_snapshot();
+            metrics.set_pending_events_u64(&self.actor_path, pending);
+        }
     }
 
     fn get_metadata(&self) -> Result<Option<StoreMetadata>, Error> {
@@ -787,6 +885,8 @@ where
 
         self.states.put(&bytes)?;
         self.state_counter = next_state_counter;
+        #[cfg(feature = "prometheus")]
+        self.record_pending_events();
         self.persist_metadata()?;
         if A::compact_on_snapshot() {
             if let Err(err) = self.compact_to_snapshot() {
@@ -970,7 +1070,17 @@ where
             })?;
         }
 
-        self.snapshot(state.as_ref())
+        #[cfg(feature = "prometheus")]
+        let start = Instant::now();
+        let result = self.snapshot(state.as_ref());
+        #[cfg(feature = "prometheus")]
+        self.record_command_metrics(
+            start,
+            "snapshot",
+            "snapshot",
+            &result.as_ref().map(|_| ()),
+        );
+        result
     }
 
     /// Deletes all events, snapshots, and metadata, then resets all counters
@@ -982,6 +1092,8 @@ where
         self.event_counter = 0;
         self.state_counter = 0;
         self.compacted_until = 0;
+        #[cfg(feature = "prometheus")]
+        self.record_pending_events();
         Ok(())
     }
 
@@ -1277,10 +1389,22 @@ where
     ) -> Result<StoreResponse<A>, ActorError> {
         match msg {
             StoreCommand::Persist(event) => {
-                self.persist(event.as_ref()).map_err(|e| {
+                #[cfg(feature = "prometheus")]
+                let start = Instant::now();
+                let result = self.persist(event.as_ref());
+                #[cfg(feature = "prometheus")]
+                self.record_command_metrics(
+                    start,
+                    "persist",
+                    "persist",
+                    &result.as_ref().map(|_| ()),
+                );
+                result.map_err(|e| {
                     actor_store_error(StoreOperation::Persist, e)
                 })?;
                 debug!("Persisted event: {:?}", event);
+                #[cfg(feature = "prometheus")]
+                self.record_pending_events();
                 Ok(StoreResponse::Persisted)
             }
             StoreCommand::PersistFull {
@@ -1288,67 +1412,158 @@ where
                 state,
                 snapshot_every,
             } => {
+                #[cfg(feature = "prometheus")]
+                let start = Instant::now();
                 if snapshot_every == Some(0) {
+                    #[cfg(feature = "prometheus")]
+                    if let Some(metrics) = self.metrics.as_ref() {
+                        metrics.observe_operation_duration(
+                            &self.actor_path,
+                            "persist_full",
+                            start.elapsed().as_secs_f64(),
+                        );
+                        metrics.inc_errors(&self.actor_path, "persist_full");
+                    }
                     return Err(ActorError::InvalidConfiguration {
                         component: "Store PersistFull".to_owned(),
                         reason: "snapshot_every cannot be Some(0)".to_owned(),
                     });
                 }
 
-                self.persist(event.as_ref()).map_err(|e| {
+                let combined = self.persist(event.as_ref()).and_then(|()| {
+                    if snapshot_every.is_some_and(|every| {
+                        self.pending_events_since_snapshot() >= every
+                    }) {
+                        self.snapshot(state.as_ref())
+                    } else {
+                        Ok(())
+                    }
+                });
+
+                #[cfg(feature = "prometheus")]
+                self.record_command_metrics(
+                    start,
+                    "persist_full",
+                    "persist_full",
+                    &combined.as_ref().map(|_| ()),
+                );
+
+                combined.map_err(|e| {
                     actor_store_error(StoreOperation::PersistFull, e)
                 })?;
-
-                if snapshot_every.is_some_and(|every| {
-                    self.pending_events_since_snapshot() >= every
-                }) {
-                    self.snapshot(state.as_ref()).map_err(|e| {
-                        actor_store_error(StoreOperation::Snapshot, e)
-                    })?;
-                }
+                #[cfg(feature = "prometheus")]
+                self.record_pending_events();
 
                 debug!("Persisted full event: {:?}", event);
                 Ok(StoreResponse::Persisted)
             }
             StoreCommand::PersistLight(event, state) => {
-                self.persist_state(event.as_ref(), state.as_ref()).map_err(
-                    |e| actor_store_error(StoreOperation::PersistLight, e),
-                )?;
+                #[cfg(feature = "prometheus")]
+                let start = Instant::now();
+                let result = self.persist_state(event.as_ref(), state.as_ref());
+                #[cfg(feature = "prometheus")]
+                self.record_command_metrics(
+                    start,
+                    "persist_light",
+                    "persist_light",
+                    &result.as_ref().map(|_| ()),
+                );
+                result.map_err(|e| {
+                    actor_store_error(StoreOperation::PersistLight, e)
+                })?;
                 debug!("Light persistence of event: {:?}", event);
                 Ok(StoreResponse::Persisted)
             }
             StoreCommand::PersistBatch(events) => {
+                #[cfg(feature = "prometheus")]
+                let start = Instant::now();
+                let mut result = Ok(());
                 for event in &events {
-                    self.persist(event.as_ref()).map_err(|e| {
-                        actor_store_error(StoreOperation::PersistBatch, e)
-                    })?;
+                    if let Err(e) = self.persist(event.as_ref()) {
+                        result = Err(e);
+                        break;
+                    }
                 }
+                #[cfg(feature = "prometheus")]
+                self.record_command_metrics(
+                    start,
+                    "persist_batch",
+                    "persist_batch",
+                    &result.as_ref().map(|_| ()),
+                );
+                result.map_err(|e| {
+                    actor_store_error(StoreOperation::PersistBatch, e)
+                })?;
                 debug!("Persisted batch of {} events", events.len());
+                #[cfg(feature = "prometheus")]
+                self.record_pending_events();
                 Ok(StoreResponse::Persisted)
             }
             StoreCommand::Snapshot(state) => {
-                self.snapshot(state.as_ref()).map_err(|e| {
+                #[cfg(feature = "prometheus")]
+                let start = Instant::now();
+                let result = self.snapshot(state.as_ref());
+                #[cfg(feature = "prometheus")]
+                self.record_command_metrics(
+                    start,
+                    "snapshot",
+                    "snapshot",
+                    &result.as_ref().map(|_| ()),
+                );
+                result.map_err(|e| {
                     actor_store_error(StoreOperation::Snapshot, e)
                 })?;
                 debug!("Snapshotted state");
                 Ok(StoreResponse::Snapshotted)
             }
             StoreCommand::Compact => {
-                self.compact_to_snapshot().map_err(|e| {
+                #[cfg(feature = "prometheus")]
+                let start = Instant::now();
+                let result = self.compact_to_snapshot();
+                #[cfg(feature = "prometheus")]
+                self.record_command_metrics(
+                    start,
+                    "compact",
+                    "compact",
+                    &result.as_ref().map(|_| ()),
+                );
+                result.map_err(|e| {
                     actor_store_error(StoreOperation::Compact, e)
                 })?;
                 debug!("Compacted events covered by the latest snapshot");
                 Ok(StoreResponse::Compacted)
             }
             StoreCommand::Recover => {
-                let state = self.recover().map_err(|e| {
+                #[cfg(feature = "prometheus")]
+                let start = Instant::now();
+                let result = self.recover();
+                #[cfg(feature = "prometheus")]
+                self.record_command_metrics(
+                    start,
+                    "recover",
+                    "recover",
+                    &result.as_ref().map(|_| ()),
+                );
+                let state = result.map_err(|e| {
                     actor_store_error(StoreOperation::Recover, e)
                 })?;
+                #[cfg(feature = "prometheus")]
+                self.record_pending_events();
                 debug!("Recovered state");
                 Ok(StoreResponse::State(state))
             }
             StoreCommand::GetEvents { from, to } => {
-                let events = self.query_events(from, to).map_err(|e| {
+                #[cfg(feature = "prometheus")]
+                let start = Instant::now();
+                let result = self.query_events(from, to);
+                #[cfg(feature = "prometheus")]
+                self.record_command_metrics(
+                    start,
+                    "get_events_range",
+                    "get_events_range",
+                    &result.as_ref().map(|_| ()),
+                );
+                let events = result.map_err(|e| {
                     actor_store_error(
                         StoreOperation::GetEventsRange,
                         format!("Unable to get events range: {}", e),
@@ -1357,14 +1572,34 @@ where
                 Ok(StoreResponse::Events(events))
             }
             StoreCommand::LastEvent => {
-                let event = self.last_event().map_err(|e| {
+                #[cfg(feature = "prometheus")]
+                let start = Instant::now();
+                let result = self.last_event();
+                #[cfg(feature = "prometheus")]
+                self.record_command_metrics(
+                    start,
+                    "last_event",
+                    "last_event",
+                    &result.as_ref().map(|_| ()),
+                );
+                let event = result.map_err(|e| {
                     actor_store_error(StoreOperation::LastEvent, e)
                 })?;
                 debug!("Last event: {:?}", event);
                 Ok(StoreResponse::LastEvent(event))
             }
             StoreCommand::Purge => {
-                self.purge()
+                #[cfg(feature = "prometheus")]
+                let start = Instant::now();
+                let result = self.purge();
+                #[cfg(feature = "prometheus")]
+                self.record_command_metrics(
+                    start,
+                    "purge",
+                    "purge",
+                    &result.as_ref().map(|_| ()),
+                );
+                result
                     .map_err(|e| actor_store_error(StoreOperation::Purge, e))?;
                 debug!("Purged store");
                 Ok(StoreResponse::None)
@@ -1373,8 +1608,18 @@ where
                 Ok(StoreResponse::LastEventNumber(self.event_counter))
             }
             StoreCommand::LastEventsFrom(from) => {
+                #[cfg(feature = "prometheus")]
+                let start = Instant::now();
                 let to = self.event_counter.saturating_sub(1);
-                let events = self.events(from, to).map_err(|e| {
+                let result = self.events(from, to);
+                #[cfg(feature = "prometheus")]
+                self.record_command_metrics(
+                    start,
+                    "get_latest_events",
+                    "get_latest_events",
+                    &result.as_ref().map(|_| ()),
+                );
+                let events = result.map_err(|e| {
                     actor_store_error(
                         StoreOperation::GetLatestEvents,
                         format!("Unable to get the latest events: {}", e),
@@ -1461,8 +1706,10 @@ mod tests {
             &mut self,
             ctx: &mut ActorContext<Self>,
         ) -> Result<(), ActorError> {
-            let db: MemoryManager =
-                ctx.system().get_helper("db").await.unwrap();
+            let db: MemoryManager = ctx
+                .system()
+                .get_helper("db")
+                .expect("db helper should be installed");
             self.start_store("store", None, ctx, db, None).await
         }
     }
@@ -1547,8 +1794,10 @@ mod tests {
             &mut self,
             ctx: &mut ActorContext<Self>,
         ) -> Result<(), ActorError> {
-            let db: MemoryManager =
-                ctx.system().get_helper("db").await.unwrap();
+            let db: MemoryManager = ctx
+                .system()
+                .get_helper("db")
+                .expect("db helper should be installed");
             self.start_store("store", None, ctx, db, None).await
         }
     }
@@ -1619,7 +1868,7 @@ mod tests {
             CancellationToken::new(),
         );
 
-        system.add_helper("db", MemoryManager::default()).await;
+        system.add_helper("db", MemoryManager::default());
 
         let actor_ref = system
             .create_root_actor("counter", CounterActor::initial(()))
@@ -1663,7 +1912,7 @@ mod tests {
             runner.run().await;
         });
 
-        system.add_helper("db", MemoryManager::default()).await;
+        system.add_helper("db", MemoryManager::default());
 
         let actor_ref = system
             .create_root_actor("full", FullCounterActor::initial(()))
@@ -1709,7 +1958,7 @@ mod tests {
     #[test]
     fn test_cow_store_events_range() {
         let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<CounterActor>::new(
+        let mut store = Store::<CounterActor>::test_new(
             "store",
             "test",
             MemoryManager::default(),
@@ -1729,7 +1978,7 @@ mod tests {
     #[test]
     fn test_cow_store_recovery_unit() {
         let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<CounterActor>::new(
+        let mut store = Store::<CounterActor>::test_new(
             "store",
             "test",
             MemoryManager::default(),
@@ -1759,7 +2008,7 @@ mod tests {
         });
 
         let initial = Arc::new(CounterState { value: 0 });
-        let store = Store::<CounterActor>::new(
+        let store = Store::<CounterActor>::test_new(
             "store",
             "test",
             MemoryManager::default(),
@@ -1807,6 +2056,123 @@ mod tests {
             assert_eq!(events[1].0, 3);
         } else {
             panic!("Expected events");
+        }
+    }
+
+    #[cfg(all(test, feature = "prometheus"))]
+    mod prometheus_tests {
+        use super::*;
+        use crate::memory::MemoryManager;
+        use ave_actors_actor::ActorSystem;
+        use prometheus_client::registry::Registry;
+        use test_log::test;
+        use tokio_util::sync::CancellationToken;
+
+        fn pending_events_value(buf: &str, path: &str) -> Option<i64> {
+            let prefix = format!(
+                "ave_actors_store_pending_events{{path=\"{}\"}} ",
+                path
+            );
+            buf.lines()
+                .find(|line| line.starts_with(&prefix))
+                .and_then(|line| line[prefix.len()..].trim().parse().ok())
+        }
+
+        #[test(tokio::test)]
+        async fn test_store_metrics_emitted() {
+            let mut registry = Registry::default();
+            let metrics = Arc::new(crate::metrics::StoreMetrics::new());
+            metrics.register_into(&mut registry);
+
+            let path: Arc<str> = Arc::from("/user/counter");
+            fn encode_registry(registry: &Registry) -> String {
+                let mut buf = String::new();
+                prometheus_client::encoding::text::encode(&mut buf, registry)
+                    .expect("prometheus registry should encode to text");
+                buf
+            }
+
+            let initial = Arc::new(CounterState::default());
+            let store = Store::<CounterActor>::new(
+                "store",
+                "test",
+                MemoryManager::default(),
+                None,
+                initial,
+                Some(metrics.clone()),
+                Arc::clone(&path),
+            )
+            .expect("store should be created");
+
+            let (system, mut runner) = ActorSystem::create(
+                CancellationToken::new(),
+                CancellationToken::new(),
+            );
+            tokio::spawn(async move {
+                runner.run().await;
+            });
+
+            let store_ref = system
+                .create_root_actor("store", store)
+                .await
+                .expect("root store actor should be created");
+
+            let response = store_ref
+                .ask(StoreCommand::Recover)
+                .await
+                .expect("recover command should succeed");
+            assert!(matches!(response, StoreResponse::State(None)));
+
+            let buf = encode_registry(&registry);
+            assert!(
+                buf.contains("ave_actors_store_operation_duration_seconds")
+            );
+            assert!(buf.contains("operation=\"recover\""));
+            assert!(buf.contains("ave_actors_store_pending_events"));
+            assert_eq!(pending_events_value(&buf, &path), Some(0));
+
+            store_ref
+                .ask(StoreCommand::Persist(Arc::new(CounterEvent(5))))
+                .await
+                .expect("persist command should succeed");
+
+            let buf = encode_registry(&registry);
+            assert!(buf.contains("operation=\"persist\""));
+            assert_eq!(pending_events_value(&buf, &path), Some(1));
+
+            store_ref
+                .ask(StoreCommand::Snapshot(Arc::new(CounterState {
+                    value: 10,
+                })))
+                .await
+                .expect("snapshot command should succeed");
+
+            let buf = encode_registry(&registry);
+            assert!(buf.contains("operation=\"snapshot\""));
+            assert_eq!(pending_events_value(&buf, &path), Some(0));
+
+            store_ref
+                .ask(StoreCommand::PersistLight(
+                    Arc::new(CounterEvent(5)),
+                    Arc::new(CounterState { value: 5 }),
+                ))
+                .await
+                .expect("persist light command should succeed");
+
+            let buf = encode_registry(&registry);
+            assert_eq!(pending_events_value(&buf, &path), Some(0));
+
+            store_ref
+                .ask(StoreCommand::PersistFull {
+                    event: Arc::new(CounterEvent(3)),
+                    state: Arc::new(CounterState { value: 8 }),
+                    snapshot_every: Some(100),
+                })
+                .await
+                .expect("persist full command should succeed");
+
+            let buf = encode_registry(&registry);
+            assert_eq!(pending_events_value(&buf, &path), Some(1));
         }
     }
 }

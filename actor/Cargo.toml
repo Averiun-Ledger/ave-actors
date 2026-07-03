@@ -23,7 +23,10 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 dashmap = { workspace = true }
 fastrand = { workspace = true }
+prometheus-client = { workspace = true, optional = true }
 
+[features]
+prometheus = ["dep:prometheus-client"]
 
 [dev-dependencies]
 test-log = { workspace = true }

@@ -20,6 +20,10 @@ getrandom = "0.4"
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+prometheus-client = { workspace = true, optional = true }
+
+[features]
+prometheus = ["dep:prometheus-client", "ave-actors-actor/prometheus"]
 
 [dev-dependencies]
 tokio = { workspace = true }

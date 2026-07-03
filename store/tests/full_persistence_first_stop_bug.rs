@@ -1,6 +1,8 @@
 //! Test to investigate why FullPersistence doesn't recover state after FIRST stop
 //! when there was no previous snapshot
 
+#[macro_use]
+mod helpers;
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
@@ -207,7 +209,7 @@ async fn test_full_persistence_first_stop_no_previous_snapshot() {
 
 #[test(tokio::test)]
 async fn test_investigate_stop_store_snapshot_creation() {
-    use ave_actors_store::store::{Store, StoreCommand, StoreResponse};
+    use ave_actors_store::store::{StoreCommand, StoreResponse};
 
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -224,7 +226,8 @@ async fn test_investigate_stop_store_snapshot_creation() {
     );
 
     // Create store and persist events
-    let store = Store::<TestActor>::new(
+    let store = store_new!(
+        TestActor,
         "test",
         "stop_investigation",
         memory_manager.clone(),
@@ -253,7 +256,8 @@ async fn test_investigate_stop_store_snapshot_creation() {
     println!("\n📝 STEP 2: Check if snapshot exists BEFORE stop");
     drop(store_ref);
 
-    let store2 = Store::<TestActor>::new(
+    let store2 = store_new!(
+        TestActor,
         "test",
         "stop_investigation",
         memory_manager.clone(),
@@ -321,7 +325,8 @@ async fn test_investigate_stop_store_snapshot_creation() {
     println!("\n📝 STEP 4: Verify snapshot was created");
     drop(store_ref2);
 
-    let store3 = Store::<TestActor>::new(
+    let store3 = store_new!(
+        TestActor,
         "test",
         "stop_investigation",
         memory_manager.clone(),

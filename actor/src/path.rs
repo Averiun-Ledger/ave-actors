@@ -67,6 +67,12 @@ impl ActorPath {
         self.0.last().map(|s| s.as_str()).unwrap_or("")
     }
 
+    /// Returns the first segment of the path (the root scope), or an empty
+    /// string if the path has no segments.
+    pub fn scope_key(&self) -> &str {
+        self.0.first().map(|s| s.as_str()).unwrap_or("")
+    }
+
     /// Returns the number of segments in this path (its depth).
     pub fn level(&self) -> usize {
         self.0.len()
@@ -287,6 +293,14 @@ mod tests {
         let path = ActorPath::from("/acme/building/room/sensor");
         println!("{:?}", path);
         assert_eq!(path.key(), "sensor");
+    }
+
+    #[test]
+    fn test_scope_key() {
+        let path = ActorPath::from("/acme/building/room/sensor");
+        assert_eq!(path.scope_key(), "acme");
+        assert_eq!(ActorPath::from("/").scope_key(), "");
+        assert_eq!(ActorPath::from("/user").scope_key(), "user");
     }
 
     #[test]

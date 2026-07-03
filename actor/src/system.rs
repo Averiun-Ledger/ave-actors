@@ -154,6 +154,27 @@ impl ActorSystem {
             SystemRunner::new(graceful_token, crash_token, shutdown_complete);
         Ok((system, runner))
     }
+
+    /// Creates the actor system and registers actor metrics in the supplied
+    /// Prometheus registry.
+    ///
+    /// This is only available when the `prometheus` feature is enabled.
+    #[cfg(feature = "prometheus")]
+    pub fn create_with_registry(
+        graceful_token: CancellationToken,
+        crash_token: CancellationToken,
+        registry: &mut prometheus_client::registry::Registry,
+    ) -> (SystemRef, SystemRunner) {
+        let config = ActorSystemConfig::default();
+        let metrics = Arc::new(crate::metrics::ActorMetrics::new());
+        metrics.register_into(registry);
+        let (mut system, shutdown_complete) =
+            SystemRef::new(config, graceful_token.clone(), crash_token.clone());
+        system.actor_metrics = Some(metrics);
+        let runner =
+            SystemRunner::new(graceful_token, crash_token, shutdown_complete);
+        (system, runner)
+    }
 }
 
 /// System-level events broadcast on the observable system event channel.
@@ -198,6 +219,10 @@ pub struct SystemRef {
     crash_token: CancellationToken,
     /// Set as soon as shutdown begins; blocks creation of new actors.
     shutting_down: Arc<AtomicBool>,
+    /// Optional Prometheus metrics collection shared by all actors in the
+    /// system.  Only present when the `prometheus` feature is enabled.
+    #[cfg(feature = "prometheus")]
+    pub(crate) actor_metrics: Option<Arc<crate::metrics::ActorMetrics>>,
 }
 
 impl SystemRef {
@@ -286,6 +311,8 @@ impl SystemRef {
                 watchers,
                 config,
                 shutting_down,
+                #[cfg(feature = "prometheus")]
+                actor_metrics: None,
             },
             shutdown_complete_rx,
         )
@@ -295,6 +322,24 @@ impl SystemRef {
         self.shutting_down.load(Ordering::SeqCst)
             || self.graceful_token.is_cancelled()
             || self.crash_token.is_cancelled()
+    }
+
+    /// Returns the shared actor metrics collection, if Prometheus support is
+    /// enabled and a registry was provided at system creation.
+    #[cfg(feature = "prometheus")]
+    pub(crate) fn actor_metrics(
+        &self,
+    ) -> Option<Arc<crate::metrics::ActorMetrics>> {
+        self.actor_metrics.clone()
+    }
+
+    /// Sets the shared actor metrics collection.
+    #[cfg(feature = "prometheus")]
+    pub fn set_actor_metrics(
+        &mut self,
+        metrics: Option<Arc<crate::metrics::ActorMetrics>>,
+    ) {
+        self.actor_metrics = metrics;
     }
 
     /// Returns a broadcast receiver for system-level events such as root actor errors and shutdown.
@@ -360,6 +405,8 @@ impl SystemRef {
             actor,
             parent_info,
             self.config.actor_stop_channel_size,
+            #[cfg(feature = "prometheus")]
+            self.actor_metrics(),
         )?;
 
         // Atomically check+insert to avoid concurrent duplicate creations
@@ -529,11 +576,7 @@ impl SystemRef {
     /// Removes all watch entries from `target` to `watcher_path`.
     ///
     /// If no such entry exists, this is a no-op.
-    pub(crate) async fn unwatch(
-        &self,
-        target: ActorPath,
-        watcher_path: ActorPath,
-    ) {
+    pub(crate) fn unwatch(&self, target: ActorPath, watcher_path: ActorPath) {
         if let Some(mut entries) = self.watchers.get_mut(&target) {
             entries.retain(|entry| entry.watcher_path != watcher_path);
         }
@@ -571,15 +614,16 @@ impl SystemRef {
     }
 
     /// Returns the paths of all currently registered direct children of the actor at `path`.
-    pub async fn children(&self, path: &ActorPath) -> Vec<ActorPath> {
+    pub fn children(&self, path: &ActorPath) -> Vec<ActorPath> {
         self.child_index
             .get(path)
             .map(|children| children.iter().cloned().collect::<Vec<_>>())
             .unwrap_or_default()
     }
 
-    /// Stores a shared resource (e.g. a database pool or config object) under `name` for retrieval by any actor.
-    pub async fn add_helper<H>(&self, name: &str, helper: H)
+    /// Stores a shared resource (e.g. a database pool or config object) under
+    /// `name` for retrieval by any actor.
+    pub fn add_helper<H>(&self, name: &str, helper: H)
     where
         H: Any + Send + Sync + Clone + 'static,
     {
@@ -587,7 +631,7 @@ impl SystemRef {
     }
 
     /// Returns the helper stored under `name`, or `None` if not found or if the type does not match.
-    pub async fn get_helper<H>(&self, name: &str) -> Option<H>
+    pub fn get_helper<H>(&self, name: &str) -> Option<H>
     where
         H: Any + Send + Sync + Clone + 'static,
     {
@@ -598,7 +642,7 @@ impl SystemRef {
 
     /// Removes the helper stored under `name` and returns it, or `None` if not
     /// found or if the type does not match.
-    pub async fn remove_helper<H>(&self, name: &str) -> Option<H>
+    pub fn remove_helper<H>(&self, name: &str) -> Option<H>
     where
         H: Any + Send + Sync + 'static,
     {
@@ -668,8 +712,8 @@ mod tests {
             CancellationToken::new(),
         );
         let helper = TestHelper { value: 42 };
-        system.add_helper("test", helper).await;
-        let helper: Option<TestHelper> = system.get_helper("test").await;
+        system.add_helper("test", helper);
+        let helper: Option<TestHelper> = system.get_helper("test");
         assert_eq!(helper, Some(TestHelper { value: 42 }));
     }
 

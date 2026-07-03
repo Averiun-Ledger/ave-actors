@@ -1,10 +1,10 @@
 //! Test to investigate recovery when there's no snapshot but there ARE events
 
+#[macro_use]
+mod helpers;
 use ave_actors_store::{
     memory::MemoryManager,
-    store::{
-        FullPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
-    },
+    store::{FullPersistence, PersistentActor, StoreCommand, StoreResponse},
 };
 
 use async_trait::async_trait;
@@ -129,7 +129,8 @@ async fn test_full_persistence_recovery_without_snapshot() {
 
     // Create store and persist events WITHOUT creating a snapshot
     println!("🔷 STEP 1: Persist events WITHOUT snapshot");
-    let store = Store::<TestActor>::new(
+    let store = store_new!(
+        TestActor,
         "test",
         "no_snapshot",
         memory_manager.clone(),
@@ -162,7 +163,8 @@ async fn test_full_persistence_recovery_without_snapshot() {
 
     // Try to recover
     println!("\n🔷 STEP 2: Attempting recovery");
-    let store2 = Store::<TestActor>::new(
+    let store2 = store_new!(
+        TestActor,
         "test",
         "no_snapshot",
         memory_manager.clone(),
@@ -224,7 +226,8 @@ async fn test_full_persistence_recovery_logic_investigation() {
     );
 
     // Create store and persist events
-    let store = Store::<TestActor>::new(
+    let store = store_new!(
+        TestActor,
         "test",
         "logic_test",
         memory_manager.clone(),
@@ -271,7 +274,8 @@ async fn test_full_persistence_recovery_logic_investigation() {
     println!("   - Result: Actor loses all state");
 
     // Verify
-    let store2 = Store::<TestActor>::new(
+    let store2 = store_new!(
+        TestActor,
         "test",
         "logic_test",
         memory_manager.clone(),

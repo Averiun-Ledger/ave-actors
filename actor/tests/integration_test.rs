@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
-    Event, Handler, Message, Response, Sink, Subscriber,
+    Event, Handler, Message, Response, Subscriber,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -295,9 +295,10 @@ async fn test_actor() {
         .unwrap();
 
     let child_sub = CollectingChildSubscriber::new();
-    let mut sink = Sink::new("child_events", None).expect("valid sink");
+    let mut sink = child_actor
+        .register_sink("child_events", None)
+        .expect("valid sink");
     sink.add("sub1", child_sub.clone());
-    child_actor.register_sink(sink);
 
     parent_ref.tell(TestCommand::Increment(10)).await.unwrap();
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
@@ -342,9 +343,10 @@ async fn test_actor_error() {
     let parent_ref = system.create_root_actor("parent", parent).await.unwrap();
 
     let parent_sub = CollectingParentSubscriber::new();
-    let mut sink = Sink::new("parent_events", None).expect("valid sink");
+    let mut sink = parent_ref
+        .register_sink("parent_events", None)
+        .expect("valid sink");
     sink.add("sub1", parent_sub.clone());
-    parent_ref.register_sink(sink);
 
     parent_ref.tell(TestCommand::Increment(50)).await.unwrap();
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
@@ -376,9 +378,10 @@ async fn test_actor_fault() {
     assert!(child_ref.is_ok());
 
     let parent_sub = CollectingParentSubscriber::new();
-    let mut sink = Sink::new("parent_events", None).expect("valid sink");
+    let mut sink = parent_ref
+        .register_sink("parent_events", None)
+        .expect("valid sink");
     sink.add("sub1", parent_sub.clone());
-    parent_ref.register_sink(sink);
 
     parent_ref.tell(TestCommand::Increment(110)).await.unwrap();
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();

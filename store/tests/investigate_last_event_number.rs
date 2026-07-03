@@ -1,10 +1,10 @@
 //! Investigate if LastEventNumber might be returning 0 incorrectly
 
+#[macro_use]
+mod helpers;
 use ave_actors_store::{
     memory::MemoryManager,
-    store::{
-        FullPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
-    },
+    store::{FullPersistence, PersistentActor, StoreCommand, StoreResponse},
 };
 
 use ave_actors_actor::{
@@ -126,7 +126,8 @@ async fn test_last_event_number_after_persist() {
         "╚════════════════════════════════════════════════════════════╝\n"
     );
 
-    let store = Store::<TestActor>::new(
+    let store = store_new!(
+        TestActor,
         "test",
         "last_event",
         memory_manager.clone(),
@@ -192,7 +193,8 @@ async fn test_last_event_number_after_persist() {
     println!("\n📊 STEP 5: After recovery");
     drop(store_ref);
 
-    let store2 = Store::<TestActor>::new(
+    let store2 = store_new!(
+        TestActor,
         "test",
         "last_event",
         memory_manager.clone(),

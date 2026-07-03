@@ -68,7 +68,7 @@ impl Handler<Self> for WatchActor {
                 ctx.watch(&target, WatchMsg::Terminated).await?;
             }
             WatchMsg::Unwatch(target) => {
-                ctx.unwatch(&target).await;
+                ctx.unwatch(&target);
             }
             WatchMsg::Terminated(path) => {
                 self.notifications.lock().await.push(path);

@@ -18,11 +18,11 @@ This repository is the public home of the `ave-actors` workspace. It includes th
 
 | Crate | Version | Purpose |
 |---|---:|---|
-| [`ave-actors`](https://crates.io/crates/ave-actors) | `0.12.0` | Aggregated crate that re-exports the main public API |
-| [`ave-actors-actor`](https://crates.io/crates/ave-actors-actor) | `0.5.0` | Actor runtime, actor system, paths, supervision, retries, sinks |
-| [`ave-actors-store`](https://crates.io/crates/ave-actors-store) | `0.5.0` | Event-sourced persistence layer and backend traits |
-| [`ave-actors-sqlite`](https://crates.io/crates/ave-actors-sqlite) | `0.6.0` | SQLite backend for persistent actors |
-| [`ave-actors-rocksdb`](https://crates.io/crates/ave-actors-rocksdb) | `0.4.0` | RocksDB backend for persistent actors |
+| `ave-actors` | `0.13.0` | Aggregated crate that re-exports the main public API |
+| `ave-actors-actor` | `0.6.0` | Actor runtime, actor system, paths, supervision, retries, sinks |
+| `ave-actors-store` | `0.6.0` | Event-sourced persistence layer and backend traits |
+| `ave-actors-sqlite` | `0.7.0` | SQLite backend for persistent actors |
+| `ave-actors-rocksdb` | `0.5.0` | RocksDB backend for persistent actors |
 
 ## Feature flags
 
@@ -32,12 +32,50 @@ This repository is the public home of the `ave-actors` workspace. It includes th
 | `rocksdb` | No | Enables the RocksDB backend |
 | `export-sqlite` | No | Re-exports `rusqlite` |
 | `export-rocksdb` | No | Re-exports `rocksdb` |
+| `prometheus` | No | Optional Prometheus metrics via `prometheus-client` |
+
+## Prometheus metrics
+
+Enable the `prometheus` feature:
+
+```toml
+ave-actors = { version = "0.13.0", features = ["prometheus"] }
+```
+
+Create the actor system with a registry:
+
+```rust,ignore
+use prometheus_client::registry::Registry;
+use ave_actors::prometheus;
+use tokio_util::sync::CancellationToken;
+
+fn setup_registry() -> Result<String, std::fmt::Error> {
+    let mut registry = Registry::default();
+    let (system, runner) = prometheus::create_system_with_registry(
+        CancellationToken::new(),
+        CancellationToken::new(),
+        &mut registry,
+    );
+
+    // ... use the system ...
+
+    prometheus::encode_registry(&registry)
+}
+```
+
+Expose metrics in your own HTTP endpoint:
+
+```rust,ignore
+let body = setup_registry()?;
+```
+
+No Prometheus server is embedded; the crate only exposes a `Registry` and helpers.
 
 ## Quick start
 
 ```toml
 [dependencies]
-ave-actors = { version = "0.12.0", default-features = false }
+ave-actors = { version = "0.13.0", default-features = false }
 async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-util = "0.7"
@@ -109,7 +147,7 @@ async fn main() {
 
 ## Persistent actors
 
-If you need event sourcing, use the persistence layer from the root crate or directly from [`ave-actors-store`](https://crates.io/crates/ave-actors-store).
+If you need event sourcing, use the persistence layer from the root crate or directly from `ave-actors-store`.
 
 With the default `sqlite` feature, the root crate already re-exports:
 
@@ -123,17 +161,17 @@ For RocksDB:
 
 ```toml
 [dependencies]
-ave-actors = { version = "0.12.0", default-features = false, features = ["rocksdb"] }
+ave-actors = { version = "0.13.0", default-features = false, features = ["rocksdb"] }
 ```
 
 If you prefer finer control, depend on subcrates directly:
 
 ```toml
 [dependencies]
-ave-actors-actor = "0.5.0"
-ave-actors-store = "0.5.0"
-ave-actors-sqlite = { version = "0.6.0", features = ["sqlite"] }
-ave-actors-rocksdb = { version = "0.4.0", features = ["rocksdb"] }
+ave-actors-actor = "0.6.0"
+ave-actors-store = "0.6.0"
+ave-actors-sqlite = { version = "0.7.0", features = ["sqlite"] }
+ave-actors-rocksdb = { version = "0.5.0", features = ["rocksdb"] }
 ```
 
 ## Which crate should I use?

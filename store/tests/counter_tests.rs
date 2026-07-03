@@ -5,11 +5,11 @@
 //! - event_counter = 1 means one event at position 0
 //! - state_counter = event_counter after snapshot means all events are applied
 
+#[macro_use]
+mod helpers;
 use ave_actors_store::{
     memory::MemoryManager,
-    store::{
-        FullPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
-    },
+    store::{FullPersistence, PersistentActor, StoreCommand, StoreResponse},
 };
 use test_log::test;
 
@@ -137,7 +137,8 @@ async fn test_event_counter_starts_at_zero() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CounterTestActor>::new(
+    let store = store_new!(
+        CounterTestActor,
         "counter_test",
         "test_zero",
         MemoryManager::default(),
@@ -165,7 +166,8 @@ async fn test_event_counter_after_first_event() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CounterTestActor>::new(
+    let store = store_new!(
+        CounterTestActor,
         "counter_test",
         "test_first",
         MemoryManager::default(),
@@ -220,7 +222,8 @@ async fn test_event_counter_multiple_events() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CounterTestActor>::new(
+    let store = store_new!(
+        CounterTestActor,
         "counter_test",
         "test_multiple",
         MemoryManager::default(),
@@ -275,7 +278,8 @@ async fn test_get_events_out_of_range_returns_empty() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CounterTestActor>::new(
+    let store = store_new!(
+        CounterTestActor,
         "counter_test",
         "test_query_empty",
         MemoryManager::default(),
@@ -309,7 +313,8 @@ async fn test_get_events_partial_overlap_returns_existing_suffix() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CounterTestActor>::new(
+    let store = store_new!(
+        CounterTestActor,
         "counter_test",
         "test_query_partial",
         MemoryManager::default(),
@@ -349,7 +354,8 @@ async fn test_state_counter_after_snapshot() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CounterTestActor>::new(
+    let store = store_new!(
+        CounterTestActor,
         "counter_test",
         "test_snapshot",
         MemoryManager::default(),
@@ -404,7 +410,8 @@ async fn test_recovery_with_events_after_snapshot() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CounterTestActor>::new(
+    let store = store_new!(
+        CounterTestActor,
         "counter_test",
         "test_recovery",
         MemoryManager::default(),
@@ -471,7 +478,8 @@ async fn test_recovery_without_snapshot() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CounterTestActor>::new(
+    let store = store_new!(
+        CounterTestActor,
         "counter_test",
         "test_no_snapshot",
         MemoryManager::default(),
@@ -515,7 +523,8 @@ async fn test_snapshot_at_zero() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CounterTestActor>::new(
+    let store = store_new!(
+        CounterTestActor,
         "counter_test",
         "test_snap_zero",
         MemoryManager::default(),
@@ -559,7 +568,8 @@ async fn test_last_events_from_positions() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CounterTestActor>::new(
+    let store = store_new!(
+        CounterTestActor,
         "counter_test",
         "test_last_from",
         MemoryManager::default(),
@@ -638,7 +648,8 @@ async fn test_multiple_snapshots_and_recoveries() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CounterTestActor>::new(
+    let store = store_new!(
+        CounterTestActor,
         "counter_test",
         "test_multi_snap",
         MemoryManager::default(),
@@ -728,7 +739,8 @@ async fn test_event_counter_with_encryption() {
     let encrypt_key =
         EncryptedKey::new(b"0123456789abcdef0123456789abcdef").unwrap();
 
-    let store = Store::<CounterTestActor>::new(
+    let store = store_new!(
+        CounterTestActor,
         "counter_test",
         "test_encrypted",
         MemoryManager::default(),

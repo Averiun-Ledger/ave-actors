@@ -360,14 +360,7 @@ async fn timer_loop<A: Actor + Handler<A>>(state: TimerLoopState<A>) {
                     _ = sleep => {
                         let current_epoch =
                             state.epoch.load(AtomicOrdering::SeqCst);
-                        fire_expired_timers(
-                            &state.system,
-                            &state.path,
-                            current_epoch,
-                            &state.heap,
-                            &state.cancelled,
-                        )
-                        .await;
+                        fire_expired_timers(&state, current_epoch).await;
                     }
                     _ = state.notify.notified() => {}
                 }
@@ -380,18 +373,17 @@ async fn timer_loop<A: Actor + Handler<A>>(state: TimerLoopState<A>) {
 }
 
 async fn fire_expired_timers<A: Actor + Handler<A>>(
-    system: &SystemRef,
-    path: &ActorPath,
+    state: &TimerLoopState<A>,
     current_epoch: u64,
-    heap: &Arc<Mutex<BinaryHeap<TimerEntry<A>>>>,
-    cancelled: &Arc<Mutex<HashSet<TimerKey>>>,
 ) {
     let now = Instant::now();
     let mut to_fire = Vec::new();
 
     {
-        let mut heap =
-            heap.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut heap = state
+            .heap
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         while let Some(entry) = heap.pop() {
             if entry.deadline > now {
@@ -401,7 +393,8 @@ async fn fire_expired_timers<A: Actor + Handler<A>>(
                 break;
             }
 
-            let was_cancelled = cancelled
+            let was_cancelled = state
+                .cancelled
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(&entry.key);
@@ -431,18 +424,18 @@ async fn fire_expired_timers<A: Actor + Handler<A>>(
     }
 
     for entry in to_fire {
-        match system.get_actor::<A>(path).await {
+        match state.system.get_actor::<A>(&state.path).await {
             Ok(actor_ref) => {
                 if actor_ref.tell(entry.msg).await.is_err() {
                     debug!(
-                        path = %path,
+                        path = %state.path,
                         "Timer message could not be delivered; actor stopped"
                     );
                 }
             }
             Err(_) => {
                 debug!(
-                    path = %path,
+                    path = %state.path,
                     "Timer target actor not found; discarding timer message"
                 );
             }

@@ -1,10 +1,10 @@
 //! Root cause analysis: persist_state doesn't increment event_counter
 
+#[macro_use]
+mod helpers;
 use ave_actors_store::{
     memory::MemoryManager,
-    store::{
-        LightPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
-    },
+    store::{LightPersistence, PersistentActor, StoreCommand, StoreResponse},
 };
 
 use ave_actors_actor::{
@@ -119,7 +119,8 @@ async fn test_root_cause_persist_state_doesnt_increment_counter() {
     tokio::spawn(async move { runner.run().await });
 
     let memory_manager = MemoryManager::default();
-    let store = Store::<TestActor>::new(
+    let store = store_new!(
+        TestActor,
         "test",
         "root_cause",
         memory_manager.clone(),
@@ -191,7 +192,8 @@ async fn test_root_cause_persist_state_doesnt_increment_counter() {
     // Recover
     println!("\n🔄 RECOVERY PROCESS:");
     drop(store_ref);
-    let store2 = Store::<TestActor>::new(
+    let store2 = store_new!(
+        TestActor,
         "test",
         "root_cause",
         memory_manager.clone(),

@@ -1,5 +1,7 @@
 //! Comprehensive edge case tests for Store module to increase coverage
 
+#[macro_use]
+mod helpers;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, EncryptedKey,
     Error as ActorError, Event, Handler, Message, Response,
@@ -600,7 +602,8 @@ async fn test_store_error_scenarios() {
         fail_operations: false,
     };
 
-    let store_result = Store::<EncryptedActor>::new(
+    let store_result = store_new!(
+        EncryptedActor,
         "test",
         "prefix",
         failing_manager,
@@ -615,7 +618,8 @@ async fn test_store_error_scenarios() {
         fail_operations: true,
     };
 
-    let store = Store::<EncryptedActor>::new(
+    let store = store_new!(
+        EncryptedActor,
         "test",
         "prefix",
         failing_manager,
@@ -660,7 +664,8 @@ async fn test_store_commands_coverage() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<EncryptedActor>::new(
+    let store = store_new!(
+        EncryptedActor,
         "test",
         "prefix",
         MemoryManager::default(),
@@ -858,7 +863,8 @@ async fn test_encryption_failure_scenarios() {
     tokio::spawn(async move { runner.run().await });
 
     let encrypt_key = EncryptedKey::new(&[0u8; 32]).unwrap();
-    let store = Store::<EncryptedActor>::new(
+    let store = store_new!(
+        EncryptedActor,
         "test",
         "prefix",
         MemoryManager::default(),

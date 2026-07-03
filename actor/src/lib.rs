@@ -36,3 +36,8 @@ pub use system::{
     SystemRunner,
 };
 pub use timer::TimerKey;
+
+#[cfg(feature = "prometheus")]
+pub mod metrics;
+#[cfg(feature = "prometheus")]
+pub use metrics::ActorMetrics;

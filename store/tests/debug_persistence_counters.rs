@@ -1,10 +1,10 @@
 //! Test to debug the state_counter and event_counter values during LightPersistence
 
+#[macro_use]
+mod helpers;
 use ave_actors_store::{
     memory::MemoryManager,
-    store::{
-        LightPersistence, PersistentActor, Store, StoreCommand, StoreResponse,
-    },
+    store::{LightPersistence, PersistentActor, StoreCommand, StoreResponse},
 };
 use test_log::test;
 
@@ -139,7 +139,8 @@ async fn test_debug_light_persistence_counters() {
     let memory_manager = MemoryManager::default();
 
     // Create store
-    let store = Store::<DebugActor>::new(
+    let store = store_new!(
+        DebugActor,
         "debug_test",
         "test_light",
         memory_manager.clone(),
@@ -187,7 +188,8 @@ async fn test_debug_light_persistence_counters() {
     println!("\n=== STEP 4: Recover state ===");
     drop(store_ref);
 
-    let store2 = Store::<DebugActor>::new(
+    let store2 = store_new!(
+        DebugActor,
         "debug_test",
         "test_light",
         memory_manager.clone(),

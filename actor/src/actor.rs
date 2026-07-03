@@ -59,7 +59,7 @@ pub struct ActorContext<A: Actor + Handler<A>> {
 
 /// Parameters needed to build an `ActorContext`. Grouped into a struct to keep
 /// the constructor signature readable.
-pub struct ActorContextParams<A: Actor + Handler<A>> {
+pub(crate) struct ActorContextParams<A: Actor + Handler<A>> {
     pub stop: StopSender,
     pub path: ActorPath,
     pub system: SystemRef,
@@ -196,11 +196,11 @@ where
     /// Stops watching `target` from this actor.
     ///
     /// If this actor was not watching `target`, this is a no-op.
-    pub async fn unwatch<B>(&self, target: &ActorRef<B>)
+    pub fn unwatch<B>(&self, target: &ActorRef<B>)
     where
         B: Actor + Handler<B>,
     {
-        self.system.unwatch(target.path(), self.path.clone()).await;
+        self.system.unwatch(target.path(), self.path.clone());
     }
 
     /// Spawns an asynchronous task whose lifetime is bound to this actor.
@@ -322,13 +322,60 @@ where
 
     /// Register a named sink for this actor.
     ///
-    /// If a sink with the same name already exists it is replaced and the
-    /// previous sink is returned.
+    /// Creates a sink with the given name and concurrency limit, attaches the
+    /// actor's path and metrics collection, and inserts it into the actor's
+    /// sink map. If a sink with the same name already exists it is replaced;
+    /// the new sink is returned so callers can add subscribers. The previous
+    /// sink, if any, is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` is invalid.
     pub fn register_sink(
         &self,
-        sink: Sink<A::SinkEvent>,
-    ) -> Option<Sink<A::SinkEvent>> {
-        self.sinks.insert(sink.name().to_string(), sink)
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+    ) -> Result<Sink<A::SinkEvent>, Error> {
+        #[cfg(feature = "prometheus")]
+        let sink = Sink::new_with_metrics(
+            name,
+            max_concurrent,
+            self.path().clone(),
+            self.system.actor_metrics(),
+        )?;
+        #[cfg(not(feature = "prometheus"))]
+        let sink = Sink::new(name, max_concurrent)?;
+        self.sinks.insert(sink.name().to_string(), sink.clone());
+        Ok(sink)
+    }
+
+    /// Register a named sink with a custom event buffer capacity.
+    ///
+    /// This is the same as [`ActorContext::register_sink`], but allows the
+    /// buffer capacity to be configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` or
+    /// `buffer_capacity` are invalid.
+    pub fn register_sink_with_buffer(
+        &self,
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+        buffer_capacity: usize,
+    ) -> Result<Sink<A::SinkEvent>, Error> {
+        #[cfg(feature = "prometheus")]
+        let sink = Sink::with_buffer_and_metrics(
+            name,
+            max_concurrent,
+            buffer_capacity,
+            self.path().clone(),
+            self.system.actor_metrics(),
+        )?;
+        #[cfg(not(feature = "prometheus"))]
+        let sink = Sink::with_buffer(name, max_concurrent, buffer_capacity)?;
+        self.sinks.insert(sink.name().to_string(), sink.clone());
+        Ok(sink)
     }
 
     /// Remove the sink named `name` and return it, if present.
@@ -536,7 +583,7 @@ pub const MIN_MAILBOX_CAPACITY: usize = 1;
 pub const MAX_MAILBOX_CAPACITY: usize = 1_000_000;
 
 /// Validates that `capacity` is within the allowed mailbox capacity range.
-pub fn validate_mailbox_capacity(capacity: usize) -> Result<(), Error> {
+pub(crate) fn validate_mailbox_capacity(capacity: usize) -> Result<(), Error> {
     if capacity < MIN_MAILBOX_CAPACITY {
         return Err(Error::InvalidConfiguration {
             component: "actor mailbox".to_owned(),
@@ -563,7 +610,10 @@ pub const MIN_TIMEOUT: Duration = Duration::from_millis(1);
 pub const MAX_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Validates that `timeout` is within the allowed timeout range.
-pub fn validate_timeout(name: &str, timeout: Duration) -> Result<(), Error> {
+pub(crate) fn validate_timeout(
+    name: &str,
+    timeout: Duration,
+) -> Result<(), Error> {
     if timeout < MIN_TIMEOUT {
         return Err(Error::InvalidConfiguration {
             component: name.to_owned(),
@@ -584,7 +634,7 @@ pub fn validate_timeout(name: &str, timeout: Duration) -> Result<(), Error> {
 }
 
 /// Validates an optional timeout, treating `None` as valid.
-pub fn validate_optional_timeout(
+pub(crate) fn validate_optional_timeout(
     name: &str,
     timeout: Option<Duration>,
 ) -> Result<(), Error> {
@@ -601,7 +651,7 @@ pub const MIN_MAX_TIMERS: usize = 1;
 pub const MAX_MAX_TIMERS: usize = 100_000;
 
 /// Validates that `max_timers` is within the allowed range.
-pub fn validate_max_timers(max_timers: usize) -> Result<(), Error> {
+pub(crate) fn validate_max_timers(max_timers: usize) -> Result<(), Error> {
     if max_timers < MIN_MAX_TIMERS {
         return Err(Error::InvalidConfiguration {
             component: "actor timers".to_owned(),
@@ -849,13 +899,23 @@ where
     stop_sender: StopSender,
     /// Named sinks registered for this actor.
     sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
+    /// Optional Prometheus metrics collection shared by the actor system.
+    #[cfg(feature = "prometheus")]
+    metrics: Option<Arc<crate::metrics::ActorMetrics>>,
 }
 
 impl<A> ActorRef<A>
 where
     A: Actor + Handler<A>,
 {
-    pub const fn new(
+    /// Create a new actor reference.
+    ///
+    /// This constructor is internal to the actor runtime. Most callers should
+    /// obtain an `ActorRef` from
+    /// [`SystemRef::create_root_actor`](crate::SystemRef::create_root_actor)
+    /// or [`ActorContext::create_child`](crate::ActorContext::create_child).
+    #[cfg(not(feature = "prometheus"))]
+    pub(crate) fn new(
         path: Arc<ActorPath>,
         sender: HandleHelper<A>,
         stop_sender: StopSender,
@@ -866,6 +926,29 @@ where
             sender,
             stop_sender,
             sinks,
+            #[cfg(feature = "prometheus")]
+            metrics: None,
+        }
+    }
+
+    /// Create a new actor reference with metrics collection.
+    ///
+    /// This is the internal constructor used by the actor runtime when the
+    /// `prometheus` feature is enabled.
+    #[cfg(feature = "prometheus")]
+    pub(crate) fn new_with_metrics(
+        path: Arc<ActorPath>,
+        sender: HandleHelper<A>,
+        stop_sender: StopSender,
+        sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
+        metrics: Option<Arc<crate::metrics::ActorMetrics>>,
+    ) -> Self {
+        Self {
+            path,
+            sender,
+            stop_sender,
+            sinks,
+            metrics,
         }
     }
 
@@ -936,13 +1019,60 @@ where
 
     /// Register a sink from external code.
     ///
-    /// If a sink with the same name already exists it is replaced and the
-    /// previous sink is returned.
+    /// Creates a sink with the given name and concurrency limit, attaches the
+    /// actor's path and metrics collection, and inserts it into the actor's
+    /// sink map.  If a sink with the same name already exists it is replaced;
+    /// the new sink is returned so callers can add subscribers. The previous
+    /// sink, if any, is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` is invalid.
     pub fn register_sink(
         &self,
-        sink: Sink<A::SinkEvent>,
-    ) -> Option<Sink<A::SinkEvent>> {
-        self.sinks.insert(sink.name().to_string(), sink)
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+    ) -> Result<Sink<A::SinkEvent>, Error> {
+        #[cfg(feature = "prometheus")]
+        let sink = Sink::new_with_metrics(
+            name,
+            max_concurrent,
+            self.path(),
+            self.metrics.clone(),
+        )?;
+        #[cfg(not(feature = "prometheus"))]
+        let sink = Sink::new(name, max_concurrent)?;
+        self.sinks.insert(sink.name().to_string(), sink.clone());
+        Ok(sink)
+    }
+
+    /// Register a named sink with a custom event buffer capacity.
+    ///
+    /// This is the same as [`ActorRef::register_sink`], but allows the buffer
+    /// capacity to be configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` or
+    /// `buffer_capacity` are invalid.
+    pub fn register_sink_with_buffer(
+        &self,
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+        buffer_capacity: usize,
+    ) -> Result<Sink<A::SinkEvent>, Error> {
+        #[cfg(feature = "prometheus")]
+        let sink = Sink::with_buffer_and_metrics(
+            name,
+            max_concurrent,
+            buffer_capacity,
+            self.path(),
+            self.metrics.clone(),
+        )?;
+        #[cfg(not(feature = "prometheus"))]
+        let sink = Sink::with_buffer(name, max_concurrent, buffer_capacity)?;
+        self.sinks.insert(sink.name().to_string(), sink.clone());
+        Ok(sink)
     }
 
     /// Remove a sink from external code.
@@ -976,6 +1106,8 @@ where
             sender: self.sender.clone(),
             stop_sender: self.stop_sender.clone(),
             sinks: self.sinks.clone(),
+            #[cfg(feature = "prometheus")]
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -997,7 +1129,7 @@ mod test {
     use super::*;
     use test_log::test;
 
-    use crate::sink::{Sink, Subscriber};
+    use crate::sink::Subscriber;
     use crate::system::ActorSystemConfig;
 
     use serde::{Deserialize, Serialize};
@@ -1096,9 +1228,10 @@ mod test {
         let actor_ref = system.create_root_actor("test", actor).await.unwrap();
 
         let subscriber = TestSubscriber::new();
-        let mut sink = Sink::new("test_sink", None).expect("valid sink");
+        let mut sink = actor_ref
+            .register_sink("test_sink", None)
+            .expect("valid sink");
         sink.add("sub1", subscriber.clone());
-        actor_ref.register_sink(sink);
 
         actor_ref.tell(TestMessage(10)).await.unwrap();
         let response = actor_ref.ask(TestMessage(10)).await.unwrap();

@@ -403,14 +403,14 @@ async fn test_system_helpers() {
     }
 
     let helper = TestHelper { value: 123 };
-    system.add_helper("test", helper).await;
+    system.add_helper("test", helper);
 
-    let retrieved: Option<TestHelper> = system.get_helper("test").await;
+    let retrieved: Option<TestHelper> = system.get_helper("test");
     assert!(retrieved.is_some());
     assert_eq!(retrieved.unwrap().value, 123);
 
     // Test non-existent helper
-    let missing: Option<TestHelper> = system.get_helper("missing").await;
+    let missing: Option<TestHelper> = system.get_helper("missing");
     assert!(missing.is_none());
 }
 
@@ -438,7 +438,7 @@ async fn test_system_children_listing() {
 
     // Test children listing
     let parent_path = ActorPath::from("/user/parent_with_children");
-    let children = system.children(&parent_path).await;
+    let children = system.children(&parent_path);
     assert!(!children.is_empty());
 }
 

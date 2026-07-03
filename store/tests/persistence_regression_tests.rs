@@ -1,3 +1,5 @@
+#[macro_use]
+mod helpers;
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, EncryptedKey,
@@ -661,7 +663,8 @@ async fn test_light_persistence_rolls_back_written_event_when_snapshot_fails() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<RollbackLightActor>::new(
+    let store = store_new!(
+        RollbackLightActor,
         "rollback_store",
         "prefix",
         FailingStateManager::default(),
@@ -701,7 +704,8 @@ async fn test_recover_fails_when_event_log_has_gap() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<GapActor>::new(
+    let store = store_new!(
+        GapActor,
         "gap_store",
         "prefix",
         manager.clone(),
@@ -772,7 +776,8 @@ async fn test_full_persistence_compacts_events_after_snapshot_when_enabled() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CompactingActor>::new(
+    let store = store_new!(
+        CompactingActor,
         "compact_store",
         "prefix",
         manager.clone(),
@@ -828,7 +833,8 @@ async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CompactingActor>::new(
+    let store = store_new!(
+        CompactingActor,
         "compact_restart_store",
         "prefix",
         manager.clone(),
@@ -873,7 +879,8 @@ async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner2.run().await });
 
-    let restarted_store = Store::<CompactingActor>::new(
+    let restarted_store = store_new!(
+        CompactingActor,
         "compact_restart_store",
         "prefix",
         manager.clone(),
@@ -906,7 +913,8 @@ async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
     let restarted_ref2: ActorRef<Store<CompactingActor>> = system2
         .create_root_actor(
             "compact-restart-store-3",
-            Store::<CompactingActor>::new(
+            store_new!(
+                CompactingActor,
                 "compact_restart_store",
                 "prefix",
                 manager,
@@ -932,7 +940,8 @@ async fn test_compaction_watermark_is_persisted_across_restart() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CompactingActor>::new(
+    let store = store_new!(
+        CompactingActor,
         "logging_compact_store",
         "prefix",
         manager.clone(),
@@ -961,7 +970,8 @@ async fn test_compaction_watermark_is_persisted_across_restart() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner2.run().await });
 
-    let restarted_store = Store::<CompactingActor>::new(
+    let restarted_store = store_new!(
+        CompactingActor,
         "logging_compact_store",
         "prefix",
         manager.clone(),
@@ -1004,7 +1014,8 @@ async fn test_repeated_compaction_only_deletes_newly_covered_events() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CompactingActor>::new(
+    let store = store_new!(
+        CompactingActor,
         "repeated_compact_store",
         "prefix",
         manager.clone(),
@@ -1107,7 +1118,8 @@ fn test_get_by_range_propagates_iter_initialization_error() {
 
 #[test]
 fn test_store_new_propagates_collection_last_error() {
-    let result = Store::<GapActor>::new(
+    let result = store_new!(
+        GapActor,
         "last_error_store",
         "prefix",
         LastErrorManager::default(),
@@ -1132,7 +1144,8 @@ async fn test_recover_falls_back_when_metadata_state_is_missing() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CompactingActor>::new(
+    let store = store_new!(
+        CompactingActor,
         "metadata_fallback_store",
         "prefix",
         manager.clone(),
@@ -1166,7 +1179,8 @@ async fn test_recover_falls_back_when_metadata_state_is_missing() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner2.run().await });
 
-    let restarted = Store::<CompactingActor>::new(
+    let restarted = store_new!(
+        CompactingActor,
         "metadata_fallback_store",
         "prefix",
         manager,
@@ -1193,7 +1207,8 @@ async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
     tokio::spawn(async move { runner.run().await });
 
     let encrypt_key = EncryptedKey::new(&[9u8; 32]).unwrap();
-    let store = Store::<GapActor>::new(
+    let store = store_new!(
+        GapActor,
         "encrypted_gap_store",
         "prefix",
         manager.clone(),
@@ -1242,7 +1257,8 @@ async fn test_snapshot_compaction_failure_is_best_effort() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<CompactingActor>::new(
+    let store = store_new!(
+        CompactingActor,
         "best_effort_compact_store",
         "prefix",
         manager.clone(),
@@ -1287,7 +1303,8 @@ async fn test_persist_full_event_requests_snapshot_only_when_due() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let store = Store::<GapActor>::new(
+    let store = store_new!(
+        GapActor,
         "persist_full_event_store",
         "prefix",
         manager,
@@ -1347,7 +1364,8 @@ fn test_store_new_fails_when_last_event_key_is_corrupted() {
         .unwrap();
     Collection::put(&mut collection, "not-a-number", b"broken").unwrap();
 
-    let result = Store::<GapActor>::new(
+    let result = store_new!(
+        GapActor,
         "corrupted_key_store",
         "prefix",
         manager,

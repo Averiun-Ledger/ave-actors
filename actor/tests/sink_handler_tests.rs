@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler,
-    Message, Response, Sink, Subscriber,
+    Message, Response, Subscriber,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -150,9 +150,10 @@ async fn test_sink_basic_functionality() {
     let subscriber_clone = subscriber.clone();
 
     // Register sink on the actor
-    let mut sink = Sink::new("test_sink", None).expect("valid sink");
+    let mut sink = actor_ref
+        .register_sink("test_sink", None)
+        .expect("valid sink");
     sink.add("sub1", subscriber);
-    actor_ref.register_sink(sink);
 
     // Give sink time to start
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -200,9 +201,10 @@ async fn test_sink_with_failing_subscriber() {
     let subscriber = CollectingSubscriber::new_failing();
 
     // Register sink with failing subscriber
-    let mut sink = Sink::new("failing_sink", None).expect("valid sink");
+    let mut sink = actor_ref
+        .register_sink("failing_sink", None)
+        .expect("valid sink");
     sink.add("sub1", subscriber);
-    actor_ref.register_sink(sink);
 
     // Give sink time to start
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;

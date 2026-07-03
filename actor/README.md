@@ -12,7 +12,7 @@ API documentation is available on [docs.rs](https://docs.rs/ave-actors-actor).
 
 ```toml
 [dependencies]
-ave-actors-actor = "0.5.0"
+ave-actors-actor = "0.6.0"
 async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-util = "0.7"
@@ -46,7 +46,7 @@ tracing = "0.1"
 | `ActorRef::ask_timeout` | one message and a `Duration` | `Result<Response, Error>` | Same as `ask`, but fails with `Error::Timeout` |
 | `ActorRef::ask_stop` | nothing | `Result<(), Error>` | Requests graceful shutdown and waits for confirmation |
 | `ActorRef::tell_stop` | nothing | `()` | Requests shutdown without waiting |
-| `ActorRef::register_sink` | `Sink<SinkEvent>` | `()` | Registers a named sink from external code |
+| `ActorRef::register_sink` | `name, max_concurrent` | `Result<Sink<SinkEvent>, Error>` | Registers a named sink from external code |
 | `ActorRef::remove_sink` | `&str` | `Option<Sink<SinkEvent>>` | Removes a previously registered sink |
 | `ActorContext::publish_to` | `&str` + `SinkEvent` | `()` | Publishes an event to a specific sink (fire-and-forget) |
 | `ActorContext::publish_all` | `SinkEvent` | `Result<(), Error>` | Publishes an event to all registered sinks |
@@ -195,14 +195,15 @@ ctx.publish_event(MyEvent::SomethingHappened);
 // Modern sink API — register from outside the actor:
 use ave_actors_actor::{Sink, SinkEntry, Subscriber};
 
-let mut sink = Sink::new("analytics", None);
+let mut sink = actor_ref
+    .register_sink("analytics", None)
+    .expect("valid sink");
 sink.add("logger", my_subscriber);
 sink.add_entry(
     SinkEntry::new("filter", my_filtered_subscriber)
         .filter(|e| e.is_critical())
         .retry(RetryPolicy::AtMost { max: 3, backoff: Duration::from_millis(100) }),
 );
-actor_ref.register_sink(sink);
 
 // Publishing from inside the actor:
 ctx.publish_to("analytics", MyEvent::SomethingHappened);

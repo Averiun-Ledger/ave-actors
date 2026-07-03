@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use ave_actors_actor::*;
+use ave_actors_actor::{
+    Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler,
+    NotPersistentActor, Subscriber,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -86,9 +89,10 @@ async fn test_custom_sink_event() {
         notifications: notifications.clone(),
     };
 
-    let mut sink = Sink::new("notifications", None).expect("valid sink");
+    let mut sink = actor_ref
+        .register_sink("notifications", None)
+        .expect("valid sink");
     sink.add("sub1", subscriber);
-    actor_ref.register_sink(sink);
 
     actor_ref.ask(()).await.unwrap();
     actor_ref.ask(()).await.unwrap();
