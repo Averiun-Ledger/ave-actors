@@ -4,8 +4,7 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler,
-    Message, Response, Sink, SinkEntry, Strategy, Subscriber,
-    SupervisionStrategy,
+    Message, Response, SinkEntry, Strategy, Subscriber, SupervisionStrategy,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -671,37 +670,4 @@ async fn test_one_subscriber_fails_others_ok() {
     assert_eq!(ok_sub_b.drain().await.len(), 1);
     // The failing subscriber never stores anything (it errors immediately).
     assert!(failing_sub.drain().await.is_empty());
-}
-
-#[test(tokio::test)]
-async fn test_sink_entry_remove_and_clear() {
-    let sub_a = CollectingSubscriber::new();
-    let sub_b = CollectingSubscriber::new();
-    let sub_c = CollectingSubscriber::new();
-
-    let mut sink = Sink::new("mutable_sink", None).expect("valid sink");
-    sink.add("a", sub_a.clone());
-    sink.add("b", sub_b.clone());
-    sink.add("c", sub_c.clone());
-
-    // Remove entry "b".
-    let removed = sink.remove_entry("b");
-    assert!(removed.is_some());
-    assert_eq!(removed.unwrap().id, "b");
-    assert!(sink.remove_entry("b").is_none());
-
-    sink.send(Arc::new(TestEvent { id: 1 }));
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
-    assert_eq!(sub_a.drain().await.len(), 1);
-    assert_eq!(sub_b.drain().await.len(), 0); // removed
-    assert_eq!(sub_c.drain().await.len(), 1);
-
-    // Clear all remaining entries.
-    sink.clear();
-    sink.send(Arc::new(TestEvent { id: 2 }));
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
-    assert_eq!(sub_a.drain().await.len(), 0);
-    assert_eq!(sub_c.drain().await.len(), 0);
 }

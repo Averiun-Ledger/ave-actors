@@ -255,7 +255,8 @@ impl<E: Event> Sink<E> {
     ///
     /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` is
     /// `Some(0)` or exceeds [`MAX_SINK_CONCURRENCY`].
-    pub fn new(
+    #[cfg(not(feature = "prometheus"))]
+    pub(crate) fn new(
         name: impl Into<String>,
         max_concurrent: Option<usize>,
     ) -> Result<Self, Error> {
@@ -286,7 +287,8 @@ impl<E: Event> Sink<E> {
     ///
     /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` or
     /// `buffer_capacity` are out of range.
-    pub fn with_buffer(
+    #[cfg(not(feature = "prometheus"))]
+    pub(crate) fn with_buffer(
         name: impl Into<String>,
         max_concurrent: Option<usize>,
         buffer_capacity: usize,
@@ -720,6 +722,51 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
+    use tokio::sync::Mutex;
+
+    /// Constructs a [`Sink`] for unit tests, selecting the constructor that
+    /// is available in the current feature configuration.
+    fn test_sink_new<E: Event>(
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+    ) -> Result<Sink<E>, Error> {
+        #[cfg(feature = "prometheus")]
+        {
+            Sink::new_with_metrics(
+                name,
+                max_concurrent,
+                ActorPath::from("/user/test"),
+                None,
+            )
+        }
+        #[cfg(not(feature = "prometheus"))]
+        {
+            Sink::new(name, max_concurrent)
+        }
+    }
+
+    /// Constructs a [`Sink`] with a custom buffer for unit tests, selecting
+    /// the constructor that is available in the current feature configuration.
+    fn test_sink_with_buffer<E: Event>(
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+        buffer_capacity: usize,
+    ) -> Result<Sink<E>, Error> {
+        #[cfg(feature = "prometheus")]
+        {
+            Sink::with_buffer_and_metrics(
+                name,
+                max_concurrent,
+                buffer_capacity,
+                ActorPath::from("/user/test"),
+                None,
+            )
+        }
+        #[cfg(not(feature = "prometheus"))]
+        {
+            Sink::with_buffer(name, max_concurrent, buffer_capacity)
+        }
+    }
 
     struct SleepSubscriber {
         millis: u64,
@@ -749,7 +796,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_concurrency_limit() {
-        let mut sink = Sink::new("test", Some(2)).expect("valid concurrency");
+        let mut sink =
+            test_sink_new("test", Some(2)).expect("valid concurrency");
         let done = Arc::new(AtomicUsize::new(0));
         for i in 0..5 {
             sink.add(
@@ -777,7 +825,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_hot_reload_max_concurrent() {
-        let mut sink = Sink::new("test", Some(1)).expect("valid concurrency");
+        let mut sink =
+            test_sink_new("test", Some(1)).expect("valid concurrency");
         let done = Arc::new(AtomicUsize::new(0));
         for i in 0..5 {
             sink.add(
@@ -826,7 +875,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_no_event_loss() {
-        let mut sink = Sink::new("test", None).expect("valid concurrency");
+        let mut sink = test_sink_new("test", None).expect("valid concurrency");
         let count = Arc::new(AtomicUsize::new(0));
         sink.add(
             "counter",
@@ -848,7 +897,7 @@ mod tests {
 
     #[test]
     fn test_sink_new_rejects_zero_concurrency() {
-        let err = Sink::<()>::new("test", Some(0))
+        let err = test_sink_new::<()>("test", Some(0))
             .expect_err("zero concurrency should be rejected");
         assert!(
             matches!(err, Error::InvalidConfiguration { component, .. } if component == "Sink")
@@ -857,7 +906,7 @@ mod tests {
 
     #[test]
     fn test_sink_new_rejects_excessive_concurrency() {
-        let err = Sink::<()>::new("test", Some(MAX_SINK_CONCURRENCY + 1))
+        let err = test_sink_new::<()>("test", Some(MAX_SINK_CONCURRENCY + 1))
             .expect_err("excessive concurrency should be rejected");
         assert!(
             matches!(err, Error::InvalidConfiguration { component, .. } if component == "Sink")
@@ -866,7 +915,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_set_max_concurrent_rejects_zero() {
-        let sink = Sink::<()>::new("test", Some(1)).expect("valid concurrency");
+        let sink =
+            test_sink_new::<()>("test", Some(1)).expect("valid concurrency");
         let err = sink
             .set_max_concurrent(0)
             .expect_err("zero concurrency should be rejected");
@@ -877,7 +927,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_with_buffer_accepts_valid_capacity() {
-        let result = Sink::<()>::with_buffer("test", None, 1);
+        let result = test_sink_with_buffer::<()>("test", None, 1);
         let Ok(sink) = result else {
             panic!("buffer capacity of 1 should be valid");
         };
@@ -886,7 +936,7 @@ mod tests {
 
     #[test]
     fn test_sink_with_buffer_rejects_zero_capacity() {
-        let result = Sink::<()>::with_buffer("test", None, 0);
+        let result = test_sink_with_buffer::<()>("test", None, 0);
         let Err(err) = result else {
             panic!("zero buffer capacity should be rejected");
         };
@@ -897,14 +947,75 @@ mod tests {
 
     #[test]
     fn test_sink_with_buffer_rejects_excessive_capacity() {
-        let result =
-            Sink::<()>::with_buffer("test", None, MAX_SINK_BUFFER_CAPACITY + 1);
+        let result = test_sink_with_buffer::<()>(
+            "test",
+            None,
+            MAX_SINK_BUFFER_CAPACITY + 1,
+        );
         let Err(err) = result else {
             panic!("excessive buffer capacity should be rejected");
         };
         assert!(
             matches!(err, Error::InvalidConfiguration { component, .. } if component == "Sink")
         );
+    }
+
+    #[derive(Clone)]
+    struct CollectingSubscriber {
+        events: Arc<Mutex<Vec<()>>>,
+    }
+
+    impl CollectingSubscriber {
+        fn new() -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        async fn drain(&self) -> Vec<()> {
+            let mut lock = self.events.lock().await;
+            std::mem::take(&mut *lock)
+        }
+    }
+
+    #[async_trait]
+    impl Subscriber<()> for CollectingSubscriber {
+        async fn notify(&self, _event: Arc<()>) -> Result<(), Error> {
+            self.events.lock().await.push(());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sink_entry_remove_and_clear() {
+        let sub_a = CollectingSubscriber::new();
+        let sub_b = CollectingSubscriber::new();
+        let sub_c = CollectingSubscriber::new();
+
+        let mut sink =
+            test_sink_new::<()>("mutable_sink", None).expect("valid sink");
+        sink.add("a", sub_a.clone());
+        sink.add("b", sub_b.clone());
+        sink.add("c", sub_c.clone());
+
+        let removed = sink.remove_entry("b");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().id, "b");
+        assert!(sink.remove_entry("b").is_none());
+
+        sink.send(Arc::new(()));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert_eq!(sub_a.drain().await.len(), 1);
+        assert_eq!(sub_b.drain().await.len(), 0); // removed
+        assert_eq!(sub_c.drain().await.len(), 1);
+
+        sink.clear();
+        sink.send(Arc::new(()));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert_eq!(sub_a.drain().await.len(), 0);
+        assert_eq!(sub_c.drain().await.len(), 0);
     }
 
     #[test]
