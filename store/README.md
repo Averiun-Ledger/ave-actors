@@ -213,14 +213,6 @@ fn snapshot_every() -> Option<u64> {
 }
 ```
 
-Set `compact_on_snapshot() -> bool` to `true` to delete events already covered by a snapshot and reduce storage use:
-
-```rust,ignore
-fn compact_on_snapshot() -> bool {
-    true
-}
-```
-
 ---
 
 ## Encryption

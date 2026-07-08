@@ -16,7 +16,7 @@ use ave_actors_store::{
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use test_log::test;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
@@ -72,165 +72,6 @@ impl DbManager<MemoryStore, FailingStateStore> for FailingStateManager {
         _prefix: &str,
     ) -> Result<FailingStateStore, StoreError> {
         Ok(FailingStateStore)
-    }
-
-    fn stop(self) -> Result<(), StoreError> {
-        Ok(())
-    }
-}
-
-#[derive(Default, Clone)]
-struct FailingCompactionManager {
-    memory: MemoryManager,
-}
-
-#[derive(Clone)]
-struct FailingCompactionCollection {
-    inner: MemoryStore,
-}
-
-impl Collection for FailingCompactionCollection {
-    fn last(&self) -> Result<Option<(String, Vec<u8>)>, StoreError> {
-        Collection::last(&self.inner)
-    }
-
-    fn name(&self) -> &str {
-        Collection::name(&self.inner)
-    }
-
-    fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
-        Collection::get(&self.inner, key)
-    }
-
-    fn put(&mut self, key: &str, data: &[u8]) -> Result<(), StoreError> {
-        Collection::put(&mut self.inner, key, data)
-    }
-
-    fn del(&mut self, _key: &str) -> Result<(), StoreError> {
-        Err(StoreError::Store {
-            operation: StoreOperation::Test,
-            reason: "forced compaction failure".to_owned(),
-            source: None,
-        })
-    }
-
-    fn purge(&mut self) -> Result<(), StoreError> {
-        Collection::purge(&mut self.inner)
-    }
-
-    fn iter<'a>(
-        &'a self,
-        reverse: bool,
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>,
-        StoreError,
-    > {
-        self.inner.iter(reverse)
-    }
-}
-
-impl DbManager<FailingCompactionCollection, MemoryStore>
-    for FailingCompactionManager
-{
-    fn create_collection(
-        &self,
-        name: &str,
-        prefix: &str,
-    ) -> Result<FailingCompactionCollection, StoreError> {
-        Ok(FailingCompactionCollection {
-            inner: self.memory.create_collection(name, prefix)?,
-        })
-    }
-
-    fn create_state(
-        &self,
-        name: &str,
-        prefix: &str,
-    ) -> Result<MemoryStore, StoreError> {
-        self.memory.create_state(name, prefix)
-    }
-
-    fn stop(self) -> Result<(), StoreError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct LoggingCollection {
-    inner: MemoryStore,
-    deleted_keys: Arc<Mutex<Vec<String>>>,
-}
-
-impl Collection for LoggingCollection {
-    fn last(&self) -> Result<Option<(String, Vec<u8>)>, StoreError> {
-        Collection::last(&self.inner)
-    }
-
-    fn name(&self) -> &str {
-        Collection::name(&self.inner)
-    }
-
-    fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
-        Collection::get(&self.inner, key)
-    }
-
-    fn put(&mut self, key: &str, data: &[u8]) -> Result<(), StoreError> {
-        Collection::put(&mut self.inner, key, data)
-    }
-
-    fn del(&mut self, key: &str) -> Result<(), StoreError> {
-        self.deleted_keys.lock().unwrap().push(key.to_owned());
-        Collection::del(&mut self.inner, key)
-    }
-
-    fn purge(&mut self) -> Result<(), StoreError> {
-        Collection::purge(&mut self.inner)
-    }
-
-    fn iter<'a>(
-        &'a self,
-        reverse: bool,
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(String, Vec<u8>), StoreError>> + 'a>,
-        StoreError,
-    > {
-        Collection::iter(&self.inner, reverse)
-    }
-}
-
-#[derive(Clone)]
-struct LoggingCompactionManager {
-    memory: MemoryManager,
-    deleted_keys: Arc<Mutex<Vec<String>>>,
-}
-
-impl Default for LoggingCompactionManager {
-    fn default() -> Self {
-        Self {
-            memory: MemoryManager::default(),
-            deleted_keys: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
-
-impl DbManager<LoggingCollection, MemoryStore> for LoggingCompactionManager {
-    fn create_collection(
-        &self,
-        name: &str,
-        prefix: &str,
-    ) -> Result<LoggingCollection, StoreError> {
-        Ok(LoggingCollection {
-            inner: self.memory.create_collection(name, prefix)?,
-            deleted_keys: self.deleted_keys.clone(),
-        })
-    }
-
-    fn create_state(
-        &self,
-        name: &str,
-        prefix: &str,
-    ) -> Result<MemoryStore, StoreError> {
-        self.memory.create_state(name, prefix)
     }
 
     fn stop(self) -> Result<(), StoreError> {
@@ -556,89 +397,6 @@ impl Handler<Self> for GapActor {
     }
 }
 
-#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
-struct CompactingActorState {
-    value: i32,
-}
-
-#[derive(Debug)]
-struct CompactingActor {
-    state_ptr: Arc<CompactingActorState>,
-}
-
-#[async_trait]
-impl Actor for CompactingActor {
-    type Message = ValueMessage;
-    type Response = ValueResponse;
-    type Event = ValueEvent;
-    type SinkEvent = Self::Event;
-    type ChildError = ActorError;
-    type ChildFault = ActorError;
-
-    fn get_span(
-        id: &str,
-        _parent_span: Option<tracing::Span>,
-    ) -> tracing::Span {
-        info_span!("CompactingActor", id = %id)
-    }
-}
-
-#[async_trait]
-impl PersistentActor for CompactingActor {
-    type Persistence = FullPersistence;
-    type InitParams = ();
-    type State = CompactingActorState;
-
-    fn create_initial(_: ()) -> Self {
-        Self {
-            state_ptr: Arc::new(CompactingActorState::default()),
-        }
-    }
-
-    fn compact_on_snapshot() -> bool {
-        true
-    }
-
-    fn apply(
-        state: Arc<Self::State>,
-        event: &Self::Event,
-    ) -> Result<Arc<Self::State>, ActorError> {
-        let mut new_state = state;
-        Arc::make_mut(&mut new_state).value += event.0;
-        Ok(new_state)
-    }
-
-    fn state(&self) -> Arc<Self::State> {
-        Arc::clone(&self.state_ptr)
-    }
-
-    fn set_state(&mut self, state: Arc<Self::State>) {
-        self.state_ptr = state;
-    }
-}
-
-#[async_trait]
-impl Handler<Self> for CompactingActor {
-    async fn handle_message(
-        &mut self,
-        _sender: ActorPath,
-        msg: ValueMessage,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<ValueResponse, ActorError> {
-        match msg {
-            ValueMessage::Increment(delta) => {
-                let mut new_state = Arc::clone(&self.state_ptr);
-                Arc::make_mut(&mut new_state).value += delta;
-                self.state_ptr = new_state;
-                Ok(ValueResponse::Ack)
-            }
-            ValueMessage::GetValue => {
-                Ok(ValueResponse::Value(self.state_ptr.value))
-            }
-        }
-    }
-}
-
 #[test(tokio::test)]
 async fn test_persistent_actor_rolls_back_state_when_store_persist_fails() {
     let (system, mut runner) =
@@ -769,321 +527,6 @@ fn test_memory_store_keeps_prefixes_isolated() {
     assert_eq!(Collection::get(&coll_actor10, "0001").unwrap(), b"ten");
 }
 
-#[test(tokio::test)]
-async fn test_full_persistence_compacts_events_after_snapshot_when_enabled() {
-    let manager = MemoryManager::default();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
-
-    let store = store_new!(
-        CompactingActor,
-        "compact_store",
-        "prefix",
-        manager.clone(),
-        None,
-        Arc::new(CompactingActorState::default()),
-    )
-    .unwrap();
-    let store_ref: ActorRef<Store<CompactingActor>> = system
-        .create_root_actor("compact-store", store)
-        .await
-        .unwrap();
-
-    assert!(matches!(
-        store_ref
-            .ask(StoreCommand::PersistFull {
-                event: Arc::new(ValueEvent(2)),
-                state: Arc::new(CompactingActorState { value: 2 }),
-                snapshot_every: Some(1),
-            })
-            .await
-            .unwrap(),
-        StoreResponse::Persisted
-    ));
-    assert!(matches!(
-        store_ref
-            .ask(StoreCommand::PersistFull {
-                event: Arc::new(ValueEvent(3)),
-                state: Arc::new(CompactingActorState { value: 5 }),
-                snapshot_every: Some(1),
-            })
-            .await
-            .unwrap(),
-        StoreResponse::Persisted
-    ));
-
-    let collection = manager
-        .create_collection("compact_store_events", "prefix")
-        .unwrap();
-    assert!(collection.iter(false).unwrap().next().is_none());
-
-    let recovered = store_ref.ask(StoreCommand::Recover).await.unwrap();
-    match recovered {
-        StoreResponse::State(Some(state)) => assert_eq!(state.value, 5),
-        _ => panic!("expected recovered compacted state"),
-    }
-}
-
-#[test(tokio::test)]
-async fn test_compacted_snapshot_preserves_event_counter_after_restart() {
-    let manager = MemoryManager::default();
-
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
-
-    let store = store_new!(
-        CompactingActor,
-        "compact_restart_store",
-        "prefix",
-        manager.clone(),
-        None,
-        Arc::new(CompactingActorState::default()),
-    )
-    .unwrap();
-    let store_ref: ActorRef<Store<CompactingActor>> = system
-        .create_root_actor("compact-restart-store", store)
-        .await
-        .unwrap();
-
-    assert!(matches!(
-        store_ref
-            .ask(StoreCommand::PersistFull {
-                event: Arc::new(ValueEvent(2)),
-                state: Arc::new(CompactingActorState { value: 2 }),
-                snapshot_every: Some(1),
-            })
-            .await
-            .unwrap(),
-        StoreResponse::Persisted
-    ));
-    assert!(matches!(
-        store_ref
-            .ask(StoreCommand::PersistFull {
-                event: Arc::new(ValueEvent(3)),
-                state: Arc::new(CompactingActorState { value: 5 }),
-                snapshot_every: Some(1),
-            })
-            .await
-            .unwrap(),
-        StoreResponse::Persisted
-    ));
-
-    let compacted_events = manager
-        .create_collection("compact_restart_store_events", "prefix")
-        .unwrap();
-    assert!(compacted_events.iter(false).unwrap().next().is_none());
-
-    let (system2, mut runner2) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner2.run().await });
-
-    let restarted_store = store_new!(
-        CompactingActor,
-        "compact_restart_store",
-        "prefix",
-        manager.clone(),
-        None,
-        Arc::new(CompactingActorState::default()),
-    )
-    .unwrap();
-    let restarted_ref: ActorRef<Store<CompactingActor>> = system2
-        .create_root_actor("compact-restart-store-2", restarted_store)
-        .await
-        .unwrap();
-
-    match restarted_ref.ask(StoreCommand::Recover).await.unwrap() {
-        StoreResponse::State(Some(state)) => assert_eq!(state.value, 5),
-        _ => panic!("expected recovered state from compacted snapshot"),
-    }
-
-    assert!(matches!(
-        restarted_ref
-            .ask(StoreCommand::PersistFull {
-                event: Arc::new(ValueEvent(4)),
-                state: Arc::new(CompactingActorState { value: 9 }),
-                snapshot_every: Some(1),
-            })
-            .await
-            .unwrap(),
-        StoreResponse::Persisted
-    ));
-
-    let restarted_ref2: ActorRef<Store<CompactingActor>> = system2
-        .create_root_actor(
-            "compact-restart-store-3",
-            store_new!(
-                CompactingActor,
-                "compact_restart_store",
-                "prefix",
-                manager,
-                None,
-                Arc::new(CompactingActorState::default()),
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    match restarted_ref2.ask(StoreCommand::Recover).await.unwrap() {
-        StoreResponse::State(Some(state)) => assert_eq!(state.value, 9),
-        _ => panic!("expected recovered state after post-restart persist"),
-    }
-}
-
-#[test(tokio::test)]
-async fn test_compaction_watermark_is_persisted_across_restart() {
-    let manager = LoggingCompactionManager::default();
-
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
-
-    let store = store_new!(
-        CompactingActor,
-        "logging_compact_store",
-        "prefix",
-        manager.clone(),
-        None,
-        Arc::new(CompactingActorState::default()),
-    )
-    .unwrap();
-    let store_ref: ActorRef<Store<CompactingActor>> = system
-        .create_root_actor("logging-compact-store", store)
-        .await
-        .unwrap();
-
-    assert!(matches!(
-        store_ref
-            .ask(StoreCommand::PersistFull {
-                event: Arc::new(ValueEvent(2)),
-                state: Arc::new(CompactingActorState { value: 2 }),
-                snapshot_every: Some(1),
-            })
-            .await
-            .unwrap(),
-        StoreResponse::Persisted
-    ));
-
-    let (system2, mut runner2) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner2.run().await });
-
-    let restarted_store = store_new!(
-        CompactingActor,
-        "logging_compact_store",
-        "prefix",
-        manager.clone(),
-        None,
-        Arc::new(CompactingActorState::default()),
-    )
-    .unwrap();
-    let restarted_ref: ActorRef<Store<CompactingActor>> = system2
-        .create_root_actor("logging-compact-store-2", restarted_store)
-        .await
-        .unwrap();
-
-    assert!(matches!(
-        restarted_ref
-            .ask(StoreCommand::PersistFull {
-                event: Arc::new(ValueEvent(3)),
-                state: Arc::new(CompactingActorState { value: 5 }),
-                snapshot_every: Some(1),
-            })
-            .await
-            .unwrap(),
-        StoreResponse::Persisted
-    ));
-
-    let deleted_keys = manager.deleted_keys.lock().unwrap().clone();
-    assert_eq!(
-        deleted_keys,
-        vec![
-            "00000000000000000000".to_owned(),
-            "00000000000000000001".to_owned()
-        ]
-    );
-}
-
-#[test(tokio::test)]
-async fn test_repeated_compaction_only_deletes_newly_covered_events() {
-    let manager = LoggingCompactionManager::default();
-
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
-
-    let store = store_new!(
-        CompactingActor,
-        "repeated_compact_store",
-        "prefix",
-        manager.clone(),
-        None,
-        Arc::new(CompactingActorState::default()),
-    )
-    .unwrap();
-    let store_ref: ActorRef<Store<CompactingActor>> = system
-        .create_root_actor("repeated-compact-store", store)
-        .await
-        .unwrap();
-
-    assert!(matches!(
-        store_ref
-            .ask(StoreCommand::PersistFull {
-                event: Arc::new(ValueEvent(1)),
-                state: Arc::new(CompactingActorState { value: 1 }),
-                snapshot_every: Some(1),
-            })
-            .await
-            .unwrap(),
-        StoreResponse::Persisted
-    ));
-    assert!(matches!(
-        store_ref
-            .ask(StoreCommand::PersistFull {
-                event: Arc::new(ValueEvent(2)),
-                state: Arc::new(CompactingActorState { value: 3 }),
-                snapshot_every: Some(1),
-            })
-            .await
-            .unwrap(),
-        StoreResponse::Persisted
-    ));
-    assert!(matches!(
-        store_ref
-            .ask(StoreCommand::PersistFull {
-                event: Arc::new(ValueEvent(3)),
-                state: Arc::new(CompactingActorState { value: 6 }),
-                snapshot_every: Some(1),
-            })
-            .await
-            .unwrap(),
-        StoreResponse::Persisted
-    ));
-
-    let deleted_keys = manager.deleted_keys.lock().unwrap().clone();
-    assert_eq!(
-        deleted_keys,
-        vec![
-            "00000000000000000000".to_owned(),
-            "00000000000000000001".to_owned(),
-            "00000000000000000002".to_owned(),
-        ]
-    );
-
-    let collection = manager
-        .memory
-        .create_collection("repeated_compact_store_events", "prefix")
-        .unwrap();
-    assert!(collection.iter(false).unwrap().next().is_none());
-
-    match store_ref.ask(StoreCommand::Recover).await.unwrap() {
-        StoreResponse::State(Some(state)) => assert_eq!(state.value, 6),
-        _ => panic!("expected recovered state after repeated compaction"),
-    }
-}
-
 #[test]
 fn test_get_by_range_reports_requested_missing_key() {
     let mut collection = RangeCollection::default();
@@ -1145,15 +588,15 @@ async fn test_recover_falls_back_when_metadata_state_is_missing() {
     tokio::spawn(async move { runner.run().await });
 
     let store = store_new!(
-        CompactingActor,
+        GapActor,
         "metadata_fallback_store",
         "prefix",
         manager.clone(),
         None,
-        Arc::new(CompactingActorState::default()),
+        Arc::new(GapActorState::default()),
     )
     .unwrap();
-    let store_ref: ActorRef<Store<CompactingActor>> = system
+    let store_ref: ActorRef<Store<GapActor>> = system
         .create_root_actor("metadata-fallback-store", store)
         .await
         .unwrap();
@@ -1162,7 +605,7 @@ async fn test_recover_falls_back_when_metadata_state_is_missing() {
         store_ref
             .ask(StoreCommand::PersistFull {
                 event: Arc::new(ValueEvent(4)),
-                state: Arc::new(CompactingActorState { value: 4 }),
+                state: Arc::new(GapActorState { value: 4 }),
                 snapshot_every: Some(1),
             })
             .await
@@ -1180,15 +623,15 @@ async fn test_recover_falls_back_when_metadata_state_is_missing() {
     tokio::spawn(async move { runner2.run().await });
 
     let restarted = store_new!(
-        CompactingActor,
+        GapActor,
         "metadata_fallback_store",
         "prefix",
         manager,
         None,
-        Arc::new(CompactingActorState::default()),
+        Arc::new(GapActorState::default()),
     )
     .unwrap();
-    let restarted_ref: ActorRef<Store<CompactingActor>> = system2
+    let restarted_ref: ActorRef<Store<GapActor>> = system2
         .create_root_actor("metadata-fallback-store-2", restarted)
         .await
         .unwrap();
@@ -1248,52 +691,6 @@ async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
 
     let recovered = store_ref.ask(StoreCommand::Recover).await;
     assert!(matches!(recovered, Err(ActorError::StoreOperation { .. })));
-}
-
-#[test(tokio::test)]
-async fn test_snapshot_compaction_failure_is_best_effort() {
-    let manager = FailingCompactionManager::default();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
-
-    let store = store_new!(
-        CompactingActor,
-        "best_effort_compact_store",
-        "prefix",
-        manager.clone(),
-        None,
-        Arc::new(CompactingActorState::default()),
-    )
-    .unwrap();
-    let store_ref: ActorRef<Store<CompactingActor>> = system
-        .create_root_actor("best-effort-compact-store", store)
-        .await
-        .unwrap();
-
-    let response = store_ref
-        .ask(StoreCommand::PersistFull {
-            event: Arc::new(ValueEvent(7)),
-            state: Arc::new(CompactingActorState { value: 7 }),
-            snapshot_every: Some(1),
-        })
-        .await
-        .unwrap();
-    assert!(matches!(response, StoreResponse::Persisted));
-
-    match store_ref.ask(StoreCommand::Recover).await.unwrap() {
-        StoreResponse::State(Some(state)) => assert_eq!(state.value, 7),
-        _ => panic!("expected recovered state after best-effort compaction"),
-    }
-
-    let events = store_ref
-        .ask(StoreCommand::GetEvents { from: 0, to: 0 })
-        .await
-        .unwrap();
-    assert!(matches!(
-        events,
-        StoreResponse::Events(ref values) if values == &vec![ValueEvent(7)]
-    ));
 }
 
 #[test(tokio::test)]

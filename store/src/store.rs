@@ -193,14 +193,6 @@ where
         Some(100)
     }
 
-    /// Whether already snapshotted events should be compacted after a
-    /// successful snapshot.
-    ///
-    /// Default: `false`.
-    fn compact_on_snapshot() -> bool {
-        false
-    }
-
     /// Returns the current actor state.
     fn state(&self) -> Arc<Self::State>;
 
@@ -386,13 +378,11 @@ where
     event_counter: u64,
     /// Number of events already included in the latest snapshot.
     state_counter: u64,
-    /// Exclusive upper bound of the event range already compacted from the log.
-    compacted_until: u64,
     /// Collection for storing events with sequence numbers as keys.
     events: Box<dyn Collection>,
     /// Storage for the latest state snapshot.
     states: Box<dyn State>,
-    /// Storage for log metadata used to resume after snapshots/compaction.
+    /// Storage for log metadata used to resume after snapshots.
     metadata: Box<dyn State>,
     /// Encrypted password for data encryption (XChaCha20-Poly1305).
     key_box: Option<EncryptedKey>,
@@ -414,18 +404,10 @@ where
 {
 }
 
-/// Legacy metadata format (v1) without `state_counter`.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-struct StoreMetadataV1 {
-    next_event_index: u64,
-    compacted_until: u64,
-}
-
-/// Current metadata format (v2) including `state_counter`.
+/// Metadata persisted alongside snapshots to resume event replay correctly.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct StoreMetadata {
     next_event_index: u64,
-    compacted_until: u64,
     state_counter: u64,
 }
 
@@ -518,7 +500,6 @@ where
         let mut store = Self {
             event_counter: 0,
             state_counter: 0,
-            compacted_until: 0,
             events: Box::new(events),
             states: Box::new(states),
             metadata: Box::new(metadata),
@@ -547,7 +528,6 @@ where
         if let Some(metadata) = store.get_metadata()? {
             store.event_counter =
                 last_event_counter.max(metadata.next_event_index);
-            store.compacted_until = metadata.compacted_until;
             store.state_counter = metadata.state_counter;
         } else {
             store.event_counter = last_event_counter.max(snapshot_counter);
@@ -555,9 +535,8 @@ where
         }
 
         debug!(
-            "Initializing Store with event_counter: {}, \
-             compacted_until: {}",
-            store.event_counter, store.compacted_until
+            "Initializing Store with event_counter: {}, state_counter: {}",
+            store.event_counter, store.state_counter
         );
 
         #[cfg(feature = "prometheus")]
@@ -640,18 +619,8 @@ where
 
         let bytes = self.maybe_decrypt(data)?;
 
-        // Try current format (v2) first.
         if let Ok(metadata) = borsh::from_slice::<StoreMetadata>(&bytes) {
             return Ok(Some(metadata));
-        }
-
-        // Fall back to legacy format (v1) and migrate on-the-fly.
-        if let Ok(v1) = borsh::from_slice::<StoreMetadataV1>(&bytes) {
-            return Ok(Some(StoreMetadata {
-                next_event_index: v1.next_event_index,
-                compacted_until: v1.compacted_until,
-                state_counter: 0,
-            }));
         }
 
         error!("Can't decode metadata: incompatible format");
@@ -664,7 +633,6 @@ where
     fn persist_metadata(&mut self) -> Result<(), Error> {
         let metadata = StoreMetadata {
             next_event_index: self.event_counter,
-            compacted_until: self.compacted_until,
             state_counter: self.state_counter,
         };
         let data = borsh::to_vec(&metadata).map_err(|e| {
@@ -675,27 +643,6 @@ where
         let bytes = self.maybe_encrypt(&data)?;
 
         self.metadata.put(&bytes)
-    }
-
-    fn compact_to_snapshot(&mut self) -> Result<(), Error> {
-        if self.compacted_until >= self.state_counter {
-            return Ok(());
-        }
-
-        let start_key = format!("{:020}", self.compacted_until);
-        let end_key = format!("{:020}", self.state_counter.saturating_sub(1));
-
-        match self.events.del_range(&start_key, &end_key) {
-            Ok(()) => {
-                self.compacted_until = self.state_counter;
-            }
-            Err(Error::EntryNotFound { .. }) => {
-                self.compacted_until = self.state_counter;
-            }
-            Err(err) => return Err(err),
-        }
-
-        Ok(())
     }
 
     fn persist<E>(&mut self, event: &E) -> Result<(), Error>
@@ -888,21 +835,6 @@ where
         #[cfg(feature = "prometheus")]
         self.record_pending_events();
         self.persist_metadata()?;
-        if A::compact_on_snapshot() {
-            if let Err(err) = self.compact_to_snapshot() {
-                warn!(
-                    error = %err,
-                    "Snapshot persisted but event compaction failed; \
-                     keeping event log"
-                );
-            } else if let Err(err) = self.persist_metadata() {
-                warn!(
-                    error = %err,
-                    "Snapshot metadata persisted but compaction \
-                     watermark update failed"
-                );
-            }
-        }
         Ok(())
     }
 
@@ -1091,7 +1023,6 @@ where
         self.metadata.purge()?;
         self.event_counter = 0;
         self.state_counter = 0;
-        self.compacted_until = 0;
         #[cfg(feature = "prometheus")]
         self.record_pending_events();
         Ok(())
@@ -1248,8 +1179,6 @@ where
     PersistBatch(Vec<Arc<A::Event>>),
     /// Snapshot the supplied state immediately.
     Snapshot(Arc<A::State>),
-    /// Remove event log entries already covered by the latest snapshot.
-    Compact,
     /// Return the most recently persisted event.
     LastEvent,
     /// Return the next free event index.
@@ -1287,7 +1216,6 @@ where
                 Self::PersistBatch(events.iter().map(Arc::clone).collect())
             }
             Self::Snapshot(s) => Self::Snapshot(Arc::clone(s)),
-            Self::Compact => Self::Compact,
             Self::LastEvent => Self::LastEvent,
             Self::LastEventNumber => Self::LastEventNumber,
             Self::LastEventsFrom(n) => Self::LastEventsFrom(*n),
@@ -1323,8 +1251,6 @@ where
     Persisted,
     /// A snapshot was stored successfully.
     Snapshotted,
-    /// Event compaction completed successfully.
-    Compacted,
     /// Recovered actor state, or `None` when no persisted state exists.
     State(Option<Arc<A::State>>),
     /// Most recently persisted event, or `None` when the log is empty.
@@ -1515,23 +1441,6 @@ where
                 })?;
                 debug!("Snapshotted state");
                 Ok(StoreResponse::Snapshotted)
-            }
-            StoreCommand::Compact => {
-                #[cfg(feature = "prometheus")]
-                let start = Instant::now();
-                let result = self.compact_to_snapshot();
-                #[cfg(feature = "prometheus")]
-                self.record_command_metrics(
-                    start,
-                    "compact",
-                    "compact",
-                    &result.as_ref().map(|_| ()),
-                );
-                result.map_err(|e| {
-                    actor_store_error(StoreOperation::Compact, e)
-                })?;
-                debug!("Compacted events covered by the latest snapshot");
-                Ok(StoreResponse::Compacted)
             }
             StoreCommand::Recover => {
                 #[cfg(feature = "prometheus")]
