@@ -160,17 +160,16 @@ async fn test_debug_light_persistence_counters() {
         _ => panic!("Expected LastEventNumber response"),
     }
 
-    println!("\n=== STEP 2: Persist first event with PersistLight ===");
-    let state = Arc::new(DebugActorState { value: 0 });
-    let event = DebugEvent { delta: 10 };
+    println!("\n=== STEP 2: Persist first light snapshot ===");
+    let state = Arc::new(DebugActorState { value: 10 });
 
     println!("Before persist: actor.value = {}", state.value);
     let result = store_ref
-        .ask(StoreCommand::PersistLight(Arc::new(event), state))
+        .ask(StoreCommand::PersistLight(state))
         .await
         .unwrap();
     match result {
-        StoreResponse::Persisted => println!("Event persisted successfully"),
+        StoreResponse::Persisted => println!("Snapshot persisted successfully"),
         _ => panic!("Expected Persisted response"),
     }
 

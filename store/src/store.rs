@@ -221,10 +221,7 @@ where
         let response = match Self::Persistence::get_persistence() {
             PersistenceType::Light => {
                 let state = Arc::clone(&new_state);
-                match store
-                    .ask(StoreCommand::PersistLight(Arc::new(event), state))
-                    .await
-                {
+                match store.ask(StoreCommand::PersistLight(state)).await {
                     Ok(r) => r,
                     Err(e) => {
                         self.set_state(prev_state);
@@ -681,48 +678,29 @@ where
         result
     }
 
-    fn persist_state<E>(
-        &mut self,
-        event: &E,
-        state: &A::State,
-    ) -> Result<(), Error>
-    where
-        E: Event + BorshSerialize + BorshDeserialize,
-    {
-        debug!("Persisting event: {:?}", event);
-
-        let bytes = borsh::to_vec(event).map_err(|e| {
-            error!("Can't encode event: {}", e);
-            store_error(StoreOperation::EncodeEvent, e)
-        })?;
-
-        let bytes = self.maybe_encrypt(&bytes)?;
-
-        let next_event_number = self.event_counter;
-
-        debug!(
-            "Persisting event {} at index {} with LightPersistence",
-            std::any::type_name::<E>(),
-            next_event_number
-        );
-
-        let event_key = format!("{:020}", next_event_number);
-        self.events.put(&event_key, &bytes).map_err(|e| {
-            error!(key = %event_key, error = %e, "Failed to persist event");
-            store_error(StoreOperation::PersistLight, e)
-        })?;
+    fn persist_light_state(&mut self, state: &A::State) -> Result<(), Error> {
+        debug!("Persisting light snapshot");
 
         self.event_counter += 1;
         debug!(
-            "Successfully persisted event, event_counter now: {}",
+            "Incremented event_counter to {} before snapshot",
             self.event_counter
         );
 
         if let Err(e) = self.snapshot(state) {
-            error!(error = %e, "Snapshot failed after event persistence");
+            error!(error = %e, "Snapshot failed during light persistence");
+            self.event_counter -= 1;
+            debug!(
+                "Rolled back event_counter to {} after snapshot failure",
+                self.event_counter
+            );
             return Err(store_error(StoreOperation::Snapshot, e));
         }
 
+        debug!(
+            "Successfully persisted light snapshot, event_counter now: {}",
+            self.event_counter
+        );
         Ok(())
     }
 
@@ -809,7 +787,10 @@ where
     }
 
     fn query_events(&self, from: u64, to: u64) -> Result<Vec<A::Event>, Error> {
-        if from > to || from >= self.event_counter {
+        let empty_events =
+            self.events.iter(false)?.next().transpose()?.is_none();
+
+        if from > to || from >= self.event_counter || empty_events {
             return Ok(Vec::new());
         }
 
@@ -1173,8 +1154,8 @@ where
         /// Snapshot cadence for `FullPersistence`.
         snapshot_every: Option<u64>,
     },
-    /// Persist an event together with a snapshot of the supplied state.
-    PersistLight(Arc<A::Event>, Arc<A::State>),
+    /// Persist a snapshot of the supplied state (LightPersistence).
+    PersistLight(Arc<A::State>),
     /// Persist a batch of events atomically.
     PersistBatch(Vec<Arc<A::Event>>),
     /// Snapshot the supplied state immediately.
@@ -1209,9 +1190,7 @@ where
                 state: Arc::clone(state),
                 snapshot_every: *snapshot_every,
             },
-            Self::PersistLight(e, s) => {
-                Self::PersistLight(Arc::clone(e), Arc::clone(s))
-            }
+            Self::PersistLight(s) => Self::PersistLight(Arc::clone(s)),
             Self::PersistBatch(events) => {
                 Self::PersistBatch(events.iter().map(Arc::clone).collect())
             }
@@ -1383,10 +1362,10 @@ where
                 debug!("Persisted full event: {:?}", event);
                 Ok(StoreResponse::Persisted)
             }
-            StoreCommand::PersistLight(event, state) => {
+            StoreCommand::PersistLight(state) => {
                 #[cfg(feature = "prometheus")]
                 let start = Instant::now();
-                let result = self.persist_state(event.as_ref(), state.as_ref());
+                let result = self.persist_light_state(state.as_ref());
                 #[cfg(feature = "prometheus")]
                 self.record_command_metrics(
                     start,
@@ -1397,7 +1376,7 @@ where
                 result.map_err(|e| {
                     actor_store_error(StoreOperation::PersistLight, e)
                 })?;
-                debug!("Light persistence of event: {:?}", event);
+                debug!("Light persistence of state snapshot");
                 Ok(StoreResponse::Persisted)
             }
             StoreCommand::PersistBatch(events) => {
@@ -1547,7 +1526,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::MemoryManager;
+    use crate::memory::{MemoryManager, MemoryStore};
     use ave_actors_actor::{ActorSystem, Error as ActorError};
     use serde::{Deserialize, Serialize};
     use test_log::test;
@@ -1968,6 +1947,511 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_light_persistence_stores_only_snapshot() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store
+            .persist_light_state(&CounterState { value: 5 })
+            .unwrap();
+
+        assert_eq!(
+            store.events.iter(false).unwrap().next(),
+            None,
+            "LightPersistence must not store events"
+        );
+
+        let snapshot =
+            store.get_state().unwrap().expect("snapshot should exist");
+        assert_eq!(snapshot.state.value, 5);
+        assert_eq!(snapshot.counter, 1);
+    }
+
+    #[test]
+    fn test_light_persistence_no_events_stored() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store
+            .persist_light_state(&CounterState { value: 1 })
+            .unwrap();
+        store
+            .persist_light_state(&CounterState { value: 2 })
+            .unwrap();
+
+        assert!(
+            store.events.iter(false).unwrap().next().is_none(),
+            "LightPersistence must leave the event collection empty"
+        );
+    }
+
+    #[test]
+    fn test_light_persistence_last_event_is_none() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store
+            .persist_light_state(&CounterState { value: 7 })
+            .unwrap();
+
+        assert!(store.last_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_light_persistence_event_counter_equals_state_counter() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store
+            .persist_light_state(&CounterState { value: 1 })
+            .unwrap();
+        store
+            .persist_light_state(&CounterState { value: 2 })
+            .unwrap();
+
+        assert_eq!(store.event_counter, 2);
+        assert_eq!(store.state_counter, 2);
+    }
+
+    #[test]
+    fn test_light_persistence_pending_events_is_zero() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store
+            .persist_light_state(&CounterState { value: 1 })
+            .unwrap();
+        store
+            .persist_light_state(&CounterState { value: 2 })
+            .unwrap();
+
+        assert_eq!(store.pending_events_since_snapshot(), 0);
+    }
+
+    #[test]
+    fn test_light_persistence_recovery_loads_last_snapshot() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store
+            .persist_light_state(&CounterState { value: 5 })
+            .unwrap();
+        store
+            .persist_light_state(&CounterState { value: 10 })
+            .unwrap();
+
+        let recovered = store.recover().unwrap();
+        assert_eq!(recovered.unwrap().value, 10);
+    }
+
+    #[test]
+    fn test_light_persistence_recovery_without_snapshot_returns_none() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        assert!(store.recover().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_light_persistence_no_events_in_range() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store
+            .persist_light_state(&CounterState { value: 1 })
+            .unwrap();
+        store
+            .persist_light_state(&CounterState { value: 2 })
+            .unwrap();
+
+        // Even though the logical event counter advanced, no events are stored.
+        let events = store.query_events(0, 0).unwrap();
+        assert!(events.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Mock backend that fails state writes, used to verify LightPersistence
+    // rollback behaviour.
+    // ------------------------------------------------------------------
+
+    #[derive(Default, Clone)]
+    struct FailingState {
+        name: String,
+        prefix: String,
+    }
+
+    impl State for FailingState {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn get(&self) -> Result<Vec<u8>, Error> {
+            Err(Error::EntryNotFound {
+                key: self.prefix.clone(),
+            })
+        }
+
+        fn put(&mut self, _data: &[u8]) -> Result<(), Error> {
+            Err(Error::Store {
+                operation: StoreOperation::Snapshot,
+                reason: "injected snapshot failure".to_owned(),
+                source: None,
+            })
+        }
+
+        fn del(&mut self) -> Result<(), Error> {
+            Err(Error::EntryNotFound {
+                key: self.prefix.clone(),
+            })
+        }
+
+        fn purge(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default, Clone)]
+    struct FailingStateManager;
+
+    impl DbManager<MemoryStore, FailingState> for FailingStateManager {
+        fn create_collection(
+            &self,
+            name: &str,
+            prefix: &str,
+        ) -> Result<MemoryStore, Error> {
+            MemoryManager::default().create_collection(name, prefix)
+        }
+
+        fn create_state(
+            &self,
+            name: &str,
+            prefix: &str,
+        ) -> Result<FailingState, Error> {
+            Ok(FailingState {
+                name: name.to_owned(),
+                prefix: prefix.to_owned(),
+            })
+        }
+
+        fn stop(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_light_persistence_snapshot_failure_rolls_back() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            FailingStateManager,
+            None,
+            initial,
+        )
+        .unwrap();
+
+        assert!(
+            store
+                .persist_light_state(&CounterState { value: 5 })
+                .is_err()
+        );
+
+        assert_eq!(store.event_counter, 0);
+        assert_eq!(store.state_counter, 0);
+        assert!(store.recover().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_full_persistence_stores_events() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<FullCounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store.persist(&CounterEvent(5)).unwrap();
+        store.persist(&CounterEvent(3)).unwrap();
+
+        let events: Vec<_> = store
+            .events
+            .iter(false)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn test_full_persistence_replays_events_on_recovery() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<FullCounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store.persist(&CounterEvent(5)).unwrap();
+        store.persist(&CounterEvent(3)).unwrap();
+
+        let recovered = store.recover().unwrap();
+        assert_eq!(recovered.unwrap().value, 8);
+    }
+
+    #[test]
+    fn test_full_persistence_snapshot_captures_pending_events() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<FullCounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store.persist(&CounterEvent(1)).unwrap();
+        store.persist(&CounterEvent(2)).unwrap();
+        assert!(store.get_state().unwrap().is_none());
+        assert_eq!(store.pending_events_since_snapshot(), 2);
+
+        store.snapshot(&CounterState { value: 3 }).unwrap();
+        let snapshot =
+            store.get_state().unwrap().expect("snapshot should exist");
+        assert_eq!(snapshot.state.value, 3);
+        assert_eq!(snapshot.counter, 2);
+        assert_eq!(store.pending_events_since_snapshot(), 0);
+    }
+
+    #[test]
+    fn test_full_persistence_pending_events_correct() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<FullCounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store.persist(&CounterEvent(1)).unwrap();
+        assert_eq!(store.pending_events_since_snapshot(), 1);
+
+        store.persist(&CounterEvent(2)).unwrap();
+        assert_eq!(store.pending_events_since_snapshot(), 2);
+
+        store.snapshot(&CounterState { value: 3 }).unwrap();
+        assert_eq!(store.pending_events_since_snapshot(), 0);
+    }
+
+    #[test]
+    fn test_full_persistence_last_event_present() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<FullCounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store.persist(&CounterEvent(5)).unwrap();
+        store.persist(&CounterEvent(3)).unwrap();
+
+        let last = store
+            .last_event()
+            .unwrap()
+            .expect("last event should exist");
+        assert_eq!(last.0, 3);
+    }
+
+    #[test]
+    fn test_full_persistence_get_events_range() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<FullCounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        for i in 1..=5 {
+            store.persist(&CounterEvent(i)).unwrap();
+        }
+
+        let events = store.events(1, 3).unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].0, 2);
+        assert_eq!(events[1].0, 3);
+        assert_eq!(events[2].0, 4);
+    }
+
+    #[test]
+    fn test_full_persistence_recovery_with_snapshot_and_events() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<FullCounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        // Snapshot every 2 events. After 3 events: snapshot at 2, 1 pending.
+        store.persist(&CounterEvent(10)).unwrap();
+        store.persist(&CounterEvent(5)).unwrap();
+        store.persist(&CounterEvent(3)).unwrap();
+
+        let recovered = store.recover().unwrap();
+        assert_eq!(recovered.unwrap().value, 18);
+    }
+
+    #[test]
+    fn test_persist_increments_event_counter_both_strategies() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut light = Store::<CounterActor>::test_new(
+            "light",
+            "test",
+            MemoryManager::default(),
+            None,
+            Arc::clone(&initial),
+        )
+        .unwrap();
+        let mut full = Store::<FullCounterActor>::test_new(
+            "full",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        light
+            .persist_light_state(&CounterState { value: 1 })
+            .unwrap();
+        full.persist(&CounterEvent(1)).unwrap();
+
+        assert_eq!(light.event_counter, 1);
+        assert_eq!(full.event_counter, 1);
+    }
+
+    #[test]
+    fn test_recover_with_empty_store_both_strategies() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut light = Store::<CounterActor>::test_new(
+            "light",
+            "test",
+            MemoryManager::default(),
+            None,
+            Arc::clone(&initial),
+        )
+        .unwrap();
+        let mut full = Store::<FullCounterActor>::test_new(
+            "full",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        assert!(light.recover().unwrap().is_none());
+        assert!(full.recover().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_snapshot_persists_state_counter() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store
+            .persist_light_state(&CounterState { value: 1 })
+            .unwrap();
+        store
+            .persist_light_state(&CounterState { value: 2 })
+            .unwrap();
+        store.snapshot(&CounterState { value: 2 }).unwrap();
+
+        let snapshot =
+            store.get_state().unwrap().expect("snapshot should exist");
+        assert_eq!(snapshot.counter, 2);
+    }
+
     #[cfg(all(test, feature = "prometheus"))]
     mod prometheus_tests {
         use super::*;
@@ -2061,10 +2545,9 @@ mod tests {
             assert_eq!(pending_events_value(&buf, &path), Some(0));
 
             store_ref
-                .ask(StoreCommand::PersistLight(
-                    Arc::new(CounterEvent(5)),
-                    Arc::new(CounterState { value: 5 }),
-                ))
+                .ask(StoreCommand::PersistLight(Arc::new(CounterState {
+                    value: 5,
+                })))
                 .await
                 .expect("persist light command should succeed");
 

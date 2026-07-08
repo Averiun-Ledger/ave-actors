@@ -202,8 +202,10 @@ async fn main() {
 
 | Strategy | Write | Recovery | When to use |
 |---|---|---|---|
-| `LightPersistence` | Event + state snapshot | Load snapshot (no replay) | When recovery speed matters most |
+| `LightPersistence` | State snapshot only | Load snapshot (no replay) | When recovery speed matters most and event history is not needed |
 | `FullPersistence` | Event only | Load last snapshot + replay remaining events | When storage efficiency or a full audit trail matters |
+
+`LightPersistence` does **not** store events. Only the latest state snapshot is kept, so intermediate states cannot be reconstructed. |
 
 For `FullPersistence`, snapshots are taken automatically every N events (default: 100). Override to tune:
 

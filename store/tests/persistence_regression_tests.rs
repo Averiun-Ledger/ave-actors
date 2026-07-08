@@ -416,7 +416,7 @@ async fn test_persistent_actor_rolls_back_state_when_store_persist_fails() {
 }
 
 #[test(tokio::test)]
-async fn test_light_persistence_rolls_back_written_event_when_snapshot_fails() {
+async fn test_light_persistence_rolls_back_snapshot_failure() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -437,22 +437,19 @@ async fn test_light_persistence_rolls_back_written_event_when_snapshot_fails() {
         .unwrap();
 
     let response = store_ref
-        .ask(StoreCommand::PersistLight(
-            Arc::new(ValueEvent(5)),
-            Arc::new(RollbackLightActorState { value: 5 }),
-        ))
+        .ask(StoreCommand::PersistLight(Arc::new(
+            RollbackLightActorState { value: 5 },
+        )))
         .await;
     assert!(matches!(response, Err(ActorError::StoreOperation { .. })));
 
+    // With LightPersistence as snapshot-only, a snapshot failure leaves nothing
+    // persisted. The logical event counter is rolled back as well.
     let counter = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
-    // Event is the authoritative write; it persists even when snapshot fails.
-    assert!(matches!(counter, StoreResponse::LastEventNumber(1)));
+    assert!(matches!(counter, StoreResponse::LastEventNumber(0)));
 
     let recovered = store_ref.ask(StoreCommand::Recover).await.unwrap();
-    match recovered {
-        StoreResponse::State(Some(state)) => assert_eq!(state.value, 5),
-        _ => panic!("expected recovered state from persisted event"),
-    }
+    assert!(matches!(recovered, StoreResponse::State(None)));
 }
 
 #[test(tokio::test)]
