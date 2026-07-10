@@ -1156,8 +1156,6 @@ where
     },
     /// Persist a snapshot of the supplied state (LightPersistence).
     PersistLight(Arc<A::State>),
-    /// Persist a batch of events atomically.
-    PersistBatch(Vec<Arc<A::Event>>),
     /// Snapshot the supplied state immediately.
     Snapshot(Arc<A::State>),
     /// Return the most recently persisted event.
@@ -1191,9 +1189,6 @@ where
                 snapshot_every: *snapshot_every,
             },
             Self::PersistLight(s) => Self::PersistLight(Arc::clone(s)),
-            Self::PersistBatch(events) => {
-                Self::PersistBatch(events.iter().map(Arc::clone).collect())
-            }
             Self::Snapshot(s) => Self::Snapshot(Arc::clone(s)),
             Self::LastEvent => Self::LastEvent,
             Self::LastEventNumber => Self::LastEventNumber,
@@ -1377,31 +1372,6 @@ where
                     actor_store_error(StoreOperation::PersistLight, e)
                 })?;
                 debug!("Light persistence of state snapshot");
-                Ok(StoreResponse::Persisted)
-            }
-            StoreCommand::PersistBatch(events) => {
-                #[cfg(feature = "prometheus")]
-                let start = Instant::now();
-                let mut result = Ok(());
-                for event in &events {
-                    if let Err(e) = self.persist(event.as_ref()) {
-                        result = Err(e);
-                        break;
-                    }
-                }
-                #[cfg(feature = "prometheus")]
-                self.record_command_metrics(
-                    start,
-                    "persist_batch",
-                    "persist_batch",
-                    &result.as_ref().map(|_| ()),
-                );
-                result.map_err(|e| {
-                    actor_store_error(StoreOperation::PersistBatch, e)
-                })?;
-                debug!("Persisted batch of {} events", events.len());
-                #[cfg(feature = "prometheus")]
-                self.record_pending_events();
                 Ok(StoreResponse::Persisted)
             }
             StoreCommand::Snapshot(state) => {

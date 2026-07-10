@@ -13,7 +13,7 @@ rust-version.workspace = true
 
 [dependencies]
 ave-actors-store = { workspace = true }
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.40.1", features = ["bundled"], optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
@@ -21,5 +21,5 @@ ave-actors-sqlite = { path = ".", features = ["sqlite"] }
 tempfile = { workspace = true }
 
 [features]
-sqlite = []
-export-sqlite = []
+sqlite = ["dep:rusqlite"]
+export-sqlite = ["sqlite"]
