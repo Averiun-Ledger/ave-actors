@@ -481,7 +481,7 @@ where
                     }
                     break;
                 }
-                // Handle error from `ErrorBoxReceiver`.
+                // Handle an error or fault reported by a child actor.
                 error = self.error_receiver.recv(), if !self.stop_signal => {
                     if let Some(error) = error {
                         match error {
@@ -505,7 +505,7 @@ where
                         self.stop_signal = true;
                     }
                 }
-                // Gets message handler from mailbox receiver and push it to the messages queue.
+                // Receive the next message from the mailbox.
                 msg = self.receiver.recv(), if !self.stop_signal => {
                     if let Some(mut envelope) = msg {
                         #[cfg(feature = "prometheus")]

@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 #[cfg(feature = "rocksdb")]
-pub mod db;
+mod db;
 
 #[cfg(feature = "rocksdb")]
 pub use db::{RocksDbManager, RocksDbStore};

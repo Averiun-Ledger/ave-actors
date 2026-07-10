@@ -64,15 +64,6 @@ pub enum Error {
         expected: String,
     },
 
-    /// Failed to send an event to the event bus.
-    ///
-    /// This error occurs when an event cannot be published to the event bus.
-    #[error("failed to send event to event bus: {reason}")]
-    SendEvent {
-        /// The reason why event sending failed.
-        reason: String,
-    },
-
     /// A store operation failed.
     ///
     /// This error covers various store operations that don't fit into
@@ -96,13 +87,6 @@ pub enum Error {
         /// The reason why helper access failed.
         reason: String,
     },
-
-    /// Maximum number of retry attempts reached.
-    ///
-    /// This error occurs when an operation has been retried the maximum
-    /// allowed number of times without success.
-    #[error("maximum retry attempts reached")]
-    Retry,
 
     // ===== Shutdown Errors =====
     /// The actor was stopped before processing this message.

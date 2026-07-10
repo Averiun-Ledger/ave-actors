@@ -69,11 +69,13 @@ fn actor_store_error(
 
 /// Selects the persistence strategy used by a [`PersistentActor`].
 ///
-/// `Light` trades storage space for fast recovery; `Full` trades recovery speed
-/// for a smaller storage footprint and a complete audit trail.
+/// `Light` persists only the latest state snapshot for fast recovery; `Full`
+/// persists every event and reconstructs state by replay, trading recovery
+/// speed for a complete audit trail.
 #[derive(Debug, Clone)]
 pub enum PersistenceType {
-    /// Each event is stored together with a state snapshot.
+    /// Only the latest state snapshot is persisted; no events are stored.
+    /// Recovery loads the snapshot directly.
     Light,
     /// Only events are stored; state is reconstructed by replaying them.
     Full,
@@ -283,9 +285,11 @@ where
     /// Sends an explicit state to the child `store` actor to be saved as a
     /// snapshot.
     ///
-    /// This helper is used internally by [`persist`](PersistentActor::persist)
-    /// so that the snapshot reflects the already-applied state without requiring
-    /// an in-place mutation of `self`.
+    /// This helper is used internally by [`persist`](PersistentActor::persist).
+    /// For `LightPersistence` it is the only persistence write; for
+    /// `FullPersistence` it complements the event log. In both cases the
+    /// snapshot reflects the already-applied state without requiring an
+    /// in-place mutation of `self`.
     async fn snapshot_state(
         &self,
         state: Arc<Self::State>,
@@ -616,15 +620,16 @@ where
 
         let bytes = self.maybe_decrypt(data)?;
 
-        if let Ok(metadata) = borsh::from_slice::<StoreMetadata>(&bytes) {
-            return Ok(Some(metadata));
+        match borsh::from_slice::<StoreMetadata>(&bytes) {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(e) => {
+                error!(error = %e, "Can't decode metadata: incompatible format");
+                Err(store_error(
+                    StoreOperation::DecodeState,
+                    format!("Metadata format is incompatible: {e}"),
+                ))
+            }
         }
-
-        error!("Can't decode metadata: incompatible format");
-        Err(store_error(
-            StoreOperation::DecodeState,
-            "Metadata format is incompatible",
-        ))
     }
 
     fn persist_metadata(&mut self) -> Result<(), Error> {
@@ -1314,22 +1319,6 @@ where
             } => {
                 #[cfg(feature = "prometheus")]
                 let start = Instant::now();
-                if snapshot_every == Some(0) {
-                    #[cfg(feature = "prometheus")]
-                    if let Some(metrics) = self.metrics.as_ref() {
-                        metrics.observe_operation_duration(
-                            &self.actor_path,
-                            "persist_full",
-                            start.elapsed().as_secs_f64(),
-                        );
-                        metrics.inc_errors(&self.actor_path, "persist_full");
-                    }
-                    return Err(ActorError::InvalidConfiguration {
-                        component: "Store PersistFull".to_owned(),
-                        reason: "snapshot_every cannot be Some(0)".to_owned(),
-                    });
-                }
-
                 let combined = self.persist(event.as_ref()).and_then(|()| {
                     if snapshot_every.is_some_and(|every| {
                         self.pending_events_since_snapshot() >= every

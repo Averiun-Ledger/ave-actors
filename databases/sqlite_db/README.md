@@ -10,8 +10,8 @@ API documentation is available on [docs.rs](https://docs.rs/ave-actors-sqlite).
 
 ```toml
 [dependencies]
-ave-actors-sqlite = { version = "0.6.0", features = ["sqlite"] }
-ave-actors-store = "0.5.0"
+ave-actors-sqlite = { version = "0.7.0", features = ["sqlite"] }
+ave-actors-store = "0.6.0"
 ```
 
 ## Features
@@ -136,5 +136,5 @@ fn create_state(&self, identifier: &str, prefix: &str) -> Result<SqliteCollectio
 ## Behavior notes
 
 - Collections are ordered lexicographically by key. Zero-padded sequence numbers are recommended if keys represent event numbers.
-- Each store handle uses dedicated read and write connections.
+- All store handles share a bounded connection pool sized from the host (1× vCPU, clamped between 4 and 16), plus one administrative connection for maintenance; checkout blocks when the pool is exhausted.
 - `SqliteManager::stop()` runs `PRAGMA optimize` and checkpoints the WAL before shutdown.

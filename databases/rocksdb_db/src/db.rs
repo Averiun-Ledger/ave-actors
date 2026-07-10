@@ -8,9 +8,9 @@ use ave_actors_store::{
 };
 
 use rocksdb::{
-    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompactionStyle,
-    DBCompressionType, DBIteratorWithThreadMode, Direction, IteratorMode,
-    LogLevel, Options, WriteOptions,
+    BlockBasedOptions, BoundColumnFamily, Cache, ColumnFamilyDescriptor, DB,
+    DBCompactionStyle, DBCompressionType, DBIteratorWithThreadMode, Direction,
+    IteratorMode, LogLevel, Options, WriteOptions,
 };
 use tracing::{debug, error, info, warn};
 
@@ -67,12 +67,12 @@ impl RocksDbManager {
     /// - Enables "create_if_missing" option
     ///
     pub fn new(
-        path: &PathBuf,
+        path: &Path,
         durability: bool,
         spec: Option<MachineSpec>,
     ) -> Result<Self, Error> {
         info!("Creating RocksDB database manager");
-        if !Path::new(&path).exists() {
+        if !path.exists() {
             debug!("Path does not exist, creating it");
             fs::create_dir_all(path).map_err(|e| {
                 error!(path = %path.display(), error = %e, "Failed to create RocksDB directory");
@@ -91,8 +91,6 @@ impl RocksDbManager {
         })?;
         let (ram_mb, cores) = (spec.ram_mb, spec.cpu_cores);
         info!("RocksDB tuning: ram_mb={}, cpu_cores={}", ram_mb, cores);
-
-        let strong_durability = durability;
 
         let mut options = Options::default();
         apply_common_tuning(&mut options);
@@ -130,9 +128,9 @@ impl RocksDbManager {
         debug!("RocksDB database manager created successfully");
         Ok(Self {
             opts: options,
-            path: path.clone(),
+            path: path.to_path_buf(),
             db: Arc::new(db),
-            strong_durability,
+            strong_durability: durability,
         })
     }
 
@@ -174,7 +172,6 @@ fn apply_tuning(options: &mut Options, ram_mb: u64, cores: usize) {
     // starve libp2p and the actor runtime on the same machine.
     let parallelism = ((cores / 2) as i32).clamp(1, 4);
     options.increase_parallelism(parallelism);
-    options.set_max_background_jobs(parallelism);
 
     // ── Memory budget: 5 % of total RAM ───────────────────────────────────────
     let budget = ram_mb * 1024 * 1024 * 5 / 100; // bytes
@@ -298,9 +295,9 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
             }
         }
 
-        // Dropping `self` (and therefore `self.db`) releases the last strong
-        // reference held by this manager, which closes RocksDB and frees the
-        // file lock.
+        // Dropping `self` releases this manager's strong reference to the
+        // shared `Arc<DB>`. RocksDB closes and the file lock is freed only
+        // once the last clone (managers, stores and iterators) is dropped.
         debug!("RocksDB stop complete");
         Ok(())
     }
@@ -330,13 +327,21 @@ pub struct RocksDbStore {
     strong_durability: bool,
 }
 
+impl RocksDbStore {
+    /// Returns the column-family handle for this store, or `None` if the
+    /// column family has not been created yet.
+    fn cf(&self) -> Option<Arc<BoundColumnFamily<'_>>> {
+        self.store.cf_handle(&self.name)
+    }
+}
+
 impl State for RocksDbStore {
     fn name(&self) -> &str {
         &self.name
     }
 
     fn get(&self) -> Result<Vec<u8>, Error> {
-        if let Some(handle) = self.store.cf_handle(&self.name) {
+        if let Some(handle) = self.cf() {
             let result = self
                 .store
                 .get_cf(&handle, self.prefix.clone())
@@ -367,7 +372,7 @@ impl State for RocksDbStore {
     }
 
     fn put(&mut self, data: &[u8]) -> Result<(), Error> {
-        if let Some(handle) = self.store.cf_handle(&self.name) {
+        if let Some(handle) = self.cf() {
             let wopts = write_options(self.strong_durability);
             Ok(self
                 .store
@@ -392,7 +397,7 @@ impl State for RocksDbStore {
     }
 
     fn del(&mut self) -> Result<(), Error> {
-        if let Some(handle) = self.store.cf_handle(&self.name) {
+        if let Some(handle) = self.cf() {
             let key = self.prefix.clone();
             let exists = self
                 .store
@@ -433,7 +438,7 @@ impl State for RocksDbStore {
     }
 
     fn purge(&mut self) -> Result<(), Error> {
-        if let Some(handle) = self.store.cf_handle(&self.name) {
+        if let Some(handle) = self.cf() {
             let wopts = write_options(self.strong_durability);
             // Delete only the exact state key to avoid touching other prefixes,
             // even if someone reused or nested prefixes.
@@ -463,7 +468,7 @@ impl Collection for RocksDbStore {
     fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
         let mut iter = self.iter(true)?;
         let value = iter.next().transpose()?;
-        debug!("Last value: {:?}", value);
+        debug!(has_value = value.is_some(), "last() fetched");
         Ok(value)
     }
 
@@ -472,7 +477,7 @@ impl Collection for RocksDbStore {
     }
 
     fn get(&self, key: &str) -> Result<Vec<u8>, Error> {
-        if let Some(handle) = self.store.cf_handle(&self.name) {
+        if let Some(handle) = self.cf() {
             let full_key = format!("{}.{}", self.prefix, key);
             let result = self
                 .store
@@ -495,7 +500,7 @@ impl Collection for RocksDbStore {
     }
 
     fn put(&mut self, key: &str, data: &[u8]) -> Result<(), Error> {
-        if let Some(handle) = self.store.cf_handle(&self.name) {
+        if let Some(handle) = self.cf() {
             let key = format!("{}.{}", self.prefix, key);
             let wopts = write_options(self.strong_durability);
             Ok(self
@@ -521,7 +526,7 @@ impl Collection for RocksDbStore {
     }
 
     fn del(&mut self, key: &str) -> Result<(), Error> {
-        if let Some(handle) = self.store.cf_handle(&self.name) {
+        if let Some(handle) = self.cf() {
             let key = format!("{}.{}", self.prefix, key);
             let exists = self
                 .store
@@ -562,7 +567,7 @@ impl Collection for RocksDbStore {
     }
 
     fn purge(&mut self) -> Result<(), Error> {
-        if let Some(handle) = self.store.cf_handle(&self.name) {
+        if let Some(handle) = self.cf() {
             let wopts = write_options(self.strong_durability);
             let start = format!("{}.", self.prefix).into_bytes();
             let mut end = start.clone();
@@ -599,7 +604,7 @@ impl Collection for RocksDbStore {
         Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>,
         Error,
     > {
-        let Some(_handle) = self.store.cf_handle(&self.name) else {
+        let Some(_handle) = self.cf() else {
             error!(cf = %self.name, "Column family not found for collection iter");
             return Err(Error::Store {
                 source: None,
@@ -625,7 +630,7 @@ impl Collection for RocksDbStore {
         Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a>,
         Error,
     > {
-        let Some(_handle) = self.store.cf_handle(&self.name) else {
+        let Some(_handle) = self.cf() else {
             error!(cf = %self.name, "Column family not found for collection iter_range");
             return Err(Error::Store {
                 source: None,
@@ -645,7 +650,7 @@ impl Collection for RocksDbStore {
     }
 
     fn del_range(&mut self, start: &str, end: &str) -> Result<(), Error> {
-        if let Some(handle) = self.store.cf_handle(&self.name) {
+        if let Some(handle) = self.cf() {
             let wopts = write_options(self.strong_durability);
             let start_key = format!("{}.{}", self.prefix, start).into_bytes();
             let mut end_key = format!("{}.{}", self.prefix, end).into_bytes();
@@ -673,13 +678,13 @@ impl Collection for RocksDbStore {
     }
 }
 
-pub struct RocksDbIterator<'a> {
+pub(crate) struct RocksDbIterator<'a> {
     prefix_dot: Vec<u8>,
     iter: DBIteratorWithThreadMode<'a, DB>,
 }
 
 impl<'a> RocksDbIterator<'a> {
-    pub fn new(
+    pub(crate) fn new(
         store: &'a Arc<DB>,
         name: String,
         prefix: String,
@@ -742,7 +747,7 @@ impl Iterator for RocksDbIterator<'_> {
     }
 }
 
-pub struct RocksDbRangeIterator<'a> {
+pub(crate) struct RocksDbRangeIterator<'a> {
     start_key: Vec<u8>,
     end_key: Vec<u8>,
     prefix_dot: Vec<u8>,
@@ -751,7 +756,7 @@ pub struct RocksDbRangeIterator<'a> {
 }
 
 impl<'a> RocksDbRangeIterator<'a> {
-    pub fn new(
+    pub(crate) fn new(
         store: &'a Arc<DB>,
         name: String,
         prefix: String,

@@ -1,22 +1,23 @@
 #![doc = include_str!("../README.md")]
 
 pub use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction,
-    CustomIntervalStrategy, EncryptedKey, Error as ActorError, Event,
-    ExponentialBackoffStrategy, Handler, IntervalStrategy, Message,
-    NoIntervalStrategy, NotPersistentActor, Response, RetryActor, RetryMessage,
-    RetryPolicy, RetryStrategy, Sink, SinkEntry, Strategy, Subscriber,
-    SupervisionStrategy, SystemEvent, SystemRef, SystemRunner, TimerKey,
+    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ActorSystemConfig,
+    ChildAction, CustomIntervalStrategy, EncryptedKey, Error as ActorError,
+    Event, ExponentialBackoffStrategy, Handler, IntervalStrategy, IntoActor,
+    Message, NoIntervalStrategy, NotPersistentActor, OverflowStrategy,
+    ParentRef, Response, RetryActor, RetryMessage, RetryPolicy, RetryStrategy,
+    ShutdownReason, Sink, SinkEntry, Strategy, Subscriber, SupervisionStrategy,
+    SystemEvent, SystemRef, SystemRunner, TimerKey,
 };
 
 #[cfg(any(feature = "rocksdb", feature = "sqlite"))]
 pub use ave_actors_store::{
-    Error as StoreError,
+    Error as StoreError, StoreOperation,
     config::*,
     database::{Collection, DbManager, State},
     store::{
-        FullPersistence, LightPersistence, PersistentActor, Store,
-        StoreCommand, StoreResponse,
+        FullPersistence, InitializedActor, LightPersistence, PersistentActor,
+        Store, StoreCommand, StoreResponse,
     },
 };
 

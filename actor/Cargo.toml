@@ -13,7 +13,6 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-borsh = { workspace = true }
 dashmap = { workspace = true }
 fastrand = { workspace = true }
 memsecurity = { workspace = true }
@@ -29,5 +28,6 @@ zeroize = { workspace = true }
 prometheus = ["dep:prometheus-client"]
 
 [dev-dependencies]
+borsh = { workspace = true }
 serde_json = "1.0"
 test-log = { workspace = true }

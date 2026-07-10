@@ -459,7 +459,7 @@ where
                     StopHandle::new(stop_sender.clone(), C::stop_timeout()),
                 );
                 let error_sender = self.error_sender.clone();
-                tokio::spawn(async move {
+                self.spawn(async move {
                     stop_sender.closed().await;
                     let _ = error_sender
                         .send(ChildError::ChildStopped(child_path))
@@ -926,8 +926,6 @@ where
             sender,
             stop_sender,
             sinks,
-            #[cfg(feature = "prometheus")]
-            metrics: None,
         }
     }
 
