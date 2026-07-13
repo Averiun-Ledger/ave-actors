@@ -1,4 +1,7 @@
-//! Test to investigate why FullPersistence doesn't recover state
+//! Regression test for FullPersistence state recovery.
+//!
+//! Guarantees that an actor recovers its accumulated state after a graceful
+//! stop followed by a restart.
 
 use async_trait::async_trait;
 use ave_actors_actor::{
@@ -15,11 +18,9 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
-// Shared manager for testing
 static SHARED_MANAGER_FULL_RECOVERY: OnceLock<Arc<TokioMutex<MemoryManager>>> =
     OnceLock::new();
 
-// State struct
 #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
 struct CounterActorState {
     count: i32,
@@ -138,40 +139,24 @@ async fn test_full_persistence_doesnt_recover_state() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    println!(
-        "\n╔════════════════════════════════════════════════════════════╗"
-    );
-    println!("║     FullPersistence State Recovery Investigation          ║");
-    println!(
-        "╚════════════════════════════════════════════════════════════╝\n"
-    );
-
-    // First lifecycle: persist multiple events
-    println!("🔷 FIRST LIFECYCLE: Persisting events");
     let actor_ref = system
         .create_root_actor("counter_actor", CounterActor::initial(()))
         .await
         .unwrap();
 
-    // Persist 3 events
-    for i in 1..=3 {
-        let response = actor_ref.ask(CounterMessage::Increment).await.unwrap();
-        println!("   Event {}: count = {}", i, response.count);
+    for _ in 1..=3 {
+        actor_ref.ask(CounterMessage::Increment).await.unwrap();
     }
 
     let final_count = actor_ref.ask(CounterMessage::GetCount).await.unwrap();
-    println!("   Final count before stop: {}", final_count.count);
     assert_eq!(
         final_count.count, 3,
         "Should have count=3 after 3 increments"
     );
 
-    println!("\n🛑 STOPPING ACTOR (should create snapshot)");
     actor_ref.ask_stop().await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    // Second lifecycle: should recover state
-    println!("\n🔷 SECOND LIFECYCLE: Recovering state");
     let actor_ref2 = system
         .create_root_actor("counter_actor", CounterActor::initial(()))
         .await
@@ -179,22 +164,6 @@ async fn test_full_persistence_doesnt_recover_state() {
 
     let recovered_count =
         actor_ref2.ask(CounterMessage::GetCount).await.unwrap();
-    println!("   Recovered count: {}", recovered_count.count);
-
-    println!("\n📊 RESULTS:");
-    if recovered_count.count == 0 {
-        println!("   ❌ BUG: State NOT recovered (count=0, expected 3)");
-        println!(
-            "   ❌ Actor started with initial state instead of recovering"
-        );
-    } else if recovered_count.count == 3 {
-        println!("   ✅ OK: State recovered correctly (count=3)");
-    } else {
-        println!(
-            "   ⚠️  UNEXPECTED: count={} (expected 3)",
-            recovered_count.count
-        );
-    }
 
     assert_eq!(
         recovered_count.count, 3,

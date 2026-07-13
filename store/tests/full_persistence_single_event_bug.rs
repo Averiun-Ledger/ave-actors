@@ -1,4 +1,8 @@
-//! Test specific scenario: brand new actor, ONE event, graceful stop, no recovery
+//! Regression tests for FullPersistence recovery of a single event.
+//!
+//! Guarantees that a brand-new actor that persists exactly one event and is
+//! then stopped gracefully recovers that event on restart, and that the
+//! store's event counter increments after the first persist.
 
 #[macro_use]
 mod helpers;
@@ -19,7 +23,6 @@ use tracing::info_span;
 
 static SHARED_MGR: OnceLock<Arc<TokioMutex<MemoryManager>>> = OnceLock::new();
 
-// State struct
 #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
 struct SingleEventActorState {
     data: String,
@@ -69,10 +72,6 @@ impl Actor for SingleEventActor {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        println!(
-            "  [PRE_START] Actor starting, current data: '{}'",
-            self.state_ptr.data
-        );
         let manager_ref = SHARED_MGR.get_or_init(|| {
             Arc::new(TokioMutex::new(MemoryManager::default()))
         });
@@ -92,18 +91,14 @@ impl Handler<Self> for SingleEventActor {
     ) -> Result<Resp, ActorError> {
         match msg {
             Msg::SetData(new_data) => {
-                println!("  [HANDLER] Setting data: '{}'", new_data);
                 self.persist(DataSet(new_data), ctx).await?;
                 Ok(Resp {
                     data: self.state_ptr.data.clone(),
                 })
             }
-            Msg::GetData => {
-                println!("  [HANDLER] Getting data: '{}'", self.state_ptr.data);
-                Ok(Resp {
-                    data: self.state_ptr.data.clone(),
-                })
-            }
+            Msg::GetData => Ok(Resp {
+                data: self.state_ptr.data.clone(),
+            }),
         }
     }
 }
@@ -115,7 +110,6 @@ impl PersistentActor for SingleEventActor {
     type State = SingleEventActorState;
 
     fn create_initial(_params: ()) -> Self {
-        println!("  [CREATE_INITIAL] Creating actor with empty data");
         Self {
             state_ptr: Arc::new(SingleEventActorState::default()),
         }
@@ -125,7 +119,6 @@ impl PersistentActor for SingleEventActor {
         state: Arc<Self::State>,
         event: &Self::Event,
     ) -> Result<Arc<Self::State>, ActorError> {
-        println!("  [APPLY] data: '{}' → '{}'", state.data, event.0);
         let mut new_state = state;
         Arc::make_mut(&mut new_state).data.clone_from(&event.0);
         Ok(new_state)
@@ -146,49 +139,26 @@ async fn test_single_event_no_recovery() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    println!("\n╔═══════════════════════════════════════════════════════════╗");
-    println!("║  Exact Scenario: New Actor, ONE Event, Stop, No Recovery ║");
-    println!("╚═══════════════════════════════════════════════════════════╝\n");
-
-    println!("🔷 LIFECYCLE 1: Brand new actor");
     let actor_ref = system
         .create_root_actor("my_actor", SingleEventActor::initial(()))
         .await
         .unwrap();
 
-    println!("\n📝 Persisting ONE event");
     let resp = actor_ref
         .ask(Msg::SetData("Hello World".to_string()))
         .await
         .unwrap();
-    println!("   Response data: '{}'", resp.data);
     assert_eq!(resp.data, "Hello World");
 
-    println!("\n🛑 Stopping actor gracefully");
     actor_ref.ask_stop().await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
 
-    println!("\n🔷 LIFECYCLE 2: Restart");
     let actor_ref2 = system
         .create_root_actor("my_actor", SingleEventActor::initial(()))
         .await
         .unwrap();
 
-    println!("\n📊 Getting data after restart");
     let resp = actor_ref2.ask(Msg::GetData).await.unwrap();
-    println!("   Recovered data: '{}'", resp.data);
-
-    if resp.data.is_empty() {
-        println!("\n❌ BUG CONFIRMED: Data is empty!");
-        println!("   Expected: 'Hello World'");
-        println!("   Got: ''");
-        println!("   State was NOT recovered even though:");
-        println!("   - We had 1 event");
-        println!("   - We stopped gracefully");
-        println!("   - No previous snapshot existed");
-    } else if resp.data == "Hello World" {
-        println!("\n✅ OK: Data recovered correctly");
-    }
 
     assert_eq!(
         resp.data, "Hello World",
@@ -206,14 +176,6 @@ async fn test_debug_event_counter_after_first_event() {
 
     let memory_manager = MemoryManager::default();
 
-    println!(
-        "\n╔════════════════════════════════════════════════════════════╗"
-    );
-    println!("║     Debug: Event Counter After Persisting First Event     ║");
-    println!(
-        "╚════════════════════════════════════════════════════════════╝\n"
-    );
-
     let store = store_new!(
         SingleEventActor,
         "test",
@@ -225,41 +187,23 @@ async fn test_debug_event_counter_after_first_event() {
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
-    println!("📝 Initial state");
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     if let StoreResponse::LastEventNumber(count) = result {
-        println!("   event_counter = {}", count);
         assert_eq!(count, 0);
     }
 
-    println!("\n📝 Persist ONE event");
     store_ref
         .ask(StoreCommand::Persist(Arc::new(DataSet("test".to_string()))))
         .await
         .unwrap();
 
-    println!("\n📝 Check event_counter");
+    // The counter must reflect the persisted event so that a later stop
+    // snapshots the pending state.
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     if let StoreResponse::LastEventNumber(count) = result {
-        println!("   event_counter = {}", count);
-        if count == 0 {
-            println!("   ❌ BUG: event_counter is still 0 after persisting!");
-            println!(
-                "   ❌ This means stop_store() condition (count > 0) will be FALSE"
-            );
-            println!("   ❌ No snapshot will be created!");
-        } else if count == 1 {
-            println!("   ✅ OK: event_counter incremented correctly");
-            println!("   ✅ stop_store() will create snapshot");
-        }
         assert_eq!(
             count, 1,
             "event_counter should be 1 after persisting 1 event"
         );
     }
-
-    println!("\n📝 What happens in stop_store():");
-    println!("   if event_counter > 0 {{ // {} > 0 ?", 1);
-    println!("       → YES, will create snapshot");
-    println!("   }}");
 }

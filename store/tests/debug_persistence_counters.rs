@@ -1,4 +1,8 @@
-//! Test to debug the state_counter and event_counter values during LightPersistence
+//! Regression test for `LightPersistence` counters.
+//!
+//! `LightPersistence` writes only a snapshot (no event log). This test pins
+//! the invariant that `event_counter == state_counter` after a light persist
+//! and that recovery restores the snapshot exactly once (no double apply).
 
 #[macro_use]
 mod helpers;
@@ -19,7 +23,6 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
-// State struct
 #[derive(
     Debug, Clone, Default, borsh::BorshSerialize, borsh::BorshDeserialize,
 )]
@@ -113,10 +116,8 @@ impl PersistentActor for DebugActor {
         state: Arc<Self::State>,
         event: &Self::Event,
     ) -> Result<Arc<Self::State>, ActorError> {
-        println!("  [DEBUG] Applying event with delta: {}", event.delta);
         let mut new_state = state;
         Arc::make_mut(&mut new_state).value += event.delta;
-        println!("  [DEBUG] State after apply: value={}", new_state.value);
         Ok(new_state)
     }
 
@@ -130,15 +131,13 @@ impl PersistentActor for DebugActor {
 }
 
 #[test(tokio::test)]
-
-async fn test_debug_light_persistence_counters() {
+async fn test_light_persistence_counters() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let memory_manager = MemoryManager::default();
 
-    // Create store
     let store = store_new!(
         DebugActor,
         "debug_test",
@@ -150,41 +149,31 @@ async fn test_debug_light_persistence_counters() {
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
-    println!("\n=== STEP 1: Check initial counters ===");
+    // A fresh store starts with no events.
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     match result {
-        StoreResponse::LastEventNumber(count) => {
-            println!("Initial event_counter: {}", count);
-            assert_eq!(count, 0, "Should start at 0");
-        }
+        StoreResponse::LastEventNumber(count) => assert_eq!(count, 0),
         _ => panic!("Expected LastEventNumber response"),
     }
 
-    println!("\n=== STEP 2: Persist first light snapshot ===");
+    // One light persist advances both counters together (snapshot only).
     let state = Arc::new(DebugActorState { value: 10 });
-
-    println!("Before persist: actor.value = {}", state.value);
     let result = store_ref
         .ask(StoreCommand::PersistLight(state))
         .await
         .unwrap();
     match result {
-        StoreResponse::Persisted => println!("Snapshot persisted successfully"),
+        StoreResponse::Persisted => {}
         _ => panic!("Expected Persisted response"),
     }
 
-    println!("\n=== STEP 3: Check counters after first persist ===");
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     match result {
-        StoreResponse::LastEventNumber(count) => {
-            println!("event_counter after first persist: {}", count);
-            println!("Expected: 1 (one event at position 0)");
-            println!("Actual: {}", count);
-        }
+        StoreResponse::LastEventNumber(count) => assert_eq!(count, 1),
         _ => panic!("Expected LastEventNumber response"),
     }
 
-    println!("\n=== STEP 4: Recover state ===");
+    // Recovery must restore the snapshot exactly once (no double apply).
     drop(store_ref);
 
     let store2 = store_new!(
@@ -200,28 +189,14 @@ async fn test_debug_light_persistence_counters() {
 
     let result = store_ref2.ask(StoreCommand::Recover).await.unwrap();
     match result {
-        StoreResponse::State(Some(state)) => {
-            println!("Recovered state: value = {}", state.value);
-            println!("Expected: 10 (event was applied once)");
-            println!("Actual: {}", state.value);
-
-            if state.value == 20 {
-                println!(
-                    "BUG CONFIRMED: Event was applied TWICE (10 + 10 = 20)"
-                );
-            } else if state.value == 10 {
-                println!("OK: Event was applied only once");
-            }
-        }
+        StoreResponse::State(Some(state)) => assert_eq!(state.value, 10),
         _ => panic!("Expected State response with Some"),
     }
 
-    println!("\n=== STEP 5: Check final counters ===");
+    // After recovery the counter reflects the persisted snapshot, not zero.
     let result = store_ref2.ask(StoreCommand::LastEventNumber).await.unwrap();
     match result {
-        StoreResponse::LastEventNumber(count) => {
-            println!("event_counter after recovery: {}", count);
-        }
+        StoreResponse::LastEventNumber(count) => assert_eq!(count, 1),
         _ => panic!("Expected LastEventNumber response"),
     }
 }

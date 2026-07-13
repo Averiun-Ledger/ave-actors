@@ -671,3 +671,52 @@ async fn test_one_subscriber_fails_others_ok() {
     // The failing subscriber never stores anything (it errors immediately).
     assert!(failing_sub.drain().await.is_empty());
 }
+
+#[test(tokio::test)]
+async fn test_register_sink_with_buffer_delivers_events() {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    let actor_ref = system
+        .create_root_actor("buffered_emitter", EmitterActor)
+        .await
+        .unwrap();
+
+    let subscriber = CollectingSubscriber::new();
+    let mut sink = actor_ref
+        .register_sink_with_buffer("buffered_sink", None, 8)
+        .expect("valid sink");
+    sink.add("sub1", subscriber.clone());
+
+    actor_ref.tell(TestMsg::Emit(7)).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let evts = subscriber.drain().await;
+            if !evts.is_empty() {
+                assert_eq!(evts[0].id, 7);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("subscriber should receive event");
+}
+
+#[test(tokio::test)]
+async fn test_register_sink_with_buffer_rejects_zero_capacity() {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    let actor_ref = system
+        .create_root_actor("buffered_emitter_zero", EmitterActor)
+        .await
+        .unwrap();
+
+    // A zero-capacity buffer is an invalid configuration.
+    let result = actor_ref.register_sink_with_buffer("bad_sink", None, 0);
+    assert!(matches!(result, Err(Error::InvalidConfiguration { .. })));
+}

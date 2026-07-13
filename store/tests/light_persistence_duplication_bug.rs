@@ -1,16 +1,8 @@
-//! Test that demonstrates the duplication bug in Light persistence mode.
+//! Regression test for the LightPersistence duplication bug.
 //!
-//! When an actor with Light persistence receives an event:
-//! 1. The event is applied to the actor's state
-//! 2. Both the event AND the modified state are persisted
-//!
-//! When the actor is stopped and restarted:
-//! 1. The state snapshot is loaded (which already has the event applied)
-//! 2. The event is replayed and applied AGAIN
-//! 3. This causes duplication
-//!
-//! Expected: vector [3]
-//! Actual: vector [3, 3] after restart
+//! LightPersistence persists both the event and the resulting state. On
+//! recovery the snapshot must not have its events replayed a second time,
+//! which previously caused duplicated entries after a restart.
 
 use async_trait::async_trait;
 use ave_actors_actor::{
@@ -162,7 +154,6 @@ async fn test_light_persistence_duplicates_data_on_restart() {
     // Add number 3
     let response = actor_ref.ask(VectorMessage::Add(3)).await.unwrap();
 
-    println!("After adding 3: {:?}", response.numbers);
     assert_eq!(response.numbers, vec![3], "Should have [3] after adding 3");
 
     // Stop the actor (this will trigger snapshot in pre_stop)
@@ -179,15 +170,7 @@ async fn test_light_persistence_duplicates_data_on_restart() {
     // Get the numbers after restart
     let response = actor_ref2.ask(VectorMessage::Get).await.unwrap();
 
-    println!("After restart: {:?}", response.numbers);
-
-    // THIS IS THE BUG: The number 3 appears twice!
-    // Expected: [3]
-    // Actual: [3, 3]
-    //
-    // Why? Because:
-    // 1. When we persisted with LightPersistence, we saved BOTH the event AND the state (which already had 3 applied)
-    // 2. On recovery, we load the state (with 3) and then replay the event (adding 3 again)
+    // The event must not be replayed onto the already-applied snapshot.
     assert_eq!(
         response.numbers,
         vec![3],

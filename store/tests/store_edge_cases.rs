@@ -573,17 +573,18 @@ async fn test_light_persistence() {
     actor_ref.ask_stop().await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-    // Create new actor with different name - light persistence may not automatically recover
+    // A second actor with a different name uses a different persistence
+    // prefix (derived from its path), so it must not see the first actor's
+    // state. LightPersistence does recover by prefix; the fresh start here
+    // comes from the distinct prefix, not from the persistence strategy.
     let actor_ref2 = system
         .create_root_actor("light2", LightActor::initial(()))
         .await
         .unwrap();
 
-    // For light persistence, we don't expect automatic recovery of state
-    // Light persistence only keeps the last state, but doesn't automatically restore it
     let response = actor_ref2.ask(EncryptedMessage::GetState).await.unwrap();
     if let EncryptedResponse::State { counter, .. } = response {
-        // New actor starts fresh with light persistence
+        // Distinct prefix -> no prior snapshot -> initial state (counter 0).
         assert_eq!(counter, 0);
     } else {
         panic!("Expected State response");
@@ -692,6 +693,17 @@ async fn test_store_commands_coverage() {
     match result {
         StoreResponse::LastEventNumber(num) => assert_eq!(num, 0),
         _ => panic!("Expected LastEventNumber response"),
+    }
+
+    // LastEventsFrom on an empty store must return an empty list, not a
+    // gap error (consistent with GetEvents).
+    let result = store_ref
+        .ask(StoreCommand::LastEventsFrom(0))
+        .await
+        .unwrap();
+    match result {
+        StoreResponse::Events(events) => assert!(events.is_empty()),
+        _ => panic!("Expected empty Events for empty store"),
     }
 
     // Add some events first

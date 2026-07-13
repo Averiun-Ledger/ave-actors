@@ -4,11 +4,11 @@ version = "0.13.0"
 edition = "2024"
 rust-version = "1.90.0"
 authors = ["Averiun Ledger, SL <info@averiun.com>"]
-description = "Ave actor model"
+description.workspace = true
 readme.workspace = true
 homepage = "https://averiun.com"
 license = "Apache-2.0"
-keywords = ["traceability", "actor-system", "Averiun", "sustainability"]
+keywords.workspace = true
 repository = "https://github.com/Averiun-Ledger/ave-actors"
 
 [dependencies]
@@ -57,11 +57,11 @@ resolver = "2"
 edition = "2024"
 rust-version = "1.90.0"
 authors = ["Averiun Ledger, SL <info@averiun.com>"]
-description = "Ave actor model"
+description = "Async actor framework on Tokio with supervision and event-sourced persistence"
 readme = "README.md"
 homepage = "https://averiun.com"
 license = "Apache-2.0"
-keywords = ["traceability", "actor-system", "Averiun", "sustainability"]
+keywords = ["actor-model", "tokio", "event-sourcing", "persistence", "supervision"]
 repository = "https://github.com/Averiun-Ledger/ave-actors"
 
 [workspace.dependencies]

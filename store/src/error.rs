@@ -41,8 +41,11 @@ pub enum StoreOperation {
     ListCf,
     ColumnAccess,
     RocksdbOperation,
+    /// Failure creating a collection (event log) handle in a backend.
     CreateCollection,
+    /// Failure creating a state (snapshot) handle in a backend.
     CreateState,
+    /// Diagnostic discriminator used only by tests.
     Test,
 }
 

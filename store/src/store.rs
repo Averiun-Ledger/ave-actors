@@ -203,7 +203,11 @@ where
 
     /// Applies `event` to the in-memory state and durably persists it.
     ///
-    /// On failure the in-memory state is rolled back to its pre-call value.
+    /// The in-memory state is only replaced after the event has been durably
+    /// persisted. [`apply`](PersistentActor::apply) is a pure function that
+    /// returns the next state and never mutates the actor, so on any failure
+    /// (encoding, persistence, or an unexpected store response) the current
+    /// state is left untouched.
     async fn persist(
         &mut self,
         event: Self::Event,
@@ -211,48 +215,25 @@ where
     ) -> Result<(), ActorError> {
         let store = ctx.get_child::<Store<Self>>("store").await?;
 
-        let prev_state = self.state();
-        let new_state = match Self::apply(Arc::clone(&prev_state), &event) {
-            Ok(s) => s,
-            Err(e) => {
-                self.set_state(prev_state);
-                return Err(e);
-            }
-        };
+        let new_state = Self::apply(self.state(), &event)?;
 
         let response = match Self::Persistence::get_persistence() {
             PersistenceType::Light => {
                 let state = Arc::clone(&new_state);
-                match store.ask(StoreCommand::PersistLight(state)).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        self.set_state(prev_state);
-                        return Err(actor_store_error(
-                            StoreOperation::PersistLight,
-                            e,
-                        ));
-                    }
-                }
+                store.ask(StoreCommand::PersistLight(state)).await.map_err(
+                    |e| actor_store_error(StoreOperation::PersistLight, e),
+                )?
             }
-            PersistenceType::Full => {
-                match store
-                    .ask(StoreCommand::PersistFull {
-                        event: Arc::new(event),
-                        state: Arc::clone(&new_state),
-                        snapshot_every: Self::snapshot_every(),
-                    })
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        self.set_state(prev_state);
-                        return Err(actor_store_error(
-                            StoreOperation::PersistFull,
-                            e,
-                        ));
-                    }
-                }
-            }
+            PersistenceType::Full => store
+                .ask(StoreCommand::PersistFull {
+                    event: Arc::new(event),
+                    state: Arc::clone(&new_state),
+                    snapshot_every: Self::snapshot_every(),
+                })
+                .await
+                .map_err(|e| {
+                    actor_store_error(StoreOperation::PersistFull, e)
+                })?,
         };
 
         match response {
@@ -260,16 +241,10 @@ where
                 self.set_state(new_state);
                 Ok(())
             }
-            _ => {
-                self.set_state(prev_state);
-                Err(ActorError::UnexpectedResponse {
-                    path: ActorPath::from(format!(
-                        "{}/store",
-                        ctx.path().key()
-                    )),
-                    expected: "StoreResponse::Persisted".to_owned(),
-                })
-            }
+            _ => Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from(format!("{}/store", ctx.path().key())),
+                expected: "StoreResponse::Persisted".to_owned(),
+            }),
         }
     }
 
@@ -1458,7 +1433,10 @@ where
                 #[cfg(feature = "prometheus")]
                 let start = Instant::now();
                 let to = self.event_counter.saturating_sub(1);
-                let result = self.events(from, to);
+                // query_events (not events) so that an empty or event-less
+                // store yields an empty list instead of a gap error,
+                // consistent with GetEvents.
+                let result = self.query_events(from, to);
                 #[cfg(feature = "prometheus")]
                 self.record_command_metrics(
                     start,

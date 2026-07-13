@@ -302,6 +302,16 @@ async fn test_light_persistence_store_command_has_no_events() {
         matches!(response, StoreResponse::Events(events) if events.is_empty())
     );
 
+    // LastEventsFrom must also return an empty list on an event-less
+    // store, not a gap error.
+    let response = store_ref
+        .ask(StoreCommand::LastEventsFrom(0))
+        .await
+        .unwrap();
+    assert!(
+        matches!(response, StoreResponse::Events(events) if events.is_empty())
+    );
+
     let response = store_ref.ask(StoreCommand::Recover).await.unwrap();
     assert!(matches!(
         response,

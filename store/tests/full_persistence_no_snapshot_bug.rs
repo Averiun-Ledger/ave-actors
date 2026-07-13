@@ -1,4 +1,9 @@
-//! Test to investigate recovery when there's no snapshot but there ARE events
+//! Regression tests for FullPersistence recovery when events exist but no
+//! snapshot was ever created.
+//!
+//! Guarantees that recover() falls back to replaying every event from index 0
+//! (`recover_from_initial_events`), rebuilding the full state and restoring
+//! the event counter, instead of starting from the initial state.
 
 #[macro_use]
 mod helpers;
@@ -18,7 +23,6 @@ use test_log::test;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
-// State struct
 #[derive(
     Debug, Clone, Default, borsh::BorshSerialize, borsh::BorshDeserialize,
 )]
@@ -119,16 +123,6 @@ async fn test_full_persistence_recovery_without_snapshot() {
 
     let memory_manager = MemoryManager::default();
 
-    println!(
-        "\n╔════════════════════════════════════════════════════════════╗"
-    );
-    println!("║  FullPersistence Recovery WITHOUT Snapshot Investigation  ║");
-    println!(
-        "╚════════════════════════════════════════════════════════════╝\n"
-    );
-
-    // Create store and persist events WITHOUT creating a snapshot
-    println!("🔷 STEP 1: Persist events WITHOUT snapshot");
     let store = store_new!(
         TestActor,
         "test",
@@ -140,29 +134,21 @@ async fn test_full_persistence_recovery_without_snapshot() {
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
-    // Persist 3 events directly (bypassing the actor's persist which would create snapshots on stop)
     for i in 1..=3 {
         let event = TestEvent { delta: i };
-        println!("   Persisting event {}", i);
         store_ref
             .ask(StoreCommand::Persist(Arc::new(event)))
             .await
             .unwrap();
     }
 
-    // Check event count
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     if let StoreResponse::LastEventNumber(count) = result {
-        println!("   Total events persisted: {}", count);
         assert_eq!(count, 3);
     }
 
-    // DON'T create snapshot - just drop the store
-    println!("\n🛑 DROPPING STORE without snapshot");
     drop(store_ref);
 
-    // Try to recover
-    println!("\n🔷 STEP 2: Attempting recovery");
     let store2 = store_new!(
         TestActor,
         "test",
@@ -176,31 +162,15 @@ async fn test_full_persistence_recovery_without_snapshot() {
 
     let result = store_ref2.ask(StoreCommand::Recover).await.unwrap();
 
-    println!("\n📊 RECOVERY RESULT:");
     match result {
         StoreResponse::State(Some(state)) => {
-            println!("   ✅ State recovered: value = {}", state.value);
-            println!("   Expected: value = 6 (1+2+3)");
-
-            if state.value == 6 {
-                println!("   ✅ OK: All events were replayed correctly");
-            } else if state.value == 0 {
-                println!("   ❌ BUG: No events were replayed (started fresh)");
-            } else {
-                println!("   ⚠️  UNEXPECTED: value = {}", state.value);
-            }
-
+            // All three events are replayed: 1 + 2 + 3 = 6.
             assert_eq!(
                 state.value, 6,
                 "Should have replayed all 3 events (1+2+3=6)"
             );
         }
         StoreResponse::State(None) => {
-            println!("   ❌ BUG: No state recovered (returned None)");
-            println!(
-                "   ❌ This means the actor will start fresh with initial state"
-            );
-            println!("   ❌ Even though there are 3 events in the database!");
             panic!(
                 "BUG: recover() returned None when there are events in the DB"
             );
@@ -210,22 +180,13 @@ async fn test_full_persistence_recovery_without_snapshot() {
 }
 
 #[test(tokio::test)]
-async fn test_full_persistence_recovery_logic_investigation() {
+async fn test_recover_without_snapshot_replays_all_events() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let memory_manager = MemoryManager::default();
 
-    println!(
-        "\n╔════════════════════════════════════════════════════════════╗"
-    );
-    println!("║     Detailed Investigation of Recovery Logic              ║");
-    println!(
-        "╚════════════════════════════════════════════════════════════╝\n"
-    );
-
-    // Create store and persist events
     let store = store_new!(
         TestActor,
         "test",
@@ -237,8 +198,7 @@ async fn test_full_persistence_recovery_logic_investigation() {
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
-    println!("📝 Scenario: Events exist, but NO snapshot");
-    println!("   Persisting 2 events...");
+    // Persist two events (5 and 7) without ever creating a snapshot.
     store_ref
         .ask(StoreCommand::Persist(Arc::new(TestEvent { delta: 5 })))
         .await
@@ -250,30 +210,6 @@ async fn test_full_persistence_recovery_logic_investigation() {
 
     drop(store_ref);
 
-    println!("\n🔄 Recovery process analysis:");
-    println!("   1. recover() is called");
-    println!("   2. Checks: if let Some((state, counter)) = self.get_state()?");
-    println!("      → get_state() returns None (no snapshot exists)");
-    println!("   3. Goes to else branch (line 779-782)");
-    println!("   4. Returns: Ok(None)");
-    println!("   5. ❌ Result: Actor starts with initial state");
-    println!("   6. ❌ Events in DB are IGNORED!");
-
-    println!("\n🐛 THE PROBLEM:");
-    println!("   recover() only replays events if there's a snapshot.");
-    println!("   If there's NO snapshot but there ARE events:");
-    println!("   → It returns None");
-    println!("   → Actor starts fresh");
-    println!("   → Data loss!");
-
-    println!("\n💡 WHEN THIS HAPPENS:");
-    println!("   - FullPersistence actor persists events");
-    println!("   - Actor crashes BEFORE calling stop_store()");
-    println!("   - No snapshot was created (only happens on stop)");
-    println!("   - On restart: events exist but no snapshot");
-    println!("   - Result: Actor loses all state");
-
-    // Verify
     let store2 = store_new!(
         TestActor,
         "test",
@@ -285,15 +221,25 @@ async fn test_full_persistence_recovery_logic_investigation() {
     .unwrap();
     let store_ref2 = system.create_root_actor("store2", store2).await.unwrap();
 
+    // With no snapshot, recover() replays both events from index 0 onto the
+    // initial state, yielding 5 + 7 = 12.
     let result = store_ref2.ask(StoreCommand::Recover).await.unwrap();
+    match result {
+        StoreResponse::State(Some(state)) => {
+            assert_eq!(
+                state.value, 12,
+                "Should have replayed both events (5+7=12)"
+            );
+        }
+        StoreResponse::State(None) => {
+            panic!("recover() must replay events when no snapshot exists");
+        }
+        _ => panic!("Unexpected response type"),
+    }
 
-    if matches!(result, StoreResponse::State(None)) {
-        println!(
-            "\n❌ CONFIRMED: recover() returned None even though events exist"
-        );
-    } else {
-        println!(
-            "\n⚠️  Unexpected: recover() returned Some (maybe the logic changed?)"
-        );
+    // Two events were persisted, so the counter must be restored to 2.
+    let result = store_ref2.ask(StoreCommand::LastEventNumber).await.unwrap();
+    if let StoreResponse::LastEventNumber(count) = result {
+        assert_eq!(count, 2);
     }
 }

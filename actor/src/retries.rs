@@ -72,9 +72,12 @@ where
     started: bool,
     is_end: bool,
     completion_pending: bool,
-    completion_notified: bool,
+    finish_started: bool,
     on_finished: Option<Box<dyn CompletionNotifier<T>>>,
+    /// Timer key for the next scheduled retry attempt.
     pending_retry: Option<crate::TimerKey>,
+    /// Timer key for the scheduled completion (stop) marker.
+    completion_timer: Option<crate::TimerKey>,
 }
 
 impl<T> RetryActor<T>
@@ -95,9 +98,10 @@ where
             started: false,
             is_end: false,
             completion_pending: false,
-            completion_notified: false,
+            finish_started: false,
             on_finished: None,
             pending_retry: None,
+            completion_timer: None,
         }
     }
 
@@ -124,12 +128,13 @@ where
             started: false,
             is_end: false,
             completion_pending: false,
-            completion_notified: false,
+            finish_started: false,
             on_finished: Some(Box::new(ParentMessageNotifier::<T, P> {
                 message: completion_message,
                 _phantom: PhantomData,
             })),
             pending_retry: None,
+            completion_timer: None,
         }
     }
 
@@ -141,8 +146,8 @@ where
         if let Some(key) = self.pending_retry.take() {
             ctx.cancel_timer(key);
         }
-        if !self.completion_notified {
-            self.completion_notified = true;
+        if !self.finish_started {
+            self.finish_started = true;
         } else {
             ctx.stop(None).await;
             return Ok(());
@@ -165,7 +170,7 @@ where
             std::time::Duration::from_millis(1),
             RetryMessage::Complete,
         )?;
-        self.pending_retry = Some(key);
+        self.completion_timer = Some(key);
         Ok(())
     }
 
@@ -273,6 +278,9 @@ where
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         if let Some(key) = self.pending_retry.take() {
+            ctx.cancel_timer(key);
+        }
+        if let Some(key) = self.completion_timer.take() {
             ctx.cancel_timer(key);
         }
         Ok(())

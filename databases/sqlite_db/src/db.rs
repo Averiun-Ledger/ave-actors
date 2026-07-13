@@ -50,6 +50,12 @@ pub struct SqliteManager {
 ///
 /// Creation is also bounded: if `max_size` connections already exist (idle or
 /// checked-out), `checkout` blocks until a connection is returned.
+///
+/// The blocking is synchronous (`Mutex` + `Condvar`): when the pool is
+/// exhausted a caller parks the current thread instead of yielding, so on an
+/// async runtime it can hold a worker thread. `max_size` is sized from the
+/// host to keep this bounded; checkout scopes must stay short so connections
+/// return promptly and the runtime is not stalled.
 struct SqlitePool {
     path: PathBuf,
     durability: bool,
@@ -66,8 +72,8 @@ struct PoolState {
 
 /// A connection checked out from the pool.
 ///
-/// On drop the connection is returned to the pool (or discarded if the pool
-/// already has `max_size` idle connections).
+/// On drop the connection is returned to the pool's idle set (see
+/// `SqlitePool::checkin` for the defensive discard fallback).
 struct PooledConnection {
     conn: std::mem::ManuallyDrop<Connection>,
     pool: Arc<SqlitePool>,
@@ -161,8 +167,12 @@ impl SqlitePool {
         })
     }
 
-    /// Returns a connection to the idle set, discarding it if the pool is
-    /// already at capacity.
+    /// Returns a connection to the idle set.
+    ///
+    /// The discard branch is defensive: it is unreachable while `max_size`
+    /// is immutable and every `checkin` pairs a `checkout`, since then
+    /// `available.len() <= total - 1 < max_size`. It keeps this `Drop`
+    /// path — which cannot panic — safe against future invariant breaks.
     fn checkin(&self, conn: Connection) -> Result<(), Error> {
         let mut state = self.state.lock().map_err(|poison| Error::Store {
             source: None,
@@ -1279,5 +1289,55 @@ mod tests {
 
         let result = open_with_tuning(&db_path, false, tuning_for_ram(1024));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pool_saturation_backpressure() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let db_path = PathBuf::from(create_temp_dir()).join("database.db");
+        let pool = Arc::new(SqlitePool {
+            path: db_path,
+            durability: false,
+            tuning: tuning_for_ram(1024),
+            max_size: 1,
+            state: Mutex::new(PoolState {
+                available: Vec::new(),
+                total: 0,
+            }),
+            condvar: Condvar::new(),
+        });
+
+        // Occupy the single connection slot.
+        let conn1 = pool.checkout().unwrap();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let pool2 = Arc::clone(&pool);
+        let handle = std::thread::spawn(move || {
+            let _ = started_tx.send(());
+            // This must block until `conn1` is returned to the pool.
+            let conn2 = pool2.checkout().unwrap();
+            drop(conn2);
+            let _ = done_tx.send(());
+        });
+
+        // Wait until the worker thread is about to block on `checkout`.
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker thread did not start");
+        // While `conn1` is checked out, the second checkout cannot complete.
+        assert!(
+            done_rx.try_recv().is_err(),
+            "second checkout completed while the only connection was in use"
+        );
+
+        // Returning the connection must unblock the waiting checkout.
+        drop(conn1);
+        done_rx.recv_timeout(Duration::from_secs(5)).expect(
+            "second checkout was not unblocked after returning the connection",
+        );
+        handle.join().unwrap();
     }
 }

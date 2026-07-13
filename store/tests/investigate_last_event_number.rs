@@ -1,4 +1,7 @@
-//! Investigate if LastEventNumber might be returning 0 incorrectly
+//! Regression tests for `StoreCommand::LastEventNumber`.
+//!
+//! Guarantees that the store's event counter starts at 0, increments on each
+//! persist, is left unchanged by snapshots, and is restored on recovery.
 
 #[macro_use]
 mod helpers;
@@ -19,7 +22,6 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
-// State struct
 #[derive(
     Debug, Clone, Default, borsh::BorshSerialize, borsh::BorshDeserialize,
 )]
@@ -118,14 +120,6 @@ async fn test_last_event_number_after_persist() {
 
     let memory_manager = MemoryManager::default();
 
-    println!(
-        "\n╔════════════════════════════════════════════════════════════╗"
-    );
-    println!("║  Investigation: LastEventNumber Behavior                  ║");
-    println!(
-        "╚════════════════════════════════════════════════════════════╝\n"
-    );
-
     let store = store_new!(
         TestActor,
         "test",
@@ -137,14 +131,11 @@ async fn test_last_event_number_after_persist() {
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
-    println!("📊 STEP 1: Initial state");
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     if let StoreResponse::LastEventNumber(count) = result {
-        println!("   LastEventNumber = {}", count);
         assert_eq!(count, 0);
     }
 
-    println!("\n📊 STEP 2: After persisting 1 event");
     store_ref
         .ask(StoreCommand::Persist(Arc::new(TestEvent(10))))
         .await
@@ -152,20 +143,9 @@ async fn test_last_event_number_after_persist() {
 
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     if let StoreResponse::LastEventNumber(count) = result {
-        println!("   LastEventNumber = {}", count);
-        println!("   Expected: 1");
-
-        if count == 0 {
-            println!("   ❌ PROBLEM: Still 0!");
-            println!("   ❌ This would cause stop_store() to skip snapshot!");
-        } else {
-            println!("   ✅ Correct");
-        }
-
         assert_eq!(count, 1);
     }
 
-    println!("\n📊 STEP 3: After persisting 2nd event");
     store_ref
         .ask(StoreCommand::Persist(Arc::new(TestEvent(20))))
         .await
@@ -173,24 +153,18 @@ async fn test_last_event_number_after_persist() {
 
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     if let StoreResponse::LastEventNumber(count) = result {
-        println!("   LastEventNumber = {}", count);
         assert_eq!(count, 2);
     }
 
-    println!("\n📊 STEP 4: After creating snapshot");
+    // A snapshot must not change the event count.
     let state = Arc::new(TestActorState { value: 30 });
     store_ref.ask(StoreCommand::Snapshot(state)).await.unwrap();
 
     let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
     if let StoreResponse::LastEventNumber(count) = result {
-        println!("   LastEventNumber = {}", count);
-        println!(
-            "   (Should still be 2 - snapshot doesn't change event count)"
-        );
         assert_eq!(count, 2);
     }
 
-    println!("\n📊 STEP 5: After recovery");
     drop(store_ref);
 
     let store2 = store_new!(
@@ -206,20 +180,9 @@ async fn test_last_event_number_after_persist() {
 
     store_ref2.ask(StoreCommand::Recover).await.unwrap();
 
+    // The counter is restored from the persisted events.
     let result = store_ref2.ask(StoreCommand::LastEventNumber).await.unwrap();
     if let StoreResponse::LastEventNumber(count) = result {
-        println!("   LastEventNumber = {}", count);
-        println!("   Expected: 2 (recovered from DB)");
-
-        if count == 0 {
-            println!("   ❌ PROBLEM: Reset to 0 after recovery!");
-        } else {
-            println!("   ✅ Correct");
-        }
-
         assert_eq!(count, 2);
     }
-
-    println!("\n💡 CONCLUSION:");
-    println!("   LastEventNumber works correctly in all scenarios tested");
 }

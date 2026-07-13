@@ -1,4 +1,7 @@
-//! Test to investigate if Full persistence also has the duplication bug.
+//! Regression test for FullPersistence state duplication on restart.
+//!
+//! Guarantees that a FullPersistence actor does not re-apply already-applied
+//! events when recovering from a snapshot after a restart.
 
 use async_trait::async_trait;
 use ave_actors_actor::{
@@ -147,7 +150,6 @@ async fn test_full_persistence_duplication_on_restart() {
     // Add number 5
     let response = actor_ref.ask(VectorMessageFull::Add(5)).await.unwrap();
 
-    println!("After adding 5: {:?}", response.numbers);
     assert_eq!(response.numbers, vec![5], "Should have [5] after adding 5");
 
     // Stop the actor (FullPersistence will create snapshot on stop if there are events)
@@ -162,9 +164,6 @@ async fn test_full_persistence_duplication_on_restart() {
 
     let response = actor_ref2.ask(VectorMessageFull::Get).await.unwrap();
 
-    println!("After restart (FullPersistence): {:?}", response.numbers);
-
-    // Check if FullPersistence has the same bug
     assert_eq!(
         response.numbers,
         vec![5],
