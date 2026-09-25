@@ -148,13 +148,13 @@ async fn test_event_counter_starts_at_zero() {
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
-    // Check that LastEventNumber returns 0 for empty store
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
+    // Check that NextEventNumber returns 0 for empty store
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
     match result {
-        StoreResponse::LastEventNumber(count) => {
+        StoreResponse::NextEventNumber(count) => {
             assert_eq!(count, 0, "Empty store should have event_counter = 0")
         }
-        _ => panic!("Expected LastEventNumber response"),
+        _ => panic!("Expected NextEventNumber response"),
     }
 }
 
@@ -185,15 +185,15 @@ async fn test_event_counter_after_first_event() {
         .unwrap();
 
     // Check event_counter = 1
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
     match result {
-        StoreResponse::LastEventNumber(count) => {
+        StoreResponse::NextEventNumber(count) => {
             assert_eq!(
                 count, 1,
                 "After first event, event_counter should be 1"
             );
         }
-        _ => panic!("Expected LastEventNumber response"),
+        _ => panic!("Expected NextEventNumber response"),
     }
 
     // Verify the event is at position 0
@@ -243,12 +243,12 @@ async fn test_event_counter_multiple_events() {
     }
 
     // Check event_counter = 5
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
     match result {
-        StoreResponse::LastEventNumber(count) => {
+        StoreResponse::NextEventNumber(count) => {
             assert_eq!(count, 5, "After 5 events, event_counter should be 5");
         }
-        _ => panic!("Expected LastEventNumber response"),
+        _ => panic!("Expected NextEventNumber response"),
     }
 
     // Verify all events are at positions 0-4
@@ -539,15 +539,15 @@ async fn test_snapshot_at_zero() {
     store_ref.ask(StoreCommand::Snapshot(state)).await.unwrap();
 
     // Verify event_counter is still 0
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
     match result {
-        StoreResponse::LastEventNumber(count) => {
+        StoreResponse::NextEventNumber(count) => {
             assert_eq!(
                 count, 0,
                 "event_counter should remain 0 after snapshot"
             );
         }
-        _ => panic!("Expected LastEventNumber response"),
+        _ => panic!("Expected NextEventNumber response"),
     }
 
     // Recovery should work
@@ -760,15 +760,15 @@ async fn test_event_counter_with_encryption() {
     }
 
     // Verify event_counter = 3
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
     match result {
-        StoreResponse::LastEventNumber(count) => {
+        StoreResponse::NextEventNumber(count) => {
             assert_eq!(
                 count, 3,
                 "Encrypted store should have event_counter = 3"
             );
         }
-        _ => panic!("Expected LastEventNumber response"),
+        _ => panic!("Expected NextEventNumber response"),
     }
 
     // Verify events can be retrieved and decrypted

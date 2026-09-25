@@ -1,7 +1,7 @@
 //! In-memory [`DbManager`] backend, intended for tests and ephemeral usage.
 
 use crate::{
-    database::{Collection, DbManager, State},
+    database::{BatchOp, BatchWrite, Collection, DbManager, State},
     error::{Error, StoreOperation},
 };
 
@@ -68,6 +68,86 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
         prefix: &str,
     ) -> Result<MemoryStore, Error> {
         self.get_or_create_store(name, prefix)
+    }
+
+    fn batch_writer(&self) -> Option<Box<dyn BatchWrite>> {
+        Some(Box::new(MemoryBatchWriter {
+            manager: self.clone(),
+        }))
+    }
+}
+
+/// Atomic multi-write handle over [`MemoryManager`]'s shared map.
+///
+/// All ops apply while holding every affected inner store's write lock
+/// (acquired in deterministic order), so concurrent handle writers block
+/// until the whole batch is applied: all-or-nothing.
+#[derive(Clone)]
+struct MemoryBatchWriter {
+    manager: MemoryManager,
+}
+
+impl BatchWrite for MemoryBatchWriter {
+    fn write_batch(
+        &self,
+        prefix: &str,
+        ops: &[BatchOp<'_>],
+    ) -> Result<(), Error> {
+        // Unique (name, prefix) stores touched, in deterministic lock order.
+        let mut stores: Vec<(String, String)> = ops
+            .iter()
+            .map(|op| match op {
+                BatchOp::PutEvent { collection, .. } => {
+                    ((*collection).to_owned(), prefix.to_owned())
+                }
+                BatchOp::PutState { store, .. } => {
+                    ((*store).to_owned(), prefix.to_owned())
+                }
+            })
+            .collect();
+        stores.sort();
+        stores.dedup();
+
+        // Owned handles keep the inner maps alive while locked; lock in
+        // deterministic order so concurrent batches cannot deadlock.
+        let mut owned = Vec::with_capacity(stores.len());
+        for (name, store_prefix) in &stores {
+            owned.push(self.manager.get_or_create_store(name, store_prefix)?);
+        }
+        let mut guards = Vec::with_capacity(owned.len());
+        for store in &owned {
+            guards.push(store.data.write().map_err(|e| Error::Store {
+                source: None,
+                operation: StoreOperation::LockData,
+                reason: e.to_string(),
+            })?);
+        }
+
+        // Apply with all locks held; no persistent failure mode remains.
+        for op in ops {
+            match op {
+                BatchOp::PutEvent {
+                    collection,
+                    key,
+                    data,
+                } => {
+                    let pos = stores
+                        .iter()
+                        .position(|(name, _)| name == collection)
+                        .expect("batch store collected from ops");
+                    guards[pos]
+                        .insert(format!("{prefix}.{key}"), (*data).to_vec());
+                }
+                BatchOp::PutState { store, data } => {
+                    let pos = stores
+                        .iter()
+                        .position(|(name, _)| name == store)
+                        .expect("batch store collected from ops");
+                    guards[pos].insert(prefix.to_owned(), (*data).to_vec());
+                }
+            }
+        }
+        Ok(())
     }
 }
 

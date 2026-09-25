@@ -688,11 +688,11 @@ async fn test_store_commands_coverage() {
         _ => panic!("Expected None for last event"),
     }
 
-    // LastEventNumber
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
+    // NextEventNumber
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
     match result {
-        StoreResponse::LastEventNumber(num) => assert_eq!(num, 0),
-        _ => panic!("Expected LastEventNumber response"),
+        StoreResponse::NextEventNumber(num) => assert_eq!(num, 0),
+        _ => panic!("Expected NextEventNumber response"),
     }
 
     // LastEventsFrom on an empty store must return an empty list, not a

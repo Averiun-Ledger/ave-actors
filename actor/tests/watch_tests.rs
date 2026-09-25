@@ -350,7 +350,7 @@ async fn test_watch_is_idempotent() -> Result<(), Error> {
 }
 
 #[test(tokio::test)]
-async fn test_watch_already_stopped_target_fails() -> Result<(), Error> {
+async fn test_watch_already_stopped_target_notifies() -> Result<(), Error> {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     let runner_handle = tokio::spawn(async move { runner.run().await });
@@ -358,6 +358,7 @@ async fn test_watch_already_stopped_target_fails() -> Result<(), Error> {
     let target = TargetActor {
         stopped: Arc::new(Mutex::new(false)),
     };
+    let target_path = ActorPath::from("/user/target");
     let target_ref = system.create_root_actor("target", target).await?;
     target_ref.ask_stop().await?;
 
@@ -366,8 +367,24 @@ async fn test_watch_already_stopped_target_fails() -> Result<(), Error> {
     };
     let watcher_ref = system.create_root_actor("watcher", watcher).await?;
 
-    let result = watcher_ref.ask(WatchMsg::Watch(target_ref.clone())).await;
-    assert_eq!(result, Err(Error::ActorStopped));
+    // Watching a stopped target succeeds and delivers the termination
+    // message immediately (courtesy notification, no lost watch).
+    watcher_ref.ask(WatchMsg::Watch(target_ref.clone())).await?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let resp = watcher_ref.ask(WatchMsg::GetNotifications).await?;
+        if resp.notifications.contains(&target_path) {
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            return Err(Error::Functional {
+                description: "watcher was not notified for stopped target"
+                    .to_owned(),
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     system.stop_system();
     join_runner(runner_handle).await
@@ -475,6 +492,61 @@ async fn test_watch_limit_rejected() -> Result<(), Error> {
         "expected InvalidConfiguration when watcher limit exceeded, got {:?}",
         result
     );
+
+    system.stop_system();
+    join_runner(runner_handle).await
+}
+
+#[test(tokio::test)]
+async fn test_concurrent_watch_and_stop_delivers_exactly_once()
+-> Result<(), Error> {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let runner_handle = tokio::spawn(async move { runner.run().await });
+
+    let watcher = WatchActor {
+        notifications: Arc::new(Mutex::new(vec![])),
+    };
+    let watcher_ref = system.create_root_actor("watcher", watcher).await?;
+
+    let target = TargetActor {
+        stopped: Arc::new(Mutex::new(false)),
+    };
+    let target_path = ActorPath::from("/user/target");
+    let target_ref = system.create_root_actor("target", target).await?;
+
+    // Race the watch registration against the target's termination: the
+    // old check-then-register order could lose the notification entirely.
+    // Exactly one delivery is expected in every interleaving.
+    watcher_ref
+        .tell(WatchMsg::Watch(target_ref.clone()))
+        .await?;
+    target_ref.tell(TargetMsg::Stop).await?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let resp = watcher_ref.ask(WatchMsg::GetNotifications).await?;
+        let count = resp
+            .notifications
+            .iter()
+            .filter(|p| **p == target_path)
+            .count();
+        if count == 1 {
+            break;
+        }
+        if count > 1 {
+            return Err(Error::Functional {
+                description: "watcher was notified more than once".to_owned(),
+            });
+        }
+        if tokio::time::Instant::now() > deadline {
+            return Err(Error::Functional {
+                description: "watcher was not notified during concurrent stop"
+                    .to_owned(),
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     system.stop_system();
     join_runner(runner_handle).await

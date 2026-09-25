@@ -4,7 +4,7 @@
 //! state is managed as `Arc<State>`, eliminating deep clones on the hot path.
 
 use crate::{
-    database::{Collection, DbManager, State},
+    database::{BatchOp, BatchWrite, Collection, DbManager, State},
     error::{Error, StoreOperation},
 };
 
@@ -377,6 +377,18 @@ where
     key_box: Option<EncryptedKey>,
     /// Initial state to use when recovering without a snapshot.
     initial_state: Arc<A::State>,
+    /// Atomic multi-write handle when the backend supports it. `Some`
+    /// guarantees all-or-nothing batches, so multi-write paths skip
+    /// compensation; `None` keeps sequential writes with rollback.
+    batch: Option<Box<dyn BatchWrite>>,
+    /// Prefix scoping this store's keys, needed to build batches.
+    batch_prefix: String,
+    /// Backend collection name holding the event log (`{name}_events`).
+    batch_events: String,
+    /// Backend state name holding snapshots (`{name}_states`).
+    batch_states: String,
+    /// Backend state name holding log metadata (`{name}_metadata`).
+    batch_metadata: String,
     /// Actor path of the persistent actor that owns this store, used as a
     /// Prometheus label.
     #[cfg(feature = "prometheus")]
@@ -520,12 +532,13 @@ where
         validate_store_name(name)?;
         validate_store_prefix(prefix)?;
 
-        let events =
-            manager.create_collection(&format!("{}_events", name), prefix)?;
-        let states =
-            manager.create_state(&format!("{}_states", name), prefix)?;
-        let metadata =
-            manager.create_state(&format!("{}_metadata", name), prefix)?;
+        let batch_events = format!("{}_events", name);
+        let batch_states = format!("{}_states", name);
+        let batch_metadata = format!("{}_metadata", name);
+        let events = manager.create_collection(&batch_events, prefix)?;
+        let states = manager.create_state(&batch_states, prefix)?;
+        let metadata = manager.create_state(&batch_metadata, prefix)?;
+        let batch = manager.batch_writer();
 
         let mut store = Self {
             event_counter: 0,
@@ -535,6 +548,11 @@ where
             metadata: Box::new(metadata),
             key_box,
             initial_state,
+            batch,
+            batch_prefix: prefix.to_owned(),
+            batch_events,
+            batch_states,
+            batch_metadata,
             #[cfg(feature = "prometheus")]
             actor_path,
             #[cfg(feature = "prometheus")]
@@ -662,18 +680,52 @@ where
     }
 
     fn persist_metadata(&mut self) -> Result<(), Error> {
+        let bytes =
+            self.encode_metadata_bytes(self.event_counter, self.state_counter)?;
+
+        self.metadata.put(&bytes)
+    }
+
+    fn encode_event_bytes<E: BorshSerialize>(
+        &self,
+        event: &E,
+    ) -> Result<Vec<u8>, Error> {
+        let data = borsh::to_vec(event).map_err(|e| {
+            error!("Can't encode event: {}", e);
+            store_error(StoreOperation::EncodeEvent, e)
+        })?;
+
+        self.maybe_encrypt(&data)
+    }
+
+    fn encode_snapshot_bytes(
+        &self,
+        state: &A::State,
+        counter: u64,
+    ) -> Result<Vec<u8>, Error> {
+        let data = borsh::to_vec(&(state, counter)).map_err(|e| {
+            error!("Can't encode state: {}", e);
+            store_error(StoreOperation::EncodeActor, e)
+        })?;
+
+        self.maybe_encrypt(&data)
+    }
+
+    fn encode_metadata_bytes(
+        &self,
+        next_event_index: u64,
+        state_counter: u64,
+    ) -> Result<Vec<u8>, Error> {
         let metadata = StoreMetadata {
-            next_event_index: self.event_counter,
-            state_counter: self.state_counter,
+            next_event_index,
+            state_counter,
         };
         let data = borsh::to_vec(&metadata).map_err(|e| {
             error!("Can't encode metadata: {}", e);
             store_error(StoreOperation::EncodeActor, e)
         })?;
 
-        let bytes = self.maybe_encrypt(&data)?;
-
-        self.metadata.put(&bytes)
+        self.maybe_encrypt(&data)
     }
 
     fn persist<E>(&mut self, event: &E) -> Result<(), Error>
@@ -682,12 +734,7 @@ where
     {
         debug!("Persisting event: {:?}", event);
 
-        let bytes = borsh::to_vec(event).map_err(|e| {
-            error!("Can't encode event: {}", e);
-            store_error(StoreOperation::EncodeEvent, e)
-        })?;
-
-        let bytes = self.maybe_encrypt(&bytes)?;
+        let bytes = self.encode_event_bytes(event)?;
 
         let next_event_number = self.event_counter;
 
@@ -735,6 +782,88 @@ where
             "Successfully persisted light snapshot, event_counter now: {}",
             self.event_counter
         );
+        Ok(())
+    }
+
+    fn persist_full_state(
+        &mut self,
+        event: &A::Event,
+        state: &A::State,
+        snapshot_every: Option<u64>,
+    ) -> Result<(), Error> {
+        // Prospective check: after this event, pending would be
+        // `pending + 1`. Equivalent to the old post-persist check
+        // whenever `event_counter >= state_counter`.
+        let due = snapshot_every.is_some_and(|every| {
+            self.pending_events_since_snapshot() + 1 >= every
+        });
+        if !due {
+            return self.persist(event);
+        }
+
+        let next = self.event_counter.checked_add(1).ok_or_else(|| {
+            store_error(StoreOperation::PersistFull, "event counter overflow")
+        })?;
+
+        // Atomic path: event + snapshot + metadata in one all-or-nothing
+        // batch. No compensation needed on error: either everything is
+        // durable or nothing is, so counters stay untouched.
+        if let Some(batch) = &self.batch {
+            let event_bytes = self.encode_event_bytes(event)?;
+            let snapshot_bytes = self.encode_snapshot_bytes(state, next)?;
+            let metadata_bytes = self.encode_metadata_bytes(next, next)?;
+            let key = format!("{:020}", self.event_counter);
+            batch
+                .write_batch(
+                    &self.batch_prefix,
+                    &[
+                        BatchOp::PutEvent {
+                            collection: &self.batch_events,
+                            key: &key,
+                            data: &event_bytes,
+                        },
+                        BatchOp::PutState {
+                            store: &self.batch_states,
+                            data: &snapshot_bytes,
+                        },
+                        BatchOp::PutState {
+                            store: &self.batch_metadata,
+                            data: &metadata_bytes,
+                        },
+                    ],
+                )
+                .map_err(|e| store_error(StoreOperation::PersistFull, e))?;
+            self.event_counter = next;
+            self.state_counter = next;
+            #[cfg(feature = "prometheus")]
+            self.record_pending_events();
+            return Ok(());
+        }
+
+        // Sequential fallback with compensation (see below): the event is
+        // already durable at this point, so a snapshot failure must remove
+        // it again. Otherwise the log would contain an event the actor
+        // never applied to its in-memory state (it only calls `set_state`
+        // on success).
+        self.persist(event)?;
+        debug_assert!(self.event_counter > 0);
+        let written_index = self.event_counter - 1;
+
+        if let Err(snapshot_err) = self.snapshot(state) {
+            error!(error = %snapshot_err, "Snapshot failed during full persistence; rolling back event {written_index}");
+            let key = format!("{:020}", written_index);
+            if let Err(rollback_err) = self.events.del(&key) {
+                error!(
+                    error = %rollback_err,
+                    "Failed to roll back event {written_index} after \
+                     snapshot failure; event log holds an event the actor \
+                     did not apply"
+                );
+            } else {
+                self.event_counter -= 1;
+            }
+            return Err(snapshot_err);
+        }
         Ok(())
     }
 
@@ -853,13 +982,16 @@ where
 
         let next_state_counter = self.event_counter;
 
-        let data =
-            borsh::to_vec(&(state, next_state_counter)).map_err(|e| {
-                error!("Can't encode state: {}", e);
-                store_error(StoreOperation::EncodeActor, e)
-            })?;
+        let bytes = self.encode_snapshot_bytes(state, next_state_counter)?;
 
-        let bytes = self.maybe_encrypt(&data)?;
+        // Keep the previous snapshot bytes so a later metadata failure
+        // can restore them: without this, a durable snapshot newer than
+        // the event log would survive the rollback below.
+        let prev_bytes = match self.states.get() {
+            Ok(bytes) => Some(bytes),
+            Err(Error::EntryNotFound { .. }) => None,
+            Err(_) => None,
+        };
 
         self.states.put(&bytes)?;
         let prev_state_counter = self.state_counter;
@@ -868,6 +1000,25 @@ where
         self.record_pending_events();
         if let Err(e) = self.persist_metadata() {
             self.state_counter = prev_state_counter;
+            // Best-effort restore of the previous snapshot bytes.
+            let restore = match prev_bytes {
+                Some(prev) => self.states.put(&prev),
+                None => self.states.del().or_else(|del_err| {
+                    // No previous snapshot existed; absence is also fine.
+                    match del_err {
+                        Error::EntryNotFound { .. } => Ok(()),
+                        other => Err(other),
+                    }
+                }),
+            };
+            if let Err(restore_err) = restore {
+                error!(
+                    error = %restore_err,
+                    "Failed to restore previous snapshot after metadata \
+                     failure; snapshot store may hold a snapshot newer than \
+                     the event log"
+                );
+            }
             return Err(e);
         }
         Ok(())
@@ -1215,7 +1366,7 @@ where
     /// Return the most recently persisted event.
     LastEvent,
     /// Return the next free event index.
-    LastEventNumber,
+    NextEventNumber,
     /// Return all events from the supplied event index to the end of the log.
     LastEventsFrom(u64),
     /// Return all events within the inclusive `[from, to]` range.
@@ -1245,7 +1396,7 @@ where
             Self::PersistLight(s) => Self::PersistLight(Arc::clone(s)),
             Self::Snapshot(s) => Self::Snapshot(Arc::clone(s)),
             Self::LastEvent => Self::LastEvent,
-            Self::LastEventNumber => Self::LastEventNumber,
+            Self::NextEventNumber => Self::NextEventNumber,
             Self::LastEventsFrom(n) => Self::LastEventsFrom(*n),
             Self::GetEvents { from, to } => Self::GetEvents {
                 from: *from,
@@ -1284,7 +1435,7 @@ where
     /// Most recently persisted event, or `None` when the log is empty.
     LastEvent(Option<A::Event>),
     /// Next free event index.
-    LastEventNumber(u64),
+    NextEventNumber(u64),
     /// Event payloads returned by a range query.
     Events(Vec<A::Event>),
 }
@@ -1378,15 +1529,11 @@ where
                 }
                 #[cfg(feature = "prometheus")]
                 let start = Instant::now();
-                let combined = self.persist(event.as_ref()).and_then(|()| {
-                    if snapshot_every.is_some_and(|every| {
-                        self.pending_events_since_snapshot() >= every
-                    }) {
-                        self.snapshot(state.as_ref())
-                    } else {
-                        Ok(())
-                    }
-                });
+                let combined = self.persist_full_state(
+                    event.as_ref(),
+                    state.as_ref(),
+                    snapshot_every,
+                );
 
                 #[cfg(feature = "prometheus")]
                 self.record_command_metrics(
@@ -1510,8 +1657,8 @@ where
                 debug!("Purged store");
                 Ok(StoreResponse::None)
             }
-            StoreCommand::LastEventNumber => {
-                Ok(StoreResponse::LastEventNumber(self.event_counter))
+            StoreCommand::NextEventNumber => {
+                Ok(StoreResponse::NextEventNumber(self.event_counter))
             }
             StoreCommand::LastEventsFrom(from) => {
                 #[cfg(feature = "prometheus")]
@@ -2001,6 +2148,188 @@ mod tests {
             "PersistFull with snapshot_every Some(0) must be rejected, got \
              {result:?}"
         );
+    }
+
+    #[test(tokio::test)]
+    async fn test_persist_full_rolls_back_event_when_snapshot_fails() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+
+        // Events work but every snapshot write fails.
+        let initial = Arc::new(CounterState { value: 0 });
+        let store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            FailingStateManager,
+            None,
+            initial,
+        )
+        .unwrap();
+        let store_ref = system.create_root_actor("store", store).await.unwrap();
+
+        let result = store_ref
+            .ask(StoreCommand::PersistFull {
+                event: Arc::new(CounterEvent(1)),
+                state: Arc::new(CounterState { value: 1 }),
+                snapshot_every: Some(1),
+            })
+            .await;
+        assert!(result.is_err(), "snapshot failure must fail PersistFull");
+
+        // The appended event must be compensated: no event left behind,
+        // counters back at zero, recovery finds nothing.
+        let response =
+            store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
+        assert!(matches!(response, StoreResponse::NextEventNumber(0)));
+        let response = store_ref
+            .ask(StoreCommand::GetEvents { from: 0, to: 10 })
+            .await
+            .unwrap();
+        assert!(
+            matches!(response, StoreResponse::Events(events) if events.is_empty())
+        );
+        let response = store_ref.ask(StoreCommand::Recover).await.unwrap();
+        assert!(matches!(response, StoreResponse::State(None)));
+    }
+
+    #[test(tokio::test)]
+    async fn test_persist_full_rolls_back_event_when_metadata_fails() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+
+        // Snapshot bytes succeed but metadata writes fail: exercises both
+        // the snapshot-bytes restore and the event rollback.
+        let initial = Arc::new(CounterState { value: 0 });
+        let store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            MetadataFailManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+        let store_ref = system.create_root_actor("store", store).await.unwrap();
+
+        let result = store_ref
+            .ask(StoreCommand::PersistFull {
+                event: Arc::new(CounterEvent(1)),
+                state: Arc::new(CounterState { value: 1 }),
+                snapshot_every: Some(1),
+            })
+            .await;
+        assert!(result.is_err(), "metadata failure must fail PersistFull");
+
+        let response =
+            store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
+        assert!(matches!(response, StoreResponse::NextEventNumber(0)));
+        let response = store_ref.ask(StoreCommand::Recover).await.unwrap();
+        assert!(matches!(response, StoreResponse::State(None)));
+    }
+
+    // ------------------------------------------------------------------
+    // Mock backend whose atomic batch always fails, used to verify the
+    // batch path leaves no residue and keeps counters untouched.
+    // ------------------------------------------------------------------
+
+    #[derive(Clone)]
+    struct FailingBatchWriter;
+
+    impl BatchWrite for FailingBatchWriter {
+        fn write_batch(
+            &self,
+            _prefix: &str,
+            _ops: &[BatchOp<'_>],
+        ) -> Result<(), Error> {
+            Err(Error::Store {
+                operation: StoreOperation::ExecuteBatch,
+                reason: "injected batch failure".to_owned(),
+                source: None,
+            })
+        }
+    }
+
+    #[derive(Default, Clone)]
+    struct FailingBatchManager {
+        inner: MemoryManager,
+    }
+
+    impl DbManager<MemoryStore, MemoryStore> for FailingBatchManager {
+        fn create_collection(
+            &self,
+            name: &str,
+            prefix: &str,
+        ) -> Result<MemoryStore, Error> {
+            self.inner.create_collection(name, prefix)
+        }
+
+        fn create_state(
+            &self,
+            name: &str,
+            prefix: &str,
+        ) -> Result<MemoryStore, Error> {
+            self.inner.create_state(name, prefix)
+        }
+
+        fn batch_writer(&self) -> Option<Box<dyn BatchWrite>> {
+            Some(Box::new(FailingBatchWriter))
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn test_persist_full_atomic_batch_failure_applies_nothing() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+
+        let manager = FailingBatchManager::default();
+        let initial = Arc::new(CounterState { value: 0 });
+        let store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            manager.clone(),
+            None,
+            initial,
+        )
+        .unwrap();
+        let store_ref = system.create_root_actor("store", store).await.unwrap();
+
+        let result = store_ref
+            .ask(StoreCommand::PersistFull {
+                event: Arc::new(CounterEvent(1)),
+                state: Arc::new(CounterState { value: 1 }),
+                snapshot_every: Some(1),
+            })
+            .await;
+        assert!(result.is_err(), "batch failure must fail PersistFull");
+
+        // All-or-nothing: no event, no snapshot, counters at zero.
+        let response =
+            store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
+        assert!(matches!(response, StoreResponse::NextEventNumber(0)));
+        let events = manager
+            .create_collection("store_events", "test")
+            .unwrap()
+            .iter(false)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(events.is_empty());
+        let response = store_ref.ask(StoreCommand::Recover).await.unwrap();
+        assert!(matches!(response, StoreResponse::State(None)));
     }
 
     #[test]

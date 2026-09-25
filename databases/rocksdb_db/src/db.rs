@@ -4,13 +4,13 @@
 use ave_actors_store::{
     Error, StoreOperation,
     config::{MachineSpec, resolve_spec},
-    database::{Collection, DbManager, State},
+    database::{BatchOp, BatchWrite, Collection, DbManager, State},
 };
 
 use rocksdb::{
     BlockBasedOptions, BoundColumnFamily, Cache, ColumnFamilyDescriptor, DB,
     DBCompactionStyle, DBCompressionType, DBIteratorWithThreadMode, Direction,
-    IteratorMode, LogLevel, Options, WriteOptions,
+    IteratorMode, LogLevel, Options, WriteBatch, WriteOptions,
 };
 use tracing::{debug, error, info, warn};
 
@@ -19,6 +19,76 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+/// Atomic multi-write handle over a shared RocksDB instance.
+///
+/// Every op lands in a single [`WriteBatch`] applied with one `write_opt`
+/// call, which RocksDB guarantees all-or-nothing (durable across crashes
+/// once acknowledged). Key mapping matches the handle implementations:
+/// events as `{prefix}.{key}`, states as `{prefix}`.
+struct RocksBatchWriter {
+    db: Arc<DB>,
+    durability: bool,
+}
+
+impl BatchWrite for RocksBatchWriter {
+    fn write_batch(
+        &self,
+        prefix: &str,
+        ops: &[BatchOp<'_>],
+    ) -> Result<(), Error> {
+        let mut batch = WriteBatch::default();
+        for op in ops {
+            match *op {
+                BatchOp::PutEvent {
+                    collection,
+                    key,
+                    data,
+                } => {
+                    let Some(handle) = self.db.cf_handle(collection) else {
+                        error!(
+                            cf = collection,
+                            "Column family not found for batch event"
+                        );
+                        return Err(Error::Store {
+                            source: None,
+                            operation: StoreOperation::ColumnAccess,
+                            reason: "RocksDB column for the store does not \
+                                     exist."
+                                .to_owned(),
+                        });
+                    };
+                    batch.put_cf(&handle, format!("{prefix}.{key}"), data);
+                }
+                BatchOp::PutState { store, data } => {
+                    let Some(handle) = self.db.cf_handle(store) else {
+                        error!(
+                            cf = store,
+                            "Column family not found for batch state"
+                        );
+                        return Err(Error::Store {
+                            source: None,
+                            operation: StoreOperation::ColumnAccess,
+                            reason: "RocksDB column for the store does not \
+                                     exist."
+                                .to_owned(),
+                        });
+                    };
+                    batch.put_cf(&handle, prefix, data);
+                }
+            }
+        }
+        let wopts = write_options(self.durability);
+        self.db.write_opt(batch, &wopts).map_err(|e| {
+            error!(error = %e, "Failed to write batch");
+            Error::Store {
+                source: None,
+                operation: StoreOperation::RocksdbOperation,
+                reason: format!("{:?}", e),
+            }
+        })
+    }
+}
+
 /// RocksDB database manager for persistent actor storage.
 /// Manages RocksDB instances and provides factory methods for creating
 /// column families for event storage and state snapshots.
@@ -262,6 +332,13 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
             store: Arc::clone(&self.db),
             strong_durability: self.strong_durability,
         })
+    }
+
+    fn batch_writer(&self) -> Option<Box<dyn BatchWrite>> {
+        Some(Box::new(RocksBatchWriter {
+            db: Arc::clone(&self.db),
+            durability: self.strong_durability,
+        }))
     }
 
     fn stop(self) -> Result<(), Error> {
@@ -1025,6 +1102,81 @@ mod tests {
         let manager = RocksDbManager::default();
         let result = manager.ensure_cf("test\0name");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_batch_applies_event_and_states_atomically() {
+        use ave_actors_store::database::BatchOp;
+
+        let manager = RocksDbManager::default();
+        manager.create_collection("b_events", "p").unwrap();
+        manager.create_state("b_states", "p").unwrap();
+        manager.create_state("b_metadata", "p").unwrap();
+
+        let writer = manager.batch_writer().expect("rocksdb supports batch");
+        writer
+            .write_batch(
+                "p",
+                &[
+                    BatchOp::PutEvent {
+                        collection: "b_events",
+                        key: "00000000000000000000",
+                        data: b"event",
+                    },
+                    BatchOp::PutState {
+                        store: "b_states",
+                        data: b"snapshot",
+                    },
+                    BatchOp::PutState {
+                        store: "b_metadata",
+                        data: b"metadata",
+                    },
+                ],
+            )
+            .unwrap();
+
+        let events = manager.create_collection("b_events", "p").unwrap();
+        assert_eq!(
+            Collection::get(&events, "00000000000000000000").unwrap(),
+            b"event".to_vec()
+        );
+        let states = manager.create_state("b_states", "p").unwrap();
+        assert_eq!(State::get(&states).unwrap(), b"snapshot".to_vec());
+        let metadata = manager.create_state("b_metadata", "p").unwrap();
+        assert_eq!(State::get(&metadata).unwrap(), b"metadata".to_vec());
+    }
+
+    #[test]
+    fn test_batch_with_missing_cf_applies_nothing() {
+        use ave_actors_store::database::BatchOp;
+
+        let manager = RocksDbManager::default();
+        manager.create_collection("rb2_events", "p").unwrap();
+
+        let writer = manager.batch_writer().expect("rocksdb supports batch");
+        let result = writer.write_batch(
+            "p",
+            &[
+                BatchOp::PutEvent {
+                    collection: "rb2_events",
+                    key: "00000000000000000000",
+                    data: b"event",
+                },
+                BatchOp::PutState {
+                    store: "no_such_cf",
+                    data: b"snapshot",
+                },
+            ],
+        );
+        assert!(result.is_err(), "batch with a missing CF must fail");
+
+        // Nothing was applied: the batch is validated before the single
+        // engine write, so the event is absent too.
+        let events = manager.create_collection("rb2_events", "p").unwrap();
+        assert!(
+            Collection::get(&events, "00000000000000000000").is_err(),
+            "event from a failed batch must not be visible"
+        );
     }
 
     #[test]

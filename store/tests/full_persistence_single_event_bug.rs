@@ -187,8 +187,8 @@ async fn test_debug_event_counter_after_first_event() {
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
-    if let StoreResponse::LastEventNumber(count) = result {
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
+    if let StoreResponse::NextEventNumber(count) = result {
         assert_eq!(count, 0);
     }
 
@@ -199,8 +199,8 @@ async fn test_debug_event_counter_after_first_event() {
 
     // The counter must reflect the persisted event so that a later stop
     // snapshots the pending state.
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
-    if let StoreResponse::LastEventNumber(count) = result {
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
+    if let StoreResponse::NextEventNumber(count) = result {
         assert_eq!(
             count, 1,
             "event_counter should be 1 after persisting 1 event"

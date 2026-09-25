@@ -156,7 +156,8 @@ where
     /// message that will be sent to this actor. It allows the watcher to model
     /// the notification with its own message type.
     ///
-    /// Returns `Error::ActorStopped` if `target` has already stopped.
+    /// Watching an already-stopped target succeeds and delivers the
+    /// termination message immediately (courtesy notification).
     pub async fn watch<B, F>(
         &self,
         target: &ActorRef<B>,
@@ -166,33 +167,42 @@ where
         B: Actor + Handler<B>,
         F: Fn(ActorPath) -> A::Message + Send + Sync + 'static,
     {
-        if target.is_closed() {
-            return Err(Error::ActorStopped);
-        }
-
         let watcher_ref = self.reference().await?;
         let watcher_path = self.path.clone();
         let factory = Arc::new(msg_factory);
 
-        let notify = Arc::new(move |terminated: ActorPath| {
-            let actor_ref = watcher_ref.clone();
-            let factory = Arc::clone(&factory);
-            let watcher = watcher_path.clone();
-            tokio::spawn(async move {
-                let msg = factory(terminated);
-                if let Err(err) = actor_ref.tell(msg).await {
-                    tracing::debug!(
-                        error = %err,
-                        watcher = %watcher,
-                        "Failed to deliver termination notification to watcher"
-                    );
-                }
-            });
-        });
+        let notify: Arc<dyn Fn(ActorPath) + Send + Sync> = Arc::new(
+            move |terminated: ActorPath| {
+                let actor_ref = watcher_ref.clone();
+                let factory = Arc::clone(&factory);
+                let watcher = watcher_path.clone();
+                tokio::spawn(async move {
+                    let msg = factory(terminated);
+                    if let Err(err) = actor_ref.tell(msg).await {
+                        tracing::debug!(
+                            error = %err,
+                            watcher = %watcher,
+                            "Failed to deliver termination notification to watcher"
+                        );
+                    }
+                });
+            },
+        );
 
+        // Register first, then re-check: if the target terminated between
+        // the two steps, `notify_watchers` either already fired our entry
+        // (removed: no courtesy needed) or ran before we registered (entry
+        // still present: deliver a courtesy notification). Taking our entry
+        // makes delivery exactly-once in every interleaving.
+        let target_path = target.path();
         self.system
-            .watch(target.path(), self.path.clone(), notify)
+            .watch(target_path.clone(), self.path.clone(), Arc::clone(&notify))
             .await?;
+        if target.is_closed()
+            && self.system.unwatch(target_path.clone(), self.path.clone())
+        {
+            notify(target_path);
+        }
         Ok(())
     }
 

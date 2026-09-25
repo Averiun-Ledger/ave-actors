@@ -1,4 +1,4 @@
-//! Regression tests for `StoreCommand::LastEventNumber`.
+//! Regression tests for `StoreCommand::NextEventNumber`.
 //!
 //! Guarantees that the store's event counter starts at 0, increments on each
 //! persist, is left unchanged by snapshots, and is restored on recovery.
@@ -113,7 +113,7 @@ impl PersistentActor for TestActor {
 }
 
 #[test(tokio::test)]
-async fn test_last_event_number_after_persist() {
+async fn test_next_event_number_after_persist() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -131,8 +131,8 @@ async fn test_last_event_number_after_persist() {
     .unwrap();
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
-    if let StoreResponse::LastEventNumber(count) = result {
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
+    if let StoreResponse::NextEventNumber(count) = result {
         assert_eq!(count, 0);
     }
 
@@ -141,8 +141,8 @@ async fn test_last_event_number_after_persist() {
         .await
         .unwrap();
 
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
-    if let StoreResponse::LastEventNumber(count) = result {
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
+    if let StoreResponse::NextEventNumber(count) = result {
         assert_eq!(count, 1);
     }
 
@@ -151,8 +151,8 @@ async fn test_last_event_number_after_persist() {
         .await
         .unwrap();
 
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
-    if let StoreResponse::LastEventNumber(count) = result {
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
+    if let StoreResponse::NextEventNumber(count) = result {
         assert_eq!(count, 2);
     }
 
@@ -160,8 +160,8 @@ async fn test_last_event_number_after_persist() {
     let state = Arc::new(TestActorState { value: 30 });
     store_ref.ask(StoreCommand::Snapshot(state)).await.unwrap();
 
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
-    if let StoreResponse::LastEventNumber(count) = result {
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
+    if let StoreResponse::NextEventNumber(count) = result {
         assert_eq!(count, 2);
     }
 
@@ -181,8 +181,8 @@ async fn test_last_event_number_after_persist() {
     store_ref2.ask(StoreCommand::Recover).await.unwrap();
 
     // The counter is restored from the persisted events.
-    let result = store_ref2.ask(StoreCommand::LastEventNumber).await.unwrap();
-    if let StoreResponse::LastEventNumber(count) = result {
+    let result = store_ref2.ask(StoreCommand::NextEventNumber).await.unwrap();
+    if let StoreResponse::NextEventNumber(count) = result {
         assert_eq!(count, 2);
     }
 }

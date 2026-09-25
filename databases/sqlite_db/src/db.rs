@@ -6,7 +6,7 @@
 use ave_actors_store::{
     Error, StoreOperation,
     config::{MachineSpec, resolve_spec},
-    database::{Collection, DbManager, State},
+    database::{BatchOp, BatchWrite, Collection, DbManager, State},
 };
 
 use rusqlite::{Connection, Error as SqliteError, OpenFlags, params};
@@ -382,6 +382,12 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
         Ok(SqliteCollection::new(self.clone(), identifier, prefix))
     }
 
+    fn batch_writer(&self) -> Option<Box<dyn BatchWrite>> {
+        Some(Box::new(SqliteBatchWriter {
+            manager: self.clone(),
+        }))
+    }
+
     fn stop(self) -> Result<(), Error> {
         debug!("Stopping SQLite manager, draining pool and flushing WAL");
         self.pool.drain().map_err(|e| {
@@ -411,10 +417,131 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
     }
 }
 
+/// Atomic multi-write handle over [`SqliteManager`]'s connection pool.
+///
+/// Holds one pooled connection for the whole batch and wraps every op in a
+/// single `BEGIN IMMEDIATE .. COMMIT` transaction: either all rows are
+/// durable or none are, including across crashes. `ROLLBACK` runs on every
+/// error path so the connection never returns to the pool mid-transaction.
+#[derive(Clone)]
+struct SqliteBatchWriter {
+    manager: SqliteManager,
+}
+
+impl BatchWrite for SqliteBatchWriter {
+    fn write_batch(
+        &self,
+        prefix: &str,
+        ops: &[BatchOp<'_>],
+    ) -> Result<(), Error> {
+        for op in ops {
+            match *op {
+                BatchOp::PutEvent { collection, .. } => {
+                    SqliteManager::validate_identifier(collection)?;
+                }
+                BatchOp::PutState { store, .. } => {
+                    SqliteManager::validate_identifier(store)?;
+                }
+            }
+        }
+
+        let conn = self.manager.pool.checkout().map_err(|e| {
+            error!(error = %e, "Failed to check out connection for batch");
+            Error::Store {
+                source: None,
+                operation: StoreOperation::OpenConnection,
+                reason: format!("{}", e),
+            }
+        })?;
+
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| {
+            error!(error = %e, "Failed to begin batch transaction");
+            Error::Store {
+                source: None,
+                operation: StoreOperation::ExecuteBatch,
+                reason: format!("{}", e),
+            }
+        })?;
+
+        let result = (|| -> Result<(), Error> {
+            for op in ops {
+                match *op {
+                    BatchOp::PutEvent {
+                        collection,
+                        key,
+                        data,
+                    } => {
+                        let stmt = format!(
+                            "INSERT OR REPLACE INTO {} (prefix, sn, value) \
+                             VALUES (?1, ?2, ?3)",
+                            collection
+                        );
+                        conn.execute(&stmt, params![prefix, key, data])
+                            .map_err(|e| {
+                                error!(
+                                    table = collection,
+                                    error = %e,
+                                    "Failed to put event in batch"
+                                );
+                                Error::Store {
+                                    source: None,
+                                    operation: StoreOperation::Insert,
+                                    reason: format!("{}", e),
+                                }
+                            })?;
+                    }
+                    BatchOp::PutState { store, data } => {
+                        let stmt = format!(
+                            "INSERT OR REPLACE INTO {} (prefix, value) \
+                             VALUES (?1, ?2)",
+                            store
+                        );
+                        conn.execute(&stmt, params![prefix, data]).map_err(
+                            |e| {
+                                error!(
+                                    table = store,
+                                    error = %e,
+                                    "Failed to put state in batch"
+                                );
+                                Error::Store {
+                                    source: None,
+                                    operation: StoreOperation::Insert,
+                                    reason: format!("{}", e),
+                                }
+                            },
+                        )?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
+                error!(error = %e, "Failed to commit batch transaction");
+                Error::Store {
+                    source: None,
+                    operation: StoreOperation::ExecuteBatch,
+                    reason: format!("{}", e),
+                }
+            }),
+            Err(batch_err) => {
+                if let Err(rollback_err) = conn.execute_batch("ROLLBACK") {
+                    error!(
+                        error = %rollback_err,
+                        "Failed to roll back batch transaction"
+                    );
+                }
+                Err(batch_err)
+            }
+        }
+    }
+}
+
 /// SQLite collection that implements both Collection and State traits.
 /// Stores key-value pairs in a SQLite table with prefix-based namespacing.
 ///
-/// # Schema
+////// # Schema
 ///
 /// **For Collections**: (prefix TEXT, sn TEXT, value BLOB, PRIMARY KEY (prefix, sn))
 /// **For State**: (prefix TEXT, value BLOB, PRIMARY KEY (prefix))
@@ -1337,5 +1464,80 @@ mod tests {
             "second checkout was not unblocked after returning the connection",
         );
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_batch_applies_event_snapshot_and_metadata_atomically() {
+        use ave_actors_store::database::BatchOp;
+
+        let manager = SqliteManager::default();
+        manager.create_collection("batch_events", "p").unwrap();
+        manager.create_state("batch_states", "p").unwrap();
+        manager.create_state("batch_metadata", "p").unwrap();
+
+        let writer = manager.batch_writer().expect("sqlite supports batch");
+        writer
+            .write_batch(
+                "p",
+                &[
+                    BatchOp::PutEvent {
+                        collection: "batch_events",
+                        key: "00000000000000000000",
+                        data: b"event",
+                    },
+                    BatchOp::PutState {
+                        store: "batch_states",
+                        data: b"snapshot",
+                    },
+                    BatchOp::PutState {
+                        store: "batch_metadata",
+                        data: b"metadata",
+                    },
+                ],
+            )
+            .unwrap();
+
+        let events = manager.create_collection("batch_events", "p").unwrap();
+        assert_eq!(
+            Collection::get(&events, "00000000000000000000").unwrap(),
+            b"event".to_vec()
+        );
+        let states = manager.create_state("batch_states", "p").unwrap();
+        assert_eq!(State::get(&states).unwrap(), b"snapshot".to_vec());
+        let metadata = manager.create_state("batch_metadata", "p").unwrap();
+        assert_eq!(State::get(&metadata).unwrap(), b"metadata".to_vec());
+    }
+
+    #[test]
+    fn test_batch_rolls_back_when_second_op_fails() {
+        use ave_actors_store::database::BatchOp;
+
+        let manager = SqliteManager::default();
+        manager.create_collection("rb_events", "p").unwrap();
+        // "ghost_states" passes identifier validation but the table does
+        // not exist, so the second op fails mid-transaction.
+        let writer = manager.batch_writer().expect("sqlite supports batch");
+        let result = writer.write_batch(
+            "p",
+            &[
+                BatchOp::PutEvent {
+                    collection: "rb_events",
+                    key: "00000000000000000000",
+                    data: b"event",
+                },
+                BatchOp::PutState {
+                    store: "ghost_states",
+                    data: b"snapshot",
+                },
+            ],
+        );
+        assert!(result.is_err(), "batch with a failing op must fail");
+
+        // The first op must have been rolled back: all-or-nothing.
+        let events = manager.create_collection("rb_events", "p").unwrap();
+        assert!(
+            Collection::get(&events, "00000000000000000000").is_err(),
+            "rolled-back event must not be visible"
+        );
     }
 }

@@ -150,10 +150,10 @@ async fn test_light_persistence_counters() {
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     // A fresh store starts with no events.
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
     match result {
-        StoreResponse::LastEventNumber(count) => assert_eq!(count, 0),
-        _ => panic!("Expected LastEventNumber response"),
+        StoreResponse::NextEventNumber(count) => assert_eq!(count, 0),
+        _ => panic!("Expected NextEventNumber response"),
     }
 
     // One light persist advances both counters together (snapshot only).
@@ -167,10 +167,10 @@ async fn test_light_persistence_counters() {
         _ => panic!("Expected Persisted response"),
     }
 
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
     match result {
-        StoreResponse::LastEventNumber(count) => assert_eq!(count, 1),
-        _ => panic!("Expected LastEventNumber response"),
+        StoreResponse::NextEventNumber(count) => assert_eq!(count, 1),
+        _ => panic!("Expected NextEventNumber response"),
     }
 
     // Recovery must restore the snapshot exactly once (no double apply).
@@ -194,9 +194,9 @@ async fn test_light_persistence_counters() {
     }
 
     // After recovery the counter reflects the persisted snapshot, not zero.
-    let result = store_ref2.ask(StoreCommand::LastEventNumber).await.unwrap();
+    let result = store_ref2.ask(StoreCommand::NextEventNumber).await.unwrap();
     match result {
-        StoreResponse::LastEventNumber(count) => assert_eq!(count, 1),
-        _ => panic!("Expected LastEventNumber response"),
+        StoreResponse::NextEventNumber(count) => assert_eq!(count, 1),
+        _ => panic!("Expected NextEventNumber response"),
     }
 }

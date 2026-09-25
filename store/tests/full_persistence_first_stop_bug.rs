@@ -201,8 +201,8 @@ async fn test_snapshot_created_when_events_pending() {
         .await
         .unwrap();
 
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
-    if let StoreResponse::LastEventNumber(count) = result {
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
+    if let StoreResponse::NextEventNumber(count) = result {
         assert_eq!(count, 2);
     }
 
@@ -228,8 +228,8 @@ async fn test_snapshot_created_when_events_pending() {
     }
 
     // With events pending, snapshot the replayed state (5 + 7 = 12).
-    let result = store_ref2.ask(StoreCommand::LastEventNumber).await.unwrap();
-    if let StoreResponse::LastEventNumber(count) = result
+    let result = store_ref2.ask(StoreCommand::NextEventNumber).await.unwrap();
+    if let StoreResponse::NextEventNumber(count) = result
         && count > 0
     {
         let mut actor = TestActor::create_initial(());

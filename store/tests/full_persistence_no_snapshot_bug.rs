@@ -142,8 +142,8 @@ async fn test_full_persistence_recovery_without_snapshot() {
             .unwrap();
     }
 
-    let result = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
-    if let StoreResponse::LastEventNumber(count) = result {
+    let result = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
+    if let StoreResponse::NextEventNumber(count) = result {
         assert_eq!(count, 3);
     }
 
@@ -238,8 +238,8 @@ async fn test_recover_without_snapshot_replays_all_events() {
     }
 
     // Two events were persisted, so the counter must be restored to 2.
-    let result = store_ref2.ask(StoreCommand::LastEventNumber).await.unwrap();
-    if let StoreResponse::LastEventNumber(count) = result {
+    let result = store_ref2.ask(StoreCommand::NextEventNumber).await.unwrap();
+    if let StoreResponse::NextEventNumber(count) = result {
         assert_eq!(count, 2);
     }
 }

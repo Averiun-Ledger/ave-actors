@@ -445,8 +445,8 @@ async fn test_light_persistence_rolls_back_snapshot_failure() {
 
     // With LightPersistence as snapshot-only, a snapshot failure leaves nothing
     // persisted. The logical event counter is rolled back as well.
-    let counter = store_ref.ask(StoreCommand::LastEventNumber).await.unwrap();
-    assert!(matches!(counter, StoreResponse::LastEventNumber(0)));
+    let counter = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
+    assert!(matches!(counter, StoreResponse::NextEventNumber(0)));
 
     let recovered = store_ref.ask(StoreCommand::Recover).await.unwrap();
     assert!(matches!(recovered, StoreResponse::State(None)));

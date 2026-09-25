@@ -12,6 +12,32 @@ pub type CollectionEntryResult = Result<CollectionEntry, Error>;
 pub type CollectionIter<'a> =
     Box<dyn Iterator<Item = CollectionEntryResult> + 'a>;
 
+/// Single write operation inside an atomic [`DbManager::write_batch`] call.
+///
+/// `collection` / `store` are backend collection/state names (e.g.
+/// `"store_events"`), `prefix` scoping is supplied separately to
+/// `write_batch`. Backends must apply the same key mapping as their
+/// [`Collection`] / [`State`] implementations.
+#[derive(Debug, Clone, Copy)]
+pub enum BatchOp<'a> {
+    /// Insert or replace an event under `key` in `collection`.
+    PutEvent {
+        /// Backend collection name.
+        collection: &'a str,
+        /// Event key (e.g. zero-padded sequence number).
+        key: &'a str,
+        /// Encoded event bytes.
+        data: &'a [u8],
+    },
+    /// Replace the single value held by state store `store`.
+    PutState {
+        /// Backend state name.
+        store: &'a str,
+        /// Encoded snapshot/metadata bytes.
+        data: &'a [u8],
+    },
+}
+
 /// Factory for creating [`Collection`] and [`State`] storage backends.
 ///
 /// Implement this trait to plug in a custom database (SQLite, RocksDB, etc.).
@@ -45,6 +71,35 @@ where
     {
         Ok(())
     }
+
+    /// Returns an atomic multi-write handle for this backend, if supported.
+    ///
+    /// A returned handle guarantees all-or-nothing application of
+    /// [`BatchWrite::write_batch`], including across crashes. The default is
+    /// `None`; callers then apply multi-write operations sequentially and
+    /// compensate on error exactly as with individual writes.
+    fn batch_writer(&self) -> Option<Box<dyn BatchWrite>> {
+        None
+    }
+}
+
+/// Atomic multi-write handle for one backend.
+///
+/// Returned by [`DbManager::batch_writer`]. A `Some` handle is a contract:
+/// [`BatchWrite::write_batch`] either applies every op durably or applies
+/// none (rolling back on failure), so callers must not compensate after an
+/// error beyond reporting it.
+pub trait BatchWrite: Sync + Send {
+    /// Applies `ops` scoped by `prefix` atomically (all-or-nothing).
+    ///
+    /// Key mapping must match the backend's [`Collection`] / [`State`]
+    /// implementations. Implementations must validate any interpolated
+    /// identifiers exactly as their handle constructors do.
+    fn write_batch(
+        &self,
+        prefix: &str,
+        ops: &[BatchOp<'_>],
+    ) -> Result<(), Error>;
 }
 
 /// Single-value storage used to persist actor state snapshots.

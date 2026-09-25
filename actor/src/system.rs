@@ -580,11 +580,19 @@ impl SystemRef {
 
     /// Removes all watch entries from `target` to `watcher_path`.
     ///
-    /// If no such entry exists, this is a no-op.
-    pub(crate) fn unwatch(&self, target: ActorPath, watcher_path: ActorPath) {
+    /// Returns `true` when an entry was present and removed. If no such
+    /// entry exists, this is a no-op returning `false`.
+    pub(crate) fn unwatch(
+        &self,
+        target: ActorPath,
+        watcher_path: ActorPath,
+    ) -> bool {
         if let Some(mut entries) = self.watchers.get_mut(&target) {
+            let before = entries.len();
             entries.retain(|entry| entry.watcher_path != watcher_path);
+            return entries.len() != before;
         }
+        false
     }
 
     /// Notifies every watcher of `target` that it has terminated.
