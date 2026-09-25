@@ -112,6 +112,9 @@ where
     /// scheduler task runs. Returns a `TimerKey` that can be used to cancel
     /// the timer.
     ///
+    /// If the scheduler is shutting down, the timer is ignored but a key is
+    /// still returned (cancelling it is a no-op).
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfiguration`] if `delay` exceeds one year.
@@ -959,6 +962,9 @@ where
     ///
     /// Returns the actor's response on success, or an error if the actor has stopped
     /// or the message channel is full.
+    ///
+    /// If the handler never replies, this waits indefinitely; prefer
+    /// [`ActorRef::ask_timeout`] when the handler may hang.
     pub async fn ask(&self, message: A::Message) -> Result<A::Response, Error> {
         self.sender.ask(self.path(), message).await
     }

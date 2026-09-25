@@ -403,11 +403,17 @@ async fn fire_expired_timers<A: Actor + Handler<A>>(
 
             // Re-insert periodic timers with their next deadline. Periodic
             // timers created in an older epoch are discarded on this firing.
+            // Coalesce stalls: if the system lagged more than one period,
+            // schedule from now instead of chaining missed deadlines
+            // (which would busy-loop firing expired timers back-to-back).
             if let Some(period) = entry.period
                 && active
             {
+                let now = tokio::time::Instant::now();
+                let next = entry.deadline + period;
+                let deadline = if next <= now { now + period } else { next };
                 heap.push(TimerEntry {
-                    deadline: entry.deadline + period,
+                    deadline,
                     key: entry.key,
                     msg: entry.msg.clone(),
                     period: entry.period,

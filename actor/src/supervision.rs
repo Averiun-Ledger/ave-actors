@@ -126,16 +126,16 @@ impl Default for Strategy {
 
 /// Applies ±25% jitter to a duration.
 fn apply_jitter(duration: Duration) -> Duration {
-    let base_ms = duration.as_millis() as u64;
-    let jitter_range = base_ms / 4;
+    let base_us = duration.as_micros().min(u64::MAX as u128) as u64;
+    let jitter_range = base_us / 4;
     let jitter = fastrand::u64(0..=jitter_range * 2) as i64;
     let offset = jitter - jitter_range as i64;
-    let result_ms = if offset >= 0 {
-        base_ms.saturating_add(offset as u64)
+    let result_us = if offset >= 0 {
+        base_us.saturating_add(offset as u64)
     } else {
-        base_ms.saturating_sub((-offset) as u64)
+        base_us.saturating_sub((-offset) as u64)
     };
-    Duration::from_millis(result_ms)
+    Duration::from_micros(result_us.max(1))
 }
 
 /// Retries startup immediately with no delay between attempts, up to `max_retries` times.
@@ -595,5 +595,20 @@ mod tests {
             (0..=MAX_RETRIES).map(|_| Duration::from_secs(1)).collect();
         let result = CustomIntervalStrategy::try_new(durations);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_apply_jitter_preserves_sub_ms() {
+        for _ in 0..100 {
+            let jittered = apply_jitter(Duration::from_micros(100));
+            assert!(
+                !jittered.is_zero(),
+                "jitter must never collapse a sub-ms delay to zero"
+            );
+            assert!(
+                jittered <= Duration::from_micros(125),
+                "jittered {jittered:?} exceeds +25% of 100µs"
+            );
+        }
     }
 }

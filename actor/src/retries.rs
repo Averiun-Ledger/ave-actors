@@ -41,6 +41,11 @@ where
     async fn notify(&self, ctx: &ActorContext<RetryActor<T>>) {
         if let Ok(parent) = ctx.get_parent::<P>().await {
             let _ = parent.tell(self.message.clone()).await;
+        } else {
+            tracing::warn!(
+                "RetryActor completion notifier has no parent; notification \
+                 dropped"
+            );
         }
     }
 }

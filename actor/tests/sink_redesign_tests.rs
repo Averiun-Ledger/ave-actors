@@ -720,3 +720,41 @@ async fn test_register_sink_with_buffer_rejects_zero_capacity() {
     let result = actor_ref.register_sink_with_buffer("bad_sink", None, 0);
     assert!(matches!(result, Err(Error::InvalidConfiguration { .. })));
 }
+
+#[test(tokio::test)]
+async fn test_panicking_filter_does_not_kill_sink() {
+    use ave_actors_actor::SinkEntry;
+
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    let actor_ref = system
+        .create_root_actor("panic_filter", EmitterActor)
+        .await
+        .unwrap();
+
+    let ok_sub = CollectingSubscriber::new();
+    let mut sink = actor_ref
+        .register_sink("panic_sink", None)
+        .expect("valid sink");
+    sink.add("ok", ok_sub.clone());
+    sink.add_entry(
+        SinkEntry::new("panicker", CollectingSubscriber::new())
+            .filter(|_: &TestEvent| panic!("intentional filter panic")),
+    );
+
+    actor_ref.tell(TestMsg::Emit(1)).await.unwrap();
+    actor_ref.tell(TestMsg::Emit(2)).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if ok_sub.clone_events().await.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("sink worker must survive a panicking filter");
+}

@@ -65,22 +65,22 @@ keywords = ["actor-model", "tokio", "event-sourcing", "persistence", "supervisio
 repository = "https://github.com/Averiun-Ledger/ave-actors"
 
 [workspace.dependencies]
-async-trait = { version = "0.1.89" }
+async-trait = { version = "0.1.92" }
 ave-actors-actor = { path = "actor", version = "0.6.0" }
 ave-actors-rocksdb = { path = "databases/rocksdb_db", version = "0.5.0" }
 ave-actors-sqlite = { path = "databases/sqlite_db", version = "0.7.0" }
 ave-actors-store = { path = "store", version = "0.6.0" }
-borsh = { version = "1.7.0", features = ["derive"] }
+borsh = { version = "1.8.0", features = ["derive"] }
 dashmap = "6.2.1"
-fastrand = "2.4.1"
+fastrand = "2.5.0"
 memsecurity = { version = "3.5.2", features = ["encryption"] }
 prometheus-client = "0.25.0"
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 tempfile = "3.27.0"
 test-log = { version = "0.2.21", features = ["trace"] }
-thiserror = { version = "2.0.18" }
-tokio = { version = "1.52.3" }
-tokio-util = { version = "0.7.18" }
+thiserror = { version = "2.0.20" }
+tokio = { version = "1.53.1" }
+tokio-util = { version = "0.7.19" }
 tracing = { version = "0.1.44" }
 tracing-test = "0.2.6"
 zeroize = "1.9.0"

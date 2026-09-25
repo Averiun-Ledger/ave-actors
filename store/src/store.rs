@@ -728,8 +728,24 @@ where
 
         let from_key = format!("{:020}", from);
         let to_key = format!("{:020}", to);
-        let expected = (to - from + 1) as usize;
-        let mut events = Vec::with_capacity(expected);
+        let expected = (to - from).checked_add(1).ok_or_else(|| {
+            store_error(
+                StoreOperation::GetEventsRange,
+                "event range overflow: [from..=to] too large",
+            )
+        })? as usize;
+        // Bound a single recovery read so a corrupt counter (e.g.
+        // metadata.next_event_index = u64::MAX) cannot OOM the actor
+        // by reserving gigabytes up front. Grow incrementally instead
+        // of `with_capacity(expected)`; gap detection below still
+        // reports truncated logs.
+        let mut events = Vec::new();
+        events.try_reserve(expected.min(1024)).map_err(|_| {
+            store_error(
+                StoreOperation::GetEventsRange,
+                "failed to reserve event buffer",
+            )
+        })?;
 
         let iter = self
             .events
@@ -792,10 +808,14 @@ where
         let bytes = self.maybe_encrypt(&data)?;
 
         self.states.put(&bytes)?;
+        let prev_state_counter = self.state_counter;
         self.state_counter = next_state_counter;
         #[cfg(feature = "prometheus")]
         self.record_pending_events();
-        self.persist_metadata()?;
+        if let Err(e) = self.persist_metadata() {
+            self.state_counter = prev_state_counter;
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -1292,6 +1312,16 @@ where
                 state,
                 snapshot_every,
             } => {
+                if snapshot_every == Some(0) {
+                    return Err(actor_store_error(
+                        StoreOperation::PersistFull,
+                        Error::InvalidConfiguration {
+                            component: "actor persistence".to_owned(),
+                            reason: "snapshot_every cannot be Some(0)"
+                                .to_owned(),
+                        },
+                    ));
+                }
                 #[cfg(feature = "prometheus")]
                 let start = Instant::now();
                 let combined = self.persist(event.as_ref()).and_then(|()| {
@@ -1884,6 +1914,41 @@ mod tests {
         }
     }
 
+    #[test(tokio::test)]
+    async fn test_persist_full_rejects_snapshot_every_zero() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+
+        let initial = Arc::new(CounterState { value: 0 });
+        let store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+        let store_ref = system.create_root_actor("store", store).await.unwrap();
+
+        let result = store_ref
+            .ask(StoreCommand::PersistFull {
+                event: Arc::new(CounterEvent(1)),
+                state: Arc::new(CounterState { value: 1 }),
+                snapshot_every: Some(0),
+            })
+            .await;
+        assert!(
+            result.is_err(),
+            "PersistFull with snapshot_every Some(0) must be rejected, got \
+             {result:?}"
+        );
+    }
+
     #[test]
     fn test_light_persistence_stores_only_snapshot() {
         let initial = Arc::new(CounterState { value: 0 });
@@ -2153,6 +2218,94 @@ mod tests {
         assert_eq!(store.event_counter, 0);
         assert_eq!(store.state_counter, 0);
         assert!(store.recover().unwrap().is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Mock backend where snapshot writes succeed but metadata writes fail,
+    // used to verify `snapshot()` rolls back `state_counter`.
+    // ------------------------------------------------------------------
+
+    #[derive(Clone)]
+    struct MetadataFailState {
+        inner: MemoryStore,
+        fail_puts: bool,
+    }
+
+    impl State for MetadataFailState {
+        fn name(&self) -> &str {
+            State::name(&self.inner)
+        }
+
+        fn get(&self) -> Result<Vec<u8>, Error> {
+            State::get(&self.inner)
+        }
+
+        fn put(&mut self, data: &[u8]) -> Result<(), Error> {
+            if self.fail_puts {
+                return Err(Error::Store {
+                    operation: StoreOperation::Snapshot,
+                    reason: "injected metadata failure".to_owned(),
+                    source: None,
+                });
+            }
+            State::put(&mut self.inner, data)
+        }
+
+        fn del(&mut self) -> Result<(), Error> {
+            State::del(&mut self.inner)
+        }
+
+        fn purge(&mut self) -> Result<(), Error> {
+            State::purge(&mut self.inner)
+        }
+    }
+
+    #[derive(Default, Clone)]
+    struct MetadataFailManager {
+        inner: MemoryManager,
+    }
+
+    impl DbManager<MemoryStore, MetadataFailState> for MetadataFailManager {
+        fn create_collection(
+            &self,
+            name: &str,
+            prefix: &str,
+        ) -> Result<MemoryStore, Error> {
+            self.inner.create_collection(name, prefix)
+        }
+
+        fn create_state(
+            &self,
+            name: &str,
+            prefix: &str,
+        ) -> Result<MetadataFailState, Error> {
+            Ok(MetadataFailState {
+                inner: self.inner.create_state(name, prefix)?,
+                fail_puts: name.contains("metadata"),
+            })
+        }
+
+        fn stop(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_snapshot_metadata_failure_rolls_back_state_counter() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            MetadataFailManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        assert!(store.snapshot(&CounterState { value: 5 }).is_err());
+        assert_eq!(store.event_counter, 0);
+        assert_eq!(store.state_counter, 0);
+        assert_eq!(store.pending_events_since_snapshot(), 0);
     }
 
     #[test]

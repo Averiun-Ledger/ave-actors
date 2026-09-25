@@ -653,8 +653,12 @@ impl Collection for RocksDbStore {
         if let Some(handle) = self.cf() {
             let wopts = write_options(self.strong_durability);
             let start_key = format!("{}.{}", self.prefix, start).into_bytes();
+            // Exclusive end: `end + \x00` is the smallest key strictly
+            // greater than the inclusive `end` key, so `[start, end]`
+            // is deleted exactly without catching `end_extra` keys
+            // (the previous `0xFF` suffix over-deleted siblings).
             let mut end_key = format!("{}.{}", self.prefix, end).into_bytes();
-            end_key.push(0xFF);
+            end_key.push(0x00);
             debug!(cf = %self.name, "Deleting collection range");
             self.store
                 .delete_range_cf_opt(&handle, start_key, end_key, &wopts)
@@ -1021,5 +1025,24 @@ mod tests {
         let manager = RocksDbManager::default();
         let result = manager.ensure_cf("test\0name");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_del_range_is_exact_inclusive() {
+        let manager = RocksDbManager::default();
+        let mut store = manager.create_collection("c", "pref").unwrap();
+        Collection::put(&mut store, "a", b"1").unwrap();
+        Collection::put(&mut store, "a_extra", b"2").unwrap();
+        Collection::put(&mut store, "b", b"3").unwrap();
+
+        Collection::del_range(&mut store, "a", "a").unwrap();
+
+        assert!(matches!(
+            Collection::get(&store, "a"),
+            Err(Error::EntryNotFound { .. })
+        ));
+        // Sibling sharing the `a` prefix must survive an exact range delete.
+        assert_eq!(Collection::get(&store, "a_extra").unwrap(), b"2".to_vec());
+        assert_eq!(Collection::get(&store, "b").unwrap(), b"3".to_vec());
     }
 }

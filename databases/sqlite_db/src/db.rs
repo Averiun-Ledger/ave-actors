@@ -723,7 +723,7 @@ impl Iterator for SqliteRangeChunkedIterator {
 impl State for SqliteCollection {
     fn get(&self) -> Result<Vec<u8>, Error> {
         let query =
-            format!("SELECT value FROM {} WHERE prefix = ?1", &self.table);
+            format!("SELECT value FROM {} WHERE prefix = ?1", self.table);
         let key = self.state_key();
         let conn = self.manager.pool.checkout().map_err(|e| {
             error!(error = %e, "Failed to check out connection for state get");
@@ -744,7 +744,7 @@ impl State for SqliteCollection {
     fn put(&mut self, data: &[u8]) -> Result<(), Error> {
         let stmt = format!(
             "INSERT OR REPLACE INTO {} (prefix, value) VALUES (?1, ?2)",
-            &self.table
+            self.table
         );
         let conn = self.manager.pool.checkout().map_err(|e| {
             error!(error = %e, "Failed to check out connection for state put");
@@ -768,7 +768,7 @@ impl State for SqliteCollection {
     }
 
     fn del(&mut self) -> Result<(), Error> {
-        let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
+        let stmt = format!("DELETE FROM {} WHERE prefix = ?1", self.table);
         let conn = self.manager.pool.checkout().map_err(|e| {
             error!(error = %e, "Failed to check out connection for state delete");
             Error::Store {
@@ -798,7 +798,7 @@ impl State for SqliteCollection {
     }
 
     fn purge(&mut self) -> Result<(), Error> {
-        let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
+        let stmt = format!("DELETE FROM {} WHERE prefix = ?1", self.table);
         let conn = self.manager.pool.checkout().map_err(|e| {
             error!(error = %e, "Failed to check out connection for state purge");
             Error::Store {
@@ -829,7 +829,7 @@ impl Collection for SqliteCollection {
     fn get(&self, key: &str) -> Result<Vec<u8>, Error> {
         let query = format!(
             "SELECT value FROM {} WHERE prefix = ?1 AND sn = ?2",
-            &self.table
+            self.table
         );
         let collection_key = self.collection_key(key);
         let conn = self.manager.pool.checkout().map_err(|e| {
@@ -851,7 +851,7 @@ impl Collection for SqliteCollection {
     fn put(&mut self, key: &str, data: &[u8]) -> Result<(), Error> {
         let stmt = format!(
             "INSERT OR REPLACE INTO {} (prefix, sn, value) VALUES (?1, ?2, ?3)",
-            &self.table
+            self.table
         );
         let conn = self.manager.pool.checkout().map_err(|e| {
             error!(error = %e, "Failed to check out connection for collection put");
@@ -875,10 +875,8 @@ impl Collection for SqliteCollection {
     }
 
     fn del(&mut self, key: &str) -> Result<(), Error> {
-        let stmt = format!(
-            "DELETE FROM {} WHERE prefix = ?1 AND sn = ?2",
-            &self.table
-        );
+        let stmt =
+            format!("DELETE FROM {} WHERE prefix = ?1 AND sn = ?2", self.table);
         let conn = self.manager.pool.checkout().map_err(|e| {
             error!(error = %e, "Failed to check out connection for collection delete");
             Error::Store {
@@ -908,7 +906,7 @@ impl Collection for SqliteCollection {
     }
 
     fn purge(&mut self) -> Result<(), Error> {
-        let stmt = format!("DELETE FROM {} WHERE prefix = ?1", &self.table);
+        let stmt = format!("DELETE FROM {} WHERE prefix = ?1", self.table);
         let conn = self.manager.pool.checkout().map_err(|e| {
             error!(error = %e, "Failed to check out connection for collection purge");
             Error::Store {
@@ -968,7 +966,7 @@ impl Collection for SqliteCollection {
     fn del_range(&mut self, start: &str, end: &str) -> Result<(), Error> {
         let stmt = format!(
             "DELETE FROM {} WHERE prefix = ?1 AND sn >= ?2 AND sn <= ?3",
-            &self.table
+            self.table
         );
         let conn = self.manager.pool.checkout().map_err(|e| {
             error!(error = %e, "Failed to check out connection for collection del_range");

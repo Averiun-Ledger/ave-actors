@@ -13,7 +13,7 @@ rust-version.workspace = true
 
 [dependencies]
 ave-actors-store = { workspace = true }
-rocksdb = { version = "0.24.0", features = ["multi-threaded-cf"], optional = true }
+rocksdb = { version = "0.25.0", features = ["multi-threaded-cf"], optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

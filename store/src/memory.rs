@@ -153,8 +153,20 @@ impl State for MemoryStore {
 
 impl Collection for MemoryStore {
     fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
-        let mut iter = self.iter(true)?;
-        iter.next().transpose()
+        let lock = self.data.read().map_err(|e| Error::Store {
+            source: None,
+            operation: StoreOperation::LockData,
+            reason: e.to_string(),
+        })?;
+        let collection_prefix = self.collection_prefix();
+        let prefix_len = collection_prefix.len();
+        // BTreeMap range scan from the end: O(log n + 1) instead of
+        // cloning the whole map via `iter(true)`.
+        let upper = format!("{}~", collection_prefix);
+        Ok(lock
+            .range(collection_prefix..upper)
+            .next_back()
+            .map(|(key, value)| (key[prefix_len..].to_owned(), value.clone())))
     }
 
     fn name(&self) -> &str {

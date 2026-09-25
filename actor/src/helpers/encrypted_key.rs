@@ -53,6 +53,14 @@ impl EncryptedKey {
             }
         })?;
 
+        if decrypted.as_ref().len() != 32 {
+            tracing::error!("Decrypted key has invalid length");
+            return Err(Error::Helper {
+                name: "decryption".to_owned(),
+                reason: "Decrypted key has invalid length".to_owned(),
+            });
+        }
+
         let mut key_array = Zeroizing::new([0u8; 32]);
         key_array.copy_from_slice(decrypted.as_ref());
 

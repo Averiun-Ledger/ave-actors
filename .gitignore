@@ -24,3 +24,4 @@ temporal/
 .agents/
 todo.txt
 docs/
+.codegraph-cache

@@ -448,7 +448,23 @@ impl<E: Event> Sink<E> {
                             .unwrap_or_else(|e| e.into_inner());
                         entries
                             .iter()
-                            .filter(|e| (e.filter)(&event))
+                            .filter(|e| {
+                                std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(|| {
+                                        (e.filter)(&event)
+                                    }),
+                                )
+                                .unwrap_or_else(|_| {
+                                    error!(
+                                        sink = %inner.name,
+                                        subscriber = %e.id,
+                                        "Subscriber filter panicked; skipping \
+                                         event for this subscriber"
+                                    );
+                                    inner.inc_delivery_failure();
+                                    false
+                                })
+                            })
                             .cloned()
                             .collect()
                     };

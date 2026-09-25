@@ -126,6 +126,11 @@ impl ActorSystem {
     /// shutdown (exit code 1); the reason is reflected in [`SystemRunner::run`]'s return value.
     ///
     /// Uses [`ActorSystemConfig::default`] for the system configuration.
+    ///
+    /// # Panics
+    ///
+    /// Requires an active Tokio runtime (spawns internal tasks); calling
+    /// outside a runtime panics.
     pub fn create(
         graceful_token: CancellationToken,
         crash_token: CancellationToken,

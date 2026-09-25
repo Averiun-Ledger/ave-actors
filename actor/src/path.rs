@@ -421,7 +421,7 @@ mod tests {
     fn test_add_path() {
         let path = ActorPath::from("/acme");
         let child = path.clone() / "child";
-        println!("{}", &child);
+        println!("{}", child);
         assert!(path.is_parent_of(&child))
     }
 
