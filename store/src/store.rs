@@ -281,6 +281,12 @@ where
     /// Creates the child `Store` actor, opens the storage backend, and
     /// recovers any persisted state.
     ///
+    /// When `prefix` is `None`, it defaults to
+    /// [`default_store_prefix`] of the actor's full path, so sibling
+    /// subtrees with equal leaf names never share backend tables.
+    /// Pass an explicit prefix only to share state across actors on
+    /// purpose.
+    ///
     /// Call this from [`pre_start`](Actor::pre_start).
     async fn start_store<C: Collection, S: crate::database::State>(
         &mut self,
@@ -299,7 +305,14 @@ where
             });
         }
 
-        let prefix = prefix.unwrap_or_else(|| ctx.path().key());
+        let default_prefix;
+        let prefix = match prefix {
+            Some(prefix) => prefix,
+            None => {
+                default_prefix = default_store_prefix(ctx.path());
+                default_prefix.as_str()
+            }
+        };
 
         #[cfg(feature = "prometheus")]
         let store = {
@@ -439,6 +452,47 @@ fn validate_store_prefix(prefix: &str) -> Result<(), Error> {
             ),
         })
     }
+}
+
+/// Maximum length of a derived store prefix before the tail is hashed.
+const MAX_DERIVED_PREFIX_LEN: usize = 200;
+
+/// Derives the default store prefix from an actor's full path.
+///
+/// Used when [`PersistentActor::start_store`] is called with
+/// `prefix = None`. Every segment contributes, so two actors that share
+/// only their leaf name (e.g. `/user/a/counter` and `/user/b/counter`)
+/// get distinct prefixes (`user__a__counter` vs `user__b__counter`) and
+/// never share backend tables.
+///
+/// Only `[A-Za-z0-9_-]` characters are produced, satisfying
+/// `validate_store_prefix`. Overlong paths keep a head slice plus a
+/// deterministic FNV-1a hash of the full path, so the mapping is stable
+/// across restarts.
+pub fn default_store_prefix(path: &ActorPath) -> String {
+    let trimmed = path.to_string();
+    let trimmed = trimmed.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return "root".to_owned();
+    }
+    let mut prefix = trimmed.replace('/', "__");
+    if prefix.len() > MAX_DERIVED_PREFIX_LEN {
+        let hash = fnv1a64(trimmed.as_bytes());
+        prefix.truncate(MAX_DERIVED_PREFIX_LEN - 17);
+        prefix.push_str(&format!("_{hash:016x}"));
+    }
+    prefix
+}
+
+fn fnv1a64(data: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = OFFSET;
+    for byte in data {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 impl<A> Store<A>
@@ -2306,6 +2360,50 @@ mod tests {
         assert_eq!(store.event_counter, 0);
         assert_eq!(store.state_counter, 0);
         assert_eq!(store.pending_events_since_snapshot(), 0);
+    }
+
+    #[test]
+    fn test_default_store_prefix_uses_full_path() {
+        use ave_actors_actor::ActorPath;
+
+        let a = default_store_prefix(&ActorPath::from("/user/a/counter"));
+        let b = default_store_prefix(&ActorPath::from("/user/b/counter"));
+        assert_eq!(a, "user__a__counter");
+        assert_eq!(b, "user__b__counter");
+        assert_ne!(a, b);
+
+        // Every derived prefix must satisfy backend validation.
+        validate_store_prefix(&a).unwrap();
+        validate_store_prefix(&b).unwrap();
+
+        // Top-level actors keep the leaf name (unchanged behaviour).
+        let top = default_store_prefix(&ActorPath::from("/user"));
+        assert_eq!(top, "user");
+    }
+
+    #[test]
+    fn test_default_store_prefix_long_path_is_bounded_and_stable() {
+        use ave_actors_actor::ActorPath;
+
+        let mut path = ActorPath::from("/user");
+        for i in 0..30 {
+            path = path / format!("segment-{i:02}-xxxxxxxxxx").as_str();
+        }
+        let first = default_store_prefix(&path);
+        let second = default_store_prefix(&path);
+        assert_eq!(first, second, "mapping must be stable across calls");
+        assert!(
+            first.len() <= MAX_DERIVED_PREFIX_LEN,
+            "derived prefix must be bounded, got {} chars",
+            first.len()
+        );
+        validate_store_prefix(&first).unwrap();
+
+        // A different leaf under the same long parent must differ.
+        let other = default_store_prefix(&ActorPath::from(
+            format!("{path}/other").as_str(),
+        ));
+        assert_ne!(first, other);
     }
 
     #[test]

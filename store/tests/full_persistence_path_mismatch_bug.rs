@@ -71,7 +71,7 @@ impl Actor for PathActor {
         });
         let manager = manager_ref.lock().await.clone();
 
-        // Default prefix is derived from the actor path key.
+        // Default prefix is derived from the actor's full path.
         self.start_store("path_test", None, ctx, manager, None)
             .await
     }

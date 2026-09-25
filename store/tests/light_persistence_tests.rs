@@ -13,6 +13,7 @@ use ave_actors_actor::{
 };
 use ave_actors_store::{
     database::{Collection, DbManager},
+    default_store_prefix,
     memory::MemoryManager,
     store::{LightPersistence, PersistentActor, StoreCommand, StoreResponse},
 };
@@ -248,11 +249,12 @@ async fn test_light_persistence_does_not_store_events() {
     actor_ref.ask(LightMessage::Increment(7)).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    // The store was started with name "store" and prefix "light-no-events",
-    // so the event collection is "store_events" under that prefix.
-    let collection = manager
-        .create_collection("store_events", "light-no-events")
-        .unwrap();
+    // The store was started with name "store" and the default prefix
+    // derived from the actor's full path, so the event collection is
+    // "store_events" under that prefix.
+    let prefix = default_store_prefix(&actor_ref.path());
+    let collection =
+        manager.create_collection("store_events", &prefix).unwrap();
     assert!(
         collection.iter(false).unwrap().next().is_none(),
         "LightPersistence must not persist events"

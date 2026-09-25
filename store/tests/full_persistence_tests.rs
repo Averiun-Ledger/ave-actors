@@ -8,11 +8,12 @@ mod helpers;
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, Error as ActorError,
-    Event, Handler, Message, Response,
+    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction,
+    Error as ActorError, Event, Handler, Message, NotPersistentActor, Response,
 };
 use ave_actors_store::{
     database::{Collection, DbManager},
+    default_store_prefix,
     memory::MemoryManager,
     store::{FullPersistence, PersistentActor, StoreCommand, StoreResponse},
 };
@@ -191,21 +192,19 @@ async fn test_full_persistence_actor_keeps_event_history() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    // The store was started with name "store" and prefix equal to the actor
-    // name ("full-history"), so the backend collections are "store_events" and
-    // "store_states" under the "full-history" prefix.
-    let collection = manager
-        .create_collection("store_events", "full-history")
-        .unwrap();
+    // The store was started with name "store" and the default prefix
+    // derived from the actor's full path, so the backend collections are
+    // "store_events" and "store_states" under that prefix.
+    let prefix = default_store_prefix(&actor_ref.path());
+    let collection =
+        manager.create_collection("store_events", &prefix).unwrap();
     let events: Vec<_> = collection
         .iter(false)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
-    let state = manager
-        .create_state("store_states", "full-history")
-        .unwrap();
+    let state = manager.create_state("store_states", &prefix).unwrap();
 
     assert_eq!(events.len(), 2, "FullPersistence must keep event history");
     assert!(
@@ -376,7 +375,8 @@ async fn test_full_persistence_actor_snapshot_every_respected() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let state = manager.create_state("store_states", "full-every2").unwrap();
+    let prefix = default_store_prefix(&actor_ref.path());
+    let state = manager.create_state("store_states", &prefix).unwrap();
     assert!(
         ave_actors_store::database::State::get(&state).is_ok(),
         "snapshot must be created after reaching snapshot_every"
@@ -386,9 +386,8 @@ async fn test_full_persistence_actor_snapshot_every_respected() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let collection = manager
-        .create_collection("store_events", "full-every2")
-        .unwrap();
+    let collection =
+        manager.create_collection("store_events", &prefix).unwrap();
     let events: Vec<_> = collection
         .iter(false)
         .unwrap()
@@ -424,7 +423,8 @@ async fn test_full_persistence_actor_no_snapshot_before_due() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let state = manager.create_state("store_states", "full-every5").unwrap();
+    let prefix = default_store_prefix(&actor_ref.path());
+    let state = manager.create_state("store_states", &prefix).unwrap();
     assert!(
         ave_actors_store::database::State::get(&state).is_err(),
         "no snapshot must be created before snapshot_every"
@@ -456,9 +456,134 @@ async fn test_full_persistence_actor_snapshot_on_stop() {
     actor_ref.ask_stop().await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let state = manager.create_state("store_states", "full-stop").unwrap();
+    let prefix = default_store_prefix(&actor_ref.path());
+    let state = manager.create_state("store_states", &prefix).unwrap();
     assert!(
         ave_actors_store::database::State::get(&state).is_ok(),
         "snapshot must be created on actor stop"
     );
+}
+
+// Non-persistent parent that hosts a persistent child named "counter".
+// Two parents ("p1", "p2") yield children at `/user/p1/counter` and
+// `/user/p2/counter`: same leaf, different full paths.
+#[derive(Debug, Clone)]
+struct BranchParent;
+
+impl NotPersistentActor for BranchParent {}
+
+#[async_trait]
+impl Actor for BranchParent {
+    type Message = FullMessage;
+    type Response = FullResponse;
+    type Event = FullEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("BranchParent", id = %id)
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        ctx.create_child("counter", FullActor::initial(())).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for BranchParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: FullMessage,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<FullResponse, ActorError> {
+        let child: ActorRef<FullActor> = ctx
+            .get_child("counter")
+            .await
+            .map_err(|_| ActorError::Functional {
+                description: "counter child missing".to_owned(),
+            })?;
+        match msg {
+            FullMessage::Increment(_) => child.ask(msg).await,
+            FullMessage::Get => child.ask(msg).await,
+        }
+    }
+
+    async fn on_child_error(
+        &mut self,
+        _error: ActorError,
+        _ctx: &mut ActorContext<Self>,
+    ) {
+    }
+
+    async fn on_child_fault(
+        &mut self,
+        _error: ActorError,
+        _ctx: &mut ActorContext<Self>,
+    ) -> ChildAction {
+        ChildAction::Stop
+    }
+}
+
+#[test(tokio::test)]
+async fn test_same_leaf_name_under_different_parents_is_isolated() {
+    let manager = MemoryManager::default();
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    system.add_helper("db", manager.clone());
+
+    let parent_a = system.create_root_actor("p1", BranchParent).await.unwrap();
+    let parent_b = system.create_root_actor("p2", BranchParent).await.unwrap();
+
+    parent_a.ask(FullMessage::Increment(10)).await.unwrap();
+    parent_b.ask(FullMessage::Increment(100)).await.unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Each subtree keeps its own state: previously both children shared
+    // the "counter" prefix and the second write corrupted the first.
+    assert_eq!(
+        parent_a.ask(FullMessage::Get).await.unwrap(),
+        FullResponse::Counter(10)
+    );
+    assert_eq!(
+        parent_b.ask(FullMessage::Get).await.unwrap(),
+        FullResponse::Counter(100)
+    );
+
+    // The backend holds two distinct prefixes.
+    let prefix_a = default_store_prefix(&ActorPath::from("/user/p1/counter"));
+    let prefix_b = default_store_prefix(&ActorPath::from("/user/p2/counter"));
+    assert_ne!(prefix_a, prefix_b);
+    assert_eq!(
+        manager
+            .create_collection("store_events", &prefix_a)
+            .unwrap()
+            .iter(false)
+            .unwrap()
+            .count(),
+        1
+    );
+    assert_eq!(
+        manager
+            .create_collection("store_events", &prefix_b)
+            .unwrap()
+            .iter(false)
+            .unwrap()
+            .count(),
+        1
+    );
+
+    parent_a.ask_stop().await.unwrap();
+    parent_b.ask_stop().await.unwrap();
 }

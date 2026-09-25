@@ -15,6 +15,7 @@ pub use ave_actors_store::{
     Error as StoreError, StoreOperation,
     config::*,
     database::{Collection, DbManager, State},
+    default_store_prefix,
     store::{
         FullPersistence, InitializedActor, LightPersistence, PersistentActor,
         Store, StoreCommand, StoreResponse,
