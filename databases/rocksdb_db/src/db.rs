@@ -119,6 +119,11 @@ impl RocksDbManager {
     /// # Arguments
     ///
     /// * `path` - Directory path where the RocksDB database will be created.
+    ///   Unlike `SqliteManager::new` (which creates `path/database.db`),
+    ///   `path` itself is opened as the RocksDB database directory.
+    /// * `durability` - when `true`, every write is synced to the WAL
+    ///   (`WriteOptions::set_sync(true)`); when `false`, writes return
+    ///   once in the OS buffers (faster, small window of loss on crash).
     ///
     /// # Returns
     ///
@@ -290,16 +295,23 @@ fn write_options(sync: bool) -> WriteOptions {
 
 impl RocksDbManager {
     fn ensure_cf(&self, name: &str) -> Result<(), Error> {
-        if self.db.cf_handle(name).is_none() {
-            debug!(cf = name, "Creating column family");
-            self.db.create_cf(name, &self.opts).map_err(|e| {
-                error!(cf = name, error = %e, "Failed to create column family");
-                Error::CreateStore {
-                    reason: format!("{:?}", e),
-                }
-            })?;
+        if self.db.cf_handle(name).is_some() {
+            return Ok(());
         }
-        Ok(())
+        match self.db.create_cf(name, &self.opts) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Lost the creation race: another thread created it first.
+                if self.db.cf_handle(name).is_some() {
+                    debug!(cf = name, "Column family appeared concurrently");
+                    return Ok(());
+                }
+                error!(cf = name, error = %e, "Failed to create column family");
+                Err(Error::CreateStore {
+                    reason: format!("{:?}", e),
+                })
+            }
+        }
     }
 }
 
@@ -357,7 +369,9 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
 
         // Flush every column family's memtable → SST so the next startup
         // does not need WAL replay. Errors here are non-fatal because the
-        // WAL sync above already guarantees durability.
+        // WAL sync above already guarantees durability. Column families
+        // created concurrently after the listing below are covered by the
+        // WAL sync (they only miss the best-effort memtable flush).
         let cf_names =
             DB::list_cf(&self.opts, &self.path).map_err(|e| Error::Store {
                 source: None,
@@ -374,7 +388,10 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
 
         // Dropping `self` releases this manager's strong reference to the
         // shared `Arc<DB>`. RocksDB closes and the file lock is freed only
-        // once the last clone (managers, stores and iterators) is dropped.
+        // once the last clone (managers, stores and iterators) is dropped:
+        // callers must drop every `RocksDbStore` and iterator before
+        // reopening the same path, or the open fails with a file lock
+        // error. `Ok` here means "flushed", not "closed".
         debug!("RocksDB stop complete");
         Ok(())
     }
@@ -419,10 +436,8 @@ impl State for RocksDbStore {
 
     fn get(&self) -> Result<Vec<u8>, Error> {
         if let Some(handle) = self.cf() {
-            let result = self
-                .store
-                .get_cf(&handle, self.prefix.clone())
-                .map_err(|e| {
+            let result =
+                self.store.get_cf(&handle, &self.prefix).map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to get state");
                     Error::Get {
                         key: self.prefix.clone(),
@@ -453,7 +468,7 @@ impl State for RocksDbStore {
             let wopts = write_options(self.strong_durability);
             Ok(self
                 .store
-                .put_cf_opt(&handle, self.prefix.clone(), data, &wopts)
+                .put_cf_opt(&handle, &self.prefix, data, &wopts)
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to put state");
                     Error::Store {
@@ -494,7 +509,7 @@ impl State for RocksDbStore {
             let wopts = write_options(self.strong_durability);
             Ok(self
                 .store
-                .delete_cf_opt(&handle, self.prefix.clone(), &wopts)
+                .delete_cf_opt(&handle, &self.prefix, &wopts)
                 .map_err(|e| {
                     warn!(cf = %self.name, error = %e, "Failed to delete state");
                     Error::Store {
@@ -520,7 +535,7 @@ impl State for RocksDbStore {
             // Delete only the exact state key to avoid touching other prefixes,
             // even if someone reused or nested prefixes.
             self.store
-                .delete_cf_opt(&handle, self.prefix.clone(), &wopts)
+                .delete_cf_opt(&handle, &self.prefix, &wopts)
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to purge state");
                     Error::Store {

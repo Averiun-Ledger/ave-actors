@@ -136,5 +136,7 @@ fn create_state(&self, identifier: &str, prefix: &str) -> Result<SqliteCollectio
 ## Behavior notes
 
 - Collections are ordered lexicographically by key. Zero-padded sequence numbers are recommended if keys represent event numbers.
-- All store handles share a bounded connection pool sized from the host (1× vCPU, clamped between 4 and 16), plus one administrative connection for maintenance; checkout blocks when the pool is exhausted.
-- `SqliteManager::stop()` runs `PRAGMA optimize` and checkpoints the WAL before shutdown.
+- Chunked iterators take no snapshot: each chunk uses a fresh connection, so concurrent writes mid-scan may duplicate or skip rows. Only iterate quiescent stores (recovery) or tolerate it.
+- Event rows are addressed as (`prefix`, `sn`); the `prefix.key` notation elsewhere means the same pair. (The store's *derived* default prefix itself uses `__` separators, e.g. `user__a__counter`.)
+- Encryption covers values only; `prefix` and `sn` stay in plaintext (actor namespaces and volumes are observable metadata).
+- All store handles share a bounded connection pool sized from the host (1× vCPU clamped 4–16, then capped so pooled page caches stay within 6% of RAM), plus one administrative connection for maintenance; checkout waits up to 5s and then fails instead of blocking forever, and idle connections above half the pool are closed on return. Multi-write batches run in a single `BEGIN IMMEDIATE…COMMIT` transaction.

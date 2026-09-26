@@ -990,3 +990,312 @@ async fn test_system_shutdown_uses_root_stop_timeout_for_blocked_root() {
             .expect("runner task should not panic");
     assert_eq!(shutdown, ShutdownReason::Graceful);
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum BackoffMsg {
+    Trigger,
+}
+
+impl Message for BackoffMsg {}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BackoffResponse;
+
+impl Response for BackoffResponse {}
+
+#[derive(Clone)]
+struct BackoffParent;
+
+impl NotPersistentActor for BackoffParent {}
+
+#[async_trait]
+impl Actor for BackoffParent {
+    type Message = BackoffMsg;
+    type Response = BackoffResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("BackoffParent", id = %id)
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        ctx.create_child("child", BackoffChild).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for BackoffParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: BackoffMsg,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<BackoffResponse, Error> {
+        match msg {
+            BackoffMsg::Trigger => {
+                let child: ActorRef<BackoffChild> =
+                    ctx.get_child("child").await.unwrap();
+                child.tell(BackoffChildMsg).await.unwrap();
+                Ok(BackoffResponse)
+            }
+        }
+    }
+
+    async fn on_child_fault(
+        &mut self,
+        _error: Error,
+        _ctx: &mut ActorContext<Self>,
+    ) -> ChildAction {
+        ChildAction::Restart
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackoffChildMsg;
+
+impl Message for BackoffChildMsg {}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BackoffChildResponse;
+
+impl Response for BackoffChildResponse {}
+
+#[derive(Clone)]
+struct BackoffChild;
+
+impl NotPersistentActor for BackoffChild {}
+
+#[async_trait]
+impl Actor for BackoffChild {
+    type Message = BackoffChildMsg;
+    type Response = BackoffChildResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("BackoffChild", id = %id)
+    }
+
+    fn supervision_strategy() -> SupervisionStrategy {
+        SupervisionStrategy::Retry(Strategy::Interval(IntervalStrategy::new(
+            3,
+            Duration::from_secs(30),
+        )))
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for BackoffChild {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: BackoffChildMsg,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<BackoffChildResponse, Error> {
+        ctx.get_parent::<BackoffParent>()
+            .await?
+            .emit_fail(Error::Functional {
+                description: "forced fault into 30s backoff".to_owned(),
+            })
+            .await?;
+        Ok(BackoffChildResponse)
+    }
+}
+
+#[test(tokio::test)]
+async fn test_stop_interrupts_retry_backoff() {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    let parent_ref = system
+        .create_root_actor("backoff-parent", BackoffParent)
+        .await
+        .unwrap();
+
+    // Fault the child: the parent restarts it, landing the child in its
+    // 30s retry backoff. Stopping it then must not wait out the backoff.
+    parent_ref.tell(BackoffMsg::Trigger).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let child_ref: ActorRef<BackoffChild> = system
+        .get_actor(&ActorPath::from("/user/backoff-parent/child"))
+        .await
+        .unwrap();
+    let start = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(5), child_ref.ask_stop())
+        .await
+        .expect("stop must interrupt the backoff wait")
+        .expect("ask_stop must succeed");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "stop waited out the backoff"
+    );
+
+    system.stop_system();
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TimeoutInitMsg;
+
+impl Message for TimeoutInitMsg {}
+
+#[derive(Clone)]
+struct TimeoutInitChild {
+    terminated: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NotPersistentActor for TimeoutInitChild {}
+
+#[async_trait]
+impl Actor for TimeoutInitChild {
+    type Message = TimeoutInitMsg;
+    type Response = StartResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("TimeoutInitChild", id = %id)
+    }
+
+    async fn post_stop(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        self.terminated.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for TimeoutInitChild {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: TimeoutInitMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<StartResponse, Error> {
+        Ok(StartResponse::Pong)
+    }
+}
+
+#[derive(Clone)]
+struct TimeoutInitParent {
+    terminated_child: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NotPersistentActor for TimeoutInitParent {}
+
+#[async_trait]
+impl Actor for TimeoutInitParent {
+    type Message = TimeoutInitMsg;
+    type Response = StartResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("TimeoutInitParent", id = %id)
+    }
+
+    fn startup_timeout() -> Option<Duration> {
+        Some(Duration::from_millis(100))
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        ctx.create_child(
+            "child",
+            TimeoutInitChild {
+                terminated: Arc::clone(&self.terminated_child),
+            },
+        )
+        .await?;
+        // Never finish: the startup timeout aborts this init.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for TimeoutInitParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: TimeoutInitMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<StartResponse, Error> {
+        Ok(StartResponse::Pong)
+    }
+}
+
+#[test(tokio::test)]
+async fn test_init_timeout_stops_already_created_children() {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    let terminated_child = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let result = system
+        .create_root_actor(
+            "timeout-parent",
+            TimeoutInitParent {
+                terminated_child: Arc::clone(&terminated_child),
+            },
+        )
+        .await;
+    assert!(
+        matches!(result, Err(Error::Timeout { .. })),
+        "create must fail with the startup timeout, got {:?}",
+        result.as_ref().err()
+    );
+
+    // The orphaned child must be stopped, not leaked: its post_stop runs
+    // and its path is deindexed.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if terminated_child.load(Ordering::SeqCst) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "orphaned child was never stopped"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let lookup: Result<ActorRef<TimeoutInitChild>, Error> = system
+        .get_actor(&ActorPath::from("/user/timeout-parent/child"))
+        .await;
+    assert!(
+        matches!(lookup, Err(Error::NotFound { .. })),
+        "orphaned child must be deindexed"
+    );
+
+    system.stop_system();
+}

@@ -565,7 +565,14 @@ where
             .map(|(key, _)| {
                 key.parse::<u64>()
                     .map_err(|e| store_error(StoreOperation::ParseEventKey, e))
-                    .map(|n| n + 1)
+                    .and_then(|n| {
+                        n.checked_add(1).ok_or_else(|| {
+                            store_error(
+                                StoreOperation::ParseEventKey,
+                                "event key overflow",
+                            )
+                        })
+                    })
             })
             .transpose()?
             .unwrap_or(0);
@@ -749,7 +756,13 @@ where
             .put(&format!("{:020}", next_event_number), &bytes);
 
         if result.is_ok() {
-            self.event_counter += 1;
+            self.event_counter =
+                self.event_counter.checked_add(1).ok_or_else(|| {
+                    store_error(
+                        StoreOperation::Persist,
+                        "event counter overflow",
+                    )
+                })?;
             debug!(
                 "Successfully persisted event, event_counter now: {}",
                 self.event_counter
@@ -762,7 +775,13 @@ where
     fn persist_light_state(&mut self, state: &A::State) -> Result<(), Error> {
         debug!("Persisting light snapshot");
 
-        self.event_counter += 1;
+        self.event_counter =
+            self.event_counter.checked_add(1).ok_or_else(|| {
+                store_error(
+                    StoreOperation::PersistLight,
+                    "event counter overflow",
+                )
+            })?;
         debug!(
             "Incremented event_counter to {} before snapshot",
             self.event_counter
@@ -966,8 +985,9 @@ where
     }
 
     fn query_events(&self, from: u64, to: u64) -> Result<Vec<A::Event>, Error> {
-        let empty_events =
-            self.events.iter(false)?.next().transpose()?.is_none();
+        // O(1)-ish emptiness probe: `last()` seeks the end instead of
+        // cloning the whole collection like `iter(false)` does.
+        let empty_events = self.events.last()?.is_none();
 
         if from > to || from >= self.event_counter || empty_events {
             return Ok(Vec::new());
@@ -986,11 +1006,14 @@ where
 
         // Keep the previous snapshot bytes so a later metadata failure
         // can restore them: without this, a durable snapshot newer than
-        // the event log would survive the rollback below.
+        // the event log would survive the rollback below. A real read
+        // error (not absence) aborts here: nothing was written yet, and
+        // mistaking it for "no previous snapshot" could delete data in
+        // the restore path.
         let prev_bytes = match self.states.get() {
             Ok(bytes) => Some(bytes),
             Err(Error::EntryNotFound { .. }) => None,
-            Err(_) => None,
+            Err(e) => return Err(e),
         };
 
         self.states.put(&bytes)?;
@@ -1042,6 +1065,32 @@ where
         Ok(None)
     }
 
+    /// Replays events in `[from..=to]`, folding them over `state`.
+    ///
+    /// Shared by both recovery paths so replay semantics cannot diverge.
+    fn apply_events(
+        &mut self,
+        from: u64,
+        to: u64,
+        state: Arc<A::State>,
+    ) -> Result<Arc<A::State>, Error> {
+        let events = self.events(from, to)?;
+        debug!("Found {} events to replay", events.len());
+
+        let mut state = state;
+        for (i, event) in events.iter().enumerate() {
+            debug!("Applying event {} of {}", i + 1, events.len());
+            state = A::apply(state, event).map_err(|e| {
+                store_error_with_source(
+                    StoreOperation::ApplyEvent,
+                    format!("{:?}", e),
+                    e,
+                )
+            })?;
+        }
+        Ok(state)
+    }
+
     fn recover_from_snapshot(
         &mut self,
         state: Arc<A::State>,
@@ -1056,7 +1105,14 @@ where
             .map(|(key, _)| {
                 key.parse::<u64>()
                     .map_err(|e| store_error(StoreOperation::ParseEventKey, e))
-                    .map(|n| n + 1)
+                    .and_then(|n| {
+                        n.checked_add(1).ok_or_else(|| {
+                            store_error(
+                                StoreOperation::ParseEventKey,
+                                "event key overflow",
+                            )
+                        })
+                    })
             })
             .transpose()?
             .unwrap_or(0);
@@ -1080,22 +1136,13 @@ where
                 self.state_counter,
                 self.event_counter - 1
             );
-            let events =
-                self.events(self.state_counter, self.event_counter - 1)?;
-            debug!("Found {} events to replay", events.len());
+            state = self.apply_events(
+                self.state_counter,
+                self.event_counter - 1,
+                state,
+            )?;
 
-            for (i, event) in events.iter().enumerate() {
-                debug!("Applying event {} of {}", i + 1, events.len());
-                state = A::apply(state, event).map_err(|e| {
-                    store_error_with_source(
-                        StoreOperation::ApplyEvent,
-                        format!("{:?}", e),
-                        e,
-                    )
-                })?;
-            }
-
-            debug!("Updating snapshot after applying {} events", events.len());
+            debug!("Updating snapshot after applying events");
             if let Err(e) = self.snapshot(state.as_ref()) {
                 warn!(
                     error = %e,
@@ -1123,7 +1170,10 @@ where
         self.event_counter = last_key
             .parse::<u64>()
             .map_err(|e| store_error(StoreOperation::ParseEventKey, e))?
-            + 1;
+            .checked_add(1)
+            .ok_or_else(|| {
+                store_error(StoreOperation::ParseEventKey, "event key overflow")
+            })?;
         self.state_counter = 0;
 
         debug!(
@@ -1133,19 +1183,8 @@ where
 
         let mut state = Arc::clone(&self.initial_state);
 
-        let events = self.events(0, self.event_counter - 1)?;
-        debug!("Replaying {} events from scratch", events.len());
-
-        for (i, event) in events.iter().enumerate() {
-            debug!("Applying event {} of {}", i + 1, events.len());
-            state = A::apply(state, event).map_err(|e| {
-                store_error_with_source(
-                    StoreOperation::ApplyEvent,
-                    format!("{:?}", e),
-                    e,
-                )
-            })?;
-        }
+        debug!("Replaying events from scratch");
+        state = self.apply_events(0, self.event_counter - 1, state)?;
 
         debug!("Creating snapshot after replaying events");
         if let Err(e) = self.snapshot(state.as_ref()) {
@@ -1181,9 +1220,10 @@ where
         let events = self.events(self.state_counter, self.event_counter - 1)?;
         for event in &events {
             state = A::apply(state, event).map_err(|e| {
-                store_error(
+                store_error_with_source(
                     StoreOperation::ApplyEventOnStop,
                     format!("{:?}", e),
+                    e,
                 )
             })?;
         }

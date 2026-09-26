@@ -4,7 +4,8 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler,
-    Message, Response, SinkEntry, Strategy, Subscriber, SupervisionStrategy,
+    Message, Response, RetryPolicy, SinkEntry, Strategy, Subscriber,
+    SupervisionStrategy,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -757,4 +758,140 @@ async fn test_panicking_filter_does_not_kill_sink() {
     })
     .await
     .expect("sink worker must survive a panicking filter");
+}
+
+#[derive(Clone)]
+struct BlockedSubscriber {
+    release: Arc<tokio::sync::Notify>,
+    armed: Arc<AtomicU32>,
+}
+
+#[async_trait]
+impl Subscriber<TestEvent> for BlockedSubscriber {
+    async fn notify(&self, _event: Arc<TestEvent>) -> Result<(), Error> {
+        // Block exactly once (first event); later events pass through so
+        // shutdown drains promptly after a single release.
+        if self.armed.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
+#[test(tokio::test)]
+async fn test_slow_subscriber_does_not_block_fast_subscriber() {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    let actor_ref = system
+        .create_root_actor("holb_emitter", EmitterActor)
+        .await
+        .unwrap();
+
+    let fast_sub = CollectingSubscriber::new();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut sink = actor_ref
+        .register_sink("holb_sink", None)
+        .expect("valid sink");
+    sink.add(
+        "blocked",
+        BlockedSubscriber {
+            release: Arc::clone(&release),
+            armed: Arc::new(AtomicU32::new(0)),
+        },
+    );
+    sink.add("fast", fast_sub.clone());
+
+    // The blocked subscriber never finishes event 1 during the test; the
+    // fast subscriber must still receive every event (no head-of-line
+    // blocking across subscribers).
+    actor_ref.tell(TestMsg::Emit(1)).await.unwrap();
+    actor_ref.tell(TestMsg::Emit(2)).await.unwrap();
+    actor_ref.tell(TestMsg::Emit(3)).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if fast_sub.clone_events().await.len() >= 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fast subscriber must receive all events while another is stuck");
+
+    release.notify_waiters();
+    actor_ref.ask_stop().await.unwrap();
+}
+
+#[test(tokio::test)]
+async fn test_retry_preserves_per_subscriber_order() {
+    #[derive(Clone)]
+    struct FlakyRecorder {
+        events: Arc<Mutex<Vec<u32>>>,
+        fails_left: Arc<AtomicU32>,
+    }
+
+    #[async_trait]
+    impl Subscriber<TestEvent> for FlakyRecorder {
+        async fn notify(&self, event: Arc<TestEvent>) -> Result<(), Error> {
+            // The pump delivers sequentially per subscriber, so a plain
+            // load/sub pair is race-free here.
+            if self.fails_left.load(Ordering::SeqCst) > 0 {
+                self.fails_left.fetch_sub(1, Ordering::SeqCst);
+                return Err(Error::Functional {
+                    description: "flaky failure".to_owned(),
+                });
+            }
+            self.events.lock().await.push(event.id);
+            Ok(())
+        }
+    }
+
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    let actor_ref = system
+        .create_root_actor("order_emitter", EmitterActor)
+        .await
+        .unwrap();
+
+    // Fails the first 2 deliveries, then records: event 1 needs retries
+    // while events 2-3 wait behind it in the same pump. Order must hold.
+    let recorder = FlakyRecorder {
+        events: Arc::new(Mutex::new(Vec::new())),
+        fails_left: Arc::new(AtomicU32::new(2)),
+    };
+    let mut sink = actor_ref
+        .register_sink("order_sink", None)
+        .expect("valid sink");
+    sink.add_entry(
+        SinkEntry::new("flaky", recorder.clone())
+            .retry(RetryPolicy::AtMost {
+                max: 2,
+                backoff: Duration::from_millis(10),
+            })
+            .expect("valid retry policy"),
+    );
+
+    actor_ref.tell(TestMsg::Emit(1)).await.unwrap();
+    actor_ref.tell(TestMsg::Emit(2)).await.unwrap();
+    actor_ref.tell(TestMsg::Emit(3)).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let ids = recorder.events.lock().await.clone();
+            if ids.len() >= 3 {
+                assert_eq!(ids, vec![1, 2, 3]);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("subscriber must receive retried events in order");
+
+    actor_ref.ask_stop().await.unwrap();
 }

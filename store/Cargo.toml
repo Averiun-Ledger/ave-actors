@@ -26,6 +26,8 @@ tracing = { workspace = true }
 prometheus = ["dep:prometheus-client", "ave-actors-actor/prometheus"]
 
 [dev-dependencies]
+ave-actors-sqlite = { path = "../databases/sqlite_db", features = ["sqlite"] }
+tempfile = { workspace = true }
 test-log = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

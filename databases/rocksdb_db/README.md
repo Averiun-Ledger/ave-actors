@@ -130,6 +130,9 @@ fn create_state(&self, name: &str, prefix: &str) -> Result<RocksDbStore, Error>
 ## Behavior notes
 
 - Collections are ordered lexicographically by key. Zero-padded sequence numbers are recommended if keys represent event numbers.
-- Collection keys are stored as `prefix.key`; state values use the exact `prefix` as their key.
+- Collection keys are stored as `prefix.key`; state values use the exact `prefix` as their key. (The store's *derived* default prefix itself uses `__` separators, e.g. `user__a__counter`; the `.` here joins that prefix with the event key.)
+- Do not share one column family between prefixes where one is a prefix of another (`a` vs `a.b`): range operations alias them. The store validates prefixes; direct backend users must enforce this.
+- Iterators take no engine snapshot and set no upper bound: concurrent writes during iteration may show duplicates, gaps, or phantom keys. Only iterate quiescent stores (recovery) or tolerate it.
 - `durability = true` enables synchronous writes through RocksDB `WriteOptions::set_sync(true)`.
-- `RocksDbManager::stop()` flushes the WAL and then flushes each column family memtable.
+- `RocksDbManager::stop()` flushes the WAL and then flushes each column family memtable. The file lock is freed only after every `RocksDbStore` and iterator is dropped: drop all handles before reopening the same path.
+- Encryption covers values only; `prefix` and event keys stay in plaintext (actor namespaces and volumes are observable metadata).

@@ -751,7 +751,8 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
     /// Maximum number of pending timers this actor may have scheduled at once.
     ///
     /// Must be between [`MIN_MAX_TIMERS`] and [`MAX_MAX_TIMERS`] inclusive.
-    /// Timers created beyond this limit are ignored and logged as a warning.
+    /// Scheduling beyond this limit fails with
+    /// [`Error::InvalidConfiguration`].
     fn max_timers() -> usize {
         MAX_MAX_TIMERS
     }
@@ -1000,8 +1001,8 @@ where
     /// Requests the actor to stop gracefully and waits for it to confirm shutdown.
     ///
     /// The actor will finish its current message, run `pre_stop` and `post_stop`,
-    /// and stop its children before terminating. Returns an error if the actor has
-    /// already stopped.
+    /// and stop its children before terminating. Returns `Ok(())` also when
+    /// the actor already stopped (there is nothing to wait for).
     pub async fn ask_stop(&self) -> Result<(), Error> {
         tracing::debug!("Stopping actor");
         let (response_sender, response_receiver) = oneshot::channel();
@@ -1015,7 +1016,13 @@ where
             Ok(())
         } else {
             response_receiver.await.map_err(|error| {
-                tracing::error!(error = %error, "Failed to confirm actor stop");
+                // The actor stopped before confirming: a natural race
+                // when stopping an already-finished child, not an
+                // error — keep it out of error logs.
+                tracing::debug!(
+                    error = %error,
+                    "Actor stopped before confirming stop"
+                );
                 Error::Send {
                     reason: error.to_string(),
                 }

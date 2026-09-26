@@ -123,7 +123,7 @@ pub enum Error {
     ///
     /// This error indicates a problem that compromises the system's operation
     /// and requires intervention.
-    #[error("{description}")]
+    #[error("critical: {description}")]
     FunctionalCritical {
         /// Description of the critical error.
         description: String,

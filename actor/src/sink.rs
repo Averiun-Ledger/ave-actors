@@ -14,12 +14,11 @@ use prometheus_client::metrics::counter::Counter;
 
 use async_trait::async_trait;
 use std::{
-    sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
+use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 use tracing::{error, warn};
 
 /// Default number of subscribers notified concurrently by a [`Sink`].
@@ -179,10 +178,28 @@ struct SinkInner<E: Event> {
     dropped_closed_counter: Option<Counter>,
     #[cfg(feature = "prometheus")]
     delivery_failure_counter: Option<Counter>,
-    entries: RwLock<Vec<SinkEntry<E>>>,
-    max_concurrent: AtomicUsize,
+    entries: RwLock<Vec<ActiveSub<E>>>,
+    /// Shared cap on concurrent subscriber deliveries. Swapped wholesale
+    /// by `set_max_concurrent` so in-flight deliveries keep their permit.
+    semaphore: RwLock<Arc<Semaphore>>,
+    /// Per-channel buffer capacity: the dispatcher channel plus one queue
+    /// per subscriber pump. Queues hold `Arc<E>` (8 bytes each), so the
+    /// per-subscriber memory overhead is ~`capacity` pointers.
+    buffer_capacity: usize,
     sender: Mutex<Option<tokio::sync::mpsc::Sender<Arc<E>>>>,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// A subscriber entry with its dedicated delivery pump.
+///
+/// The pump owns the receiving end of a bounded queue and notifies its
+/// subscriber sequentially (preserving per-subscriber event order). A slow
+/// subscriber only fills its own queue; other pumps are unaffected, which
+/// removes the head-of-line blocking of a single shared worker.
+struct ActiveSub<E: Event> {
+    entry: SinkEntry<E>,
+    sender: tokio::sync::mpsc::Sender<Arc<E>>,
+    handle: JoinHandle<()>,
 }
 
 impl<E: Event> SinkInner<E> {
@@ -215,6 +232,77 @@ impl<E: Event> SinkInner<E> {
 
     #[cfg(not(feature = "prometheus"))]
     fn inc_delivery_failure(&self) {}
+}
+
+/// Spawns the delivery pump for one subscriber.
+///
+/// The pump holds only a [`std::sync::Weak`] reference to the sink: when
+/// the sink is gone it drains nothing and exits, so pumps never keep a
+/// dropped sink alive.
+fn spawn_pump<E: Event>(
+    weak: std::sync::Weak<SinkInner<E>>,
+    mut receiver: tokio::sync::mpsc::Receiver<Arc<E>>,
+    entry: SinkEntry<E>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = receiver.recv().await {
+            let Some(inner) = weak.upgrade() else {
+                break;
+            };
+            let semaphore = inner
+                .semaphore
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let Ok(permit) = semaphore.acquire_owned().await else {
+                continue;
+            };
+            let _permit = permit;
+            let subscriber = entry.subscriber.clone();
+            let id = entry.id.clone();
+            let retry = entry.retry;
+            match retry {
+                RetryPolicy::None => {
+                    if let Err(err) = subscriber.notify(event).await {
+                        error!(
+                            subscriber = %id,
+                            sink = %inner.name,
+                            error = %err,
+                            "Subscriber failed"
+                        );
+                        inner.inc_delivery_failure();
+                    }
+                }
+                RetryPolicy::AtMost { max, backoff } => {
+                    for attempt in 0..=max {
+                        match subscriber.notify(Arc::clone(&event)).await {
+                            Ok(()) => break,
+                            Err(err) => {
+                                if attempt == max {
+                                    error!(
+                                        subscriber = %id,
+                                        sink = %inner.name,
+                                        error = %err,
+                                        attempts = max + 1,
+                                        "Subscriber exhausted retries"
+                                    );
+                                    inner.inc_delivery_failure();
+                                } else {
+                                    warn!(
+                                        subscriber = %id,
+                                        sink = %inner.name,
+                                        attempt = attempt + 1,
+                                        "Subscriber failed, retrying"
+                                    );
+                                    tokio::time::sleep(backoff).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Named sink that routes events to filtered subscribers.
@@ -272,10 +360,12 @@ impl<E: Event> Sink<E> {
 
     /// Create a new sink with the given name and event buffer capacity.
     ///
-    /// `max_concurrent` controls how many subscribers are notified
-    /// concurrently for a single event. If `None`, a default of 10 is used.
-    /// `buffer_capacity` sets the size of the internal bounded channel; it
-    /// must be between 1 and [`MAX_SINK_BUFFER_CAPACITY`].
+    /// `max_concurrent` caps concurrent subscriber deliveries across the
+    /// sink. If `None`, a default of 10 is used. `buffer_capacity` sizes
+    /// the dispatcher queue and every subscriber pump queue (each holds
+    /// `Arc` events, ~8 bytes per slot); it must be between 1 and
+    /// [`MAX_SINK_BUFFER_CAPACITY`]. A slow subscriber only fills its own
+    /// queue; other subscribers are unaffected.
     ///
     /// Sinks created directly through this constructor do not report
     /// Prometheus metrics. Actors should use
@@ -434,111 +524,79 @@ impl<E: Event> Sink<E> {
 
         let inner = Arc::new_cyclic(|weak: &std::sync::Weak<SinkInner<E>>| {
             let weak = weak.clone();
+            // Dispatcher: filters each event and forwards it to matching
+            // subscriber pumps without waiting. A slow pump only fills its
+            // own queue; the dispatcher never blocks on delivery.
             let handle = tokio::spawn(async move {
                 while let Some(event) = receiver.recv().await {
                     let Some(inner) = weak.upgrade() else {
                         break;
                     };
-                    let limit =
-                        inner.max_concurrent.load(Ordering::Relaxed).max(1);
-                    let to_notify: Vec<SinkEntry<E>> = {
+                    // Snapshot the subscriber list first: filters are
+                    // user code and must not run under the entries lock.
+                    let snapshot: Vec<(
+                        SinkEntry<E>,
+                        tokio::sync::mpsc::Sender<Arc<E>>,
+                    )> = {
                         let entries = inner
                             .entries
                             .read()
                             .unwrap_or_else(|e| e.into_inner());
                         entries
                             .iter()
-                            .filter(|e| {
-                                std::panic::catch_unwind(
-                                    std::panic::AssertUnwindSafe(|| {
-                                        (e.filter)(&event)
-                                    }),
-                                )
-                                .unwrap_or_else(|_| {
-                                    error!(
-                                        sink = %inner.name,
-                                        subscriber = %e.id,
-                                        "Subscriber filter panicked; skipping \
-                                         event for this subscriber"
-                                    );
-                                    inner.inc_delivery_failure();
-                                    false
-                                })
-                            })
-                            .cloned()
+                            .map(|s| (s.entry.clone(), s.sender.clone()))
                             .collect()
                     };
+                    let targets: Vec<(
+                        tokio::sync::mpsc::Sender<Arc<E>>,
+                        String,
+                    )> = snapshot
+                        .into_iter()
+                        .filter(|(entry, _)| {
+                            std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(|| {
+                                    (entry.filter)(&event)
+                                }),
+                            )
+                            .unwrap_or_else(|_| {
+                                error!(
+                                    sink = %inner.name,
+                                    subscriber = %entry.id,
+                                    "Subscriber filter panicked; skipping \
+                                     event for this subscriber"
+                                );
+                                inner.inc_delivery_failure();
+                                false
+                            })
+                        })
+                        .map(|(entry, sender)| (sender, entry.id))
+                        .collect();
 
-                    let semaphore =
-                        Arc::new(tokio::sync::Semaphore::new(limit));
-                    let mut set = tokio::task::JoinSet::new();
-
-                    for entry in to_notify {
-                        let Ok(permit) =
-                            semaphore.clone().acquire_owned().await
-                        else {
-                            continue;
-                        };
-                        let subscriber = entry.subscriber;
-                        let id = entry.id;
-                        let retry = entry.retry;
-                        let event = Arc::clone(&event);
-                        let inner = Arc::clone(&inner);
-
-                        set.spawn(async move {
-                            let _permit = permit;
-                            match retry {
-                                RetryPolicy::None => {
-                                    if let Err(err) =
-                                        subscriber.notify(event).await
-                                    {
-                                        error!(
-                                            subscriber = %id,
-                                            sink = %inner.name,
-                                            error = %err,
-                                            "Subscriber failed"
-                                        );
-                                        inner.inc_delivery_failure();
-                                    }
+                    for (sender, id) in targets {
+                        if let Err(send_err) =
+                            sender.try_send(Arc::clone(&event))
+                        {
+                            use tokio::sync::mpsc::error::TrySendError;
+                            match send_err {
+                                TrySendError::Full(_) => {
+                                    inner.inc_dropped_full();
+                                    warn!(
+                                        sink = %inner.name,
+                                        subscriber = %id,
+                                        "Subscriber queue full, event dropped"
+                                    );
                                 }
-                                RetryPolicy::AtMost { max, backoff } => {
-                                    for attempt in 0..=max {
-                                        match subscriber
-                                            .notify(Arc::clone(&event))
-                                            .await
-                                        {
-                                            Ok(()) => break,
-                                            Err(err) => {
-                                                if attempt == max {
-                                                    error!(
-                                                        subscriber = %id,
-                                                        sink = %inner.name,
-                                                        error = %err,
-                                                        attempts = max + 1,
-                                                        "Subscriber exhausted retries"
-                                                    );
-                                                    inner.inc_delivery_failure();
-                                                } else {
-                                                    warn!(
-                                                        subscriber = %id,
-                                                        sink = %inner.name,
-                                                        attempt = attempt + 1,
-                                                        "Subscriber failed, retrying"
-                                                    );
-                                                    tokio::time::sleep(
-                                                        backoff,
-                                                    )
-                                                    .await;
-                                                }
-                                            }
-                                        }
-                                    }
+                                TrySendError::Closed(_) => {
+                                    inner.inc_dropped_closed();
+                                    warn!(
+                                        sink = %inner.name,
+                                        subscriber = %id,
+                                        "Subscriber pump closed, event dropped"
+                                    );
                                 }
                             }
-                        });
+                        }
                     }
-
-                    while set.join_next().await.is_some() {}
                 }
             });
 
@@ -551,7 +609,10 @@ impl<E: Event> Sink<E> {
                 #[cfg(feature = "prometheus")]
                 delivery_failure_counter,
                 entries: RwLock::new(Vec::new()),
-                max_concurrent: AtomicUsize::new(max_concurrent),
+                semaphore: RwLock::new(Arc::new(Semaphore::new(
+                    max_concurrent,
+                ))),
+                buffer_capacity,
                 sender: Mutex::new(Some(sender)),
                 worker: Mutex::new(Some(handle)),
             }
@@ -565,7 +626,11 @@ impl<E: Event> Sink<E> {
         &self.inner.name
     }
 
-    /// Update the maximum number of concurrent subscriber notifications.
+    /// Update the maximum number of concurrent subscriber deliveries.
+    ///
+    /// Deliveries across subscribers run concurrently up to this limit;
+    /// each subscriber still processes its own events one at a time, in
+    /// order. In-flight deliveries keep the previous limit.
     ///
     /// # Errors
     ///
@@ -587,8 +652,30 @@ impl<E: Event> Sink<E> {
                 ),
             });
         }
-        self.inner.max_concurrent.store(limit, Ordering::Relaxed);
+        *self
+            .inner
+            .semaphore
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Arc::new(Semaphore::new(limit));
         Ok(())
+    }
+
+    /// Spawns the delivery pump for `entry` and registers both.
+    fn push_entry(&mut self, entry: SinkEntry<E>) {
+        let (sender, receiver) =
+            tokio::sync::mpsc::channel::<Arc<E>>(self.inner.buffer_capacity);
+        let handle =
+            spawn_pump(Arc::downgrade(&self.inner), receiver, entry.clone());
+        self.inner
+            .entries
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(ActiveSub {
+                entry,
+                sender,
+                handle,
+            });
     }
 
     /// Add a subscriber entry to this sink.
@@ -597,31 +684,28 @@ impl<E: Event> Sink<E> {
         id: impl Into<String>,
         subscriber: impl Subscriber<E>,
     ) {
-        self.inner
-            .entries
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(SinkEntry::new(id, subscriber));
+        self.push_entry(SinkEntry::new(id, subscriber));
     }
 
     /// Add a pre-built [`SinkEntry`] to this sink.
     pub fn add_entry(&mut self, entry: SinkEntry<E>) {
-        self.inner
-            .entries
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(entry);
+        self.push_entry(entry);
     }
 
     /// Remove the subscriber entry with `id` and return it, if present.
+    ///
+    /// Its delivery pump is aborted, cancelling any in-flight delivery to
+    /// that subscriber.
     pub fn remove_entry(&mut self, id: &str) -> Option<SinkEntry<E>> {
         let mut entries = self
             .inner
             .entries
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        let pos = entries.iter().position(|e| e.id == id)?;
-        Some(entries.remove(pos))
+        let pos = entries.iter().position(|s| s.entry.id == id)?;
+        let active = entries.remove(pos);
+        active.handle.abort();
+        Some(active.entry)
     }
 
     /// Returns the number of subscriber entries in this sink.
@@ -642,20 +726,26 @@ impl<E: Event> Sink<E> {
             .is_empty()
     }
 
-    /// Remove all subscriber entries from this sink.
+    /// Remove all subscriber entries from this sink, aborting their pumps.
     pub fn clear(&mut self) {
-        self.inner
+        let drained: Vec<ActiveSub<E>> = self
+            .inner
             .entries
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .clear();
+            .drain(..)
+            .collect();
+        for active in drained {
+            active.handle.abort();
+        }
     }
 
     /// Send `event` to every subscriber whose filter accepts it.
     ///
-    /// The event is placed on a bounded channel and processed by a
-    /// persistent worker task so the caller never blocks. If the channel is
-    /// full the event is dropped and a warning is logged.
+    /// The event is placed on a bounded dispatcher queue and forwarded to
+    /// matching subscriber pumps without blocking the caller. If the
+    /// dispatcher queue is full the event is dropped with a warning; if an
+    /// individual subscriber pump is full only that subscriber drops it.
     pub fn send(&self, event: Arc<E>) {
         if let Some(sender) = self
             .inner
@@ -692,12 +782,14 @@ impl<E: Event> Sink<E> {
 
     /// Gracefully shut down the sink.
     ///
-    /// Closes the channel so no new events are accepted, then waits up to
-    /// `deadline` for the worker to finish processing pending events.
-    /// Returns `true` if the worker finished cleanly, `false` if it was
-    /// aborted.
+    /// Closes the dispatcher channel, waits for forwarded events to reach
+    /// the subscriber pumps, then waits up to `deadline` (total) for the
+    /// pumps to drain. Pumps still busy afterwards are aborted.
+    /// Returns `true` if everything finished cleanly, `false` if anything
+    /// was aborted.
     pub async fn shutdown(&self, deadline: Instant) -> bool {
-        // Close the channel: drop the sender so the worker sees None.
+        // Close the dispatcher channel: drop the sender so the dispatcher
+        // forwards whatever is queued and then exits.
         drop(
             self.inner
                 .sender
@@ -712,31 +804,59 @@ impl<E: Event> Sink<E> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        let mut handle = match worker {
-            Some(h) => h,
-            None => return true,
-        };
 
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            handle.abort();
-            return false;
-        }
-
-        match tokio::time::timeout(remaining, &mut handle).await {
-            Ok(_) => true,
-            Err(_) => {
+        let mut clean = true;
+        if let Some(mut handle) = worker {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 handle.abort();
-                false
+                clean = false;
+            } else {
+                match tokio::time::timeout(remaining, &mut handle).await {
+                    Ok(_) => {}
+                    Err(_) => {
+                        handle.abort();
+                        clean = false;
+                    }
+                }
             }
         }
+
+        // The dispatcher is done: every accepted event reached a pump
+        // queue (or was dropped full). Close the pumps by dropping their
+        // senders, then drain them within the remaining deadline.
+        let drained: Vec<ActiveSub<E>> = self
+            .inner
+            .entries
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
+        for active in drained {
+            drop(active.sender);
+            let mut handle = active.handle;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                handle.abort();
+                clean = false;
+                continue;
+            }
+            match tokio::time::timeout(remaining, &mut handle).await {
+                Ok(_) => {}
+                Err(_) => {
+                    handle.abort();
+                    clean = false;
+                }
+            }
+        }
+        clean
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
     use tokio::sync::Mutex;
 

@@ -131,25 +131,89 @@ pub fn resolve_spec(spec: Option<MachineSpec>) -> Result<ResolvedSpec, Error> {
 
 /// Reads total physical RAM from `/proc/meminfo` on Linux and returns it in megabytes.
 ///
+/// Container-aware: when a cgroup memory limit (`memory.max` v2 or
+/// `memory.limit_in_bytes` v1) is lower than the host value, the limit wins,
+/// so pool/cache budgets do not over-commit inside containers.
+///
 /// Returns `None` on non-Linux platforms or if the file cannot be parsed.
 pub(crate) fn detect_total_memory_mb() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         use std::fs;
         let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
+        let mut host_mb = None;
         for line in meminfo.lines() {
             if let Some(rest) = line.strip_prefix("MemTotal:") {
                 let kb_str = rest.split_whitespace().next()?;
                 let kb: u64 = kb_str.parse().ok()?;
-                return Some(kb / 1024);
+                host_mb = Some(kb / 1024);
+                break;
             }
         }
-        None
+        let host_mb = host_mb?;
+        Some(
+            cgroup_memory_limit_mb()
+                .map_or(host_mb, |limit| limit.min(host_mb)),
+        )
     }
     #[cfg(not(target_os = "linux"))]
     {
         None
     }
+}
+
+/// Reads the cgroup memory ceiling in megabytes, if any.
+///
+/// Checks cgroup v2 (`/sys/fs/cgroup/memory.max`, `"max"` means unlimited)
+/// then v1 (`/sys/fs/cgroup/memory/memory.limit_in_bytes`, values near
+/// `u64::MAX` mean unlimited). Returns `None` when unlimited or unreadable.
+#[cfg(target_os = "linux")]
+fn cgroup_memory_limit_mb() -> Option<u64> {
+    use std::fs;
+    if let Ok(raw) = fs::read_to_string("/sys/fs/cgroup/memory.max") {
+        if let Some(mb) = parse_cgroup_v2_max(&raw) {
+            return Some(mb);
+        }
+        // A present-but-unlimited v2 file means "no v2 limit", but a v1
+        // limit could still apply in hybrid setups: keep looking.
+        if raw.trim() == "max" {
+            return parse_cgroup_v1_file();
+        }
+        return None;
+    }
+    parse_cgroup_v1_file()
+}
+
+/// Parses cgroup v2 `memory.max` content (`"max"` or bytes) to megabytes.
+#[cfg(target_os = "linux")]
+fn parse_cgroup_v2_max(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    if raw == "max" {
+        return None;
+    }
+    raw.parse::<u64>().ok().map(|bytes| bytes / 1024 / 1024)
+}
+
+/// Reads and parses the cgroup v1 limit file, if it carries a sane value.
+#[cfg(target_os = "linux")]
+fn parse_cgroup_v1_file() -> Option<u64> {
+    use std::fs;
+    let raw = fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        .ok()?;
+    parse_cgroup_v1_limit(&raw)
+}
+
+/// Parses cgroup v1 `memory.limit_in_bytes` content to megabytes.
+///
+/// Values at or above 2^60 mean "unlimited" (v1 reports page-aligned values
+/// near 2^63 on unlimited hosts); no real limit is that large.
+#[cfg(target_os = "linux")]
+fn parse_cgroup_v1_limit(raw: &str) -> Option<u64> {
+    let bytes = raw.trim().parse::<u64>().ok()?;
+    if bytes >= 1 << 60 {
+        return None;
+    }
+    Some(bytes / 1024 / 1024)
 }
 
 /// Returns the number of logical CPU cores available to the process.
@@ -216,5 +280,30 @@ mod tests {
         assert!(
             matches!(err, Error::InvalidConfiguration { component, .. } if component == "MachineSpec")
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cgroup_v2_max() {
+        assert_eq!(parse_cgroup_v2_max("max\n"), None);
+        assert_eq!(
+            parse_cgroup_v2_max("1073741824\n"),
+            Some(1024),
+            "1 GiB in bytes"
+        );
+        assert_eq!(parse_cgroup_v2_max("not-a-number"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cgroup_v1_limit() {
+        assert_eq!(
+            parse_cgroup_v1_limit("536870912\n"),
+            Some(512),
+            "512 MiB in bytes"
+        );
+        // v1 reports ~2^63 on unlimited hosts: must not be trusted.
+        assert_eq!(parse_cgroup_v1_limit("9223372036854771712\n"), None);
+        assert_eq!(parse_cgroup_v1_limit("garbage"), None);
     }
 }

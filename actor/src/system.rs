@@ -2,7 +2,7 @@
 
 use crate::{
     Actor, ActorPath, ActorRef, Error, Handler,
-    runner::{ActorRunner, StopHandle, StopSender},
+    runner::{ActorRunner, StopHandle, StopSender, StopSignal},
 };
 
 use tokio::sync::{RwLock, broadcast, oneshot};
@@ -209,6 +209,10 @@ pub struct SystemRef {
     /// Stop senders for root-level actors to enable coordinated shutdown.
     /// Kept as RwLock<HashMap> because shutdown needs `std::mem::take` of the whole map.
     root_senders: Arc<RwLock<HashMap<ActorPath, StopHandle>>>,
+    /// Type-erased stop senders for every live actor, keyed by path.
+    /// Lets the system stop actors (e.g. orphaned descendants of a failed
+    /// init) without knowing their message types.
+    stop_senders: Arc<DashMap<ActorPath, StopSender>>,
     /// Broadcast bus for observable system-level events such as root actor errors.
     system_event_sender: broadcast::Sender<SystemEvent>,
     /// Inverse index: for each target actor path, the list of watchers that
@@ -312,6 +316,7 @@ impl SystemRef {
                 graceful_token,
                 crash_token,
                 root_senders,
+                stop_senders: Arc::new(DashMap::new()),
                 system_event_sender,
                 watchers,
                 config,
@@ -372,6 +377,10 @@ impl SystemRef {
     }
 
     /// Returns the `ActorRef` for the actor at `path`, or `Error::NotFound` if no actor is registered there.
+    ///
+    /// A path holding an actor of a different type also yields
+    /// `Error::NotFound`: the registry is type-erased and cannot
+    /// distinguish "absent" from "wrong type".
     pub async fn get_actor<A>(
         &self,
         path: &ActorPath,
@@ -426,6 +435,7 @@ impl SystemRef {
             }
         }
         self.index_actor(&path);
+        self.stop_senders.insert(path.clone(), stop_sender.clone());
 
         if is_root {
             let mut root_senders = self.root_senders.write().await;
@@ -538,6 +548,7 @@ impl SystemRef {
         if removed {
             self.deindex_actor(path);
         }
+        self.stop_senders.remove(path);
     }
 
     /// Registers a watcher for the actor at `target_path`.
@@ -608,9 +619,24 @@ impl SystemRef {
     }
 
     async fn cleanup_failed_actor_init(&self, path: &ActorPath, is_root: bool) {
+        // Collect descendants first: children created before the failure
+        // (e.g. an aborted `pre_start`) are live but parented to a dead
+        // path, so stop them explicitly instead of leaking their tasks.
+        let mut stack = self.children(path);
+        let mut descendants = Vec::new();
+        while let Some(child) = stack.pop() {
+            stack.extend(self.children(&child));
+            descendants.push(child);
+        }
         self.remove_actor(path).await;
         if is_root {
             self.root_senders.write().await.remove(path);
+        }
+        for descendant in &descendants {
+            if let Some((_, sender)) = self.stop_senders.remove(descendant) {
+                let _ = sender.send(StopSignal::Stop(None)).await;
+            }
+            self.remove_actor(descendant).await;
         }
     }
 

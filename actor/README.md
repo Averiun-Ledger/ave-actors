@@ -186,13 +186,6 @@ actor restarts.  Sinks are registered externally through [`ActorRef`] and
 processed in parallel.
 
 ```rust,ignore
-// Inside the actor:
-ctx.publish_event(MyEvent::SomethingHappened);
-
-// Legacy broadcast subscription (still available):
-// Sinks are now the only event mechanism.
-
-// Modern sink API — register from outside the actor:
 use ave_actors_actor::{Sink, SinkEntry, Subscriber};
 
 let mut sink = actor_ref
@@ -205,13 +198,13 @@ sink.add_entry(
         .retry(RetryPolicy::AtMost { max: 3, backoff: Duration::from_millis(100) }),
 );
 
-// Publishing from inside the actor:
+// Publishing from inside the actor (sinks are the event mechanism):
 ctx.publish_to("analytics", MyEvent::SomethingHappened);
-ctx.publish_all(MyEvent::SomethingHappened).await?;
+ctx.publish_all(MyEvent::SomethingHappened);
 ctx.publish_filtered(|name| name.starts_with("audit"), MyEvent::SomethingHappened);
 ```
 
-`Subscriber<E>` is a trait with a single `notify(&self, event: E) -> Result<(), Error>`
+`Subscriber<E>` is a trait with a single async `notify(&self, event: Arc<E>) -> Result<(), Error>`
 method.  Returning an `Err` triggers the sink's retry policy (if any) without
 stopping the actor.
 

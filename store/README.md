@@ -29,7 +29,7 @@ tracing = "0.1"
 | Concept | Description |
 |---|---|
 | `PersistentActor` | Trait extending `Actor` with event sourcing — define `type State`, implement `apply`, `state()`, `set_state()`, and call `persist` |
-| `LightPersistence` | Strategy: stores event + state snapshot on every write (fast recovery) |
+| `LightPersistence` | Strategy: stores only the state snapshot on every write, no event history (fast recovery) |
 | `FullPersistence` | Strategy: stores events only, replays on recovery (smaller footprint, full audit trail) |
 | `InitializedActor<A>` | Required wrapper returned by `PersistentActor::initial(params)` |
 | `DbManager<C, S>` | Backend factory trait — implement to plug in a custom database |
@@ -46,7 +46,7 @@ tracing = "0.1"
 | `PersistentActor::initial` | `InitParams` | `InitializedActor<Self>` | Wraps the actor so the actor system accepts it as persistent |
 | `PersistentActor::apply` | `Arc<State>, &Event` | `Result<Arc<State>, ActorError>` | Pure function that applies one event to state and returns the new state |
 | `PersistentActor::start_store` | store `name`, optional `prefix`, `ActorContext`, backend manager, optional `EncryptedKey` | `Result<(), ActorError>` | Opens the backend and recovers persisted state into the actor |
-| `PersistentActor::persist` | `&Event`, `ActorContext` | `Result<(), ActorError>` | Calls `apply`, durably records the event, and updates `self` with the new state; rolls back on failure |
+| `PersistentActor::persist` | `Self::Event` (owned), `ActorContext` | `Result<(), ActorError>` | Calls `apply`, durably records the event, and updates `self` with the new state; rolls back on failure |
 | `PersistentActor::snapshot` | `ActorContext` | `Result<(), ActorError>` | Forces an immediate snapshot of the current actor state |
 
 ---
@@ -128,7 +128,7 @@ impl Handler<Counter> for Counter {
             CounterMsg::Increment(n) => {
                 // persist calls apply, saves the event durably, and updates self.state.
                 // If persistence fails, the in-memory state is rolled back.
-                self.persist(&CounterEvent::Incremented(n), ctx).await?;
+                self.persist(CounterEvent::Incremented(n), ctx).await?;
                 Ok(CounterResp::Ok)
             }
             CounterMsg::GetValue => Ok(CounterResp::Value(self.state.value)),

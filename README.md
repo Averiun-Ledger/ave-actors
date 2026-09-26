@@ -30,8 +30,8 @@ This repository is the public home of the `ave-actors` workspace. It includes th
 |---|---|---|
 | `sqlite` | Yes | Enables the SQLite backend and store re-exports |
 | `rocksdb` | No | Enables the RocksDB backend |
-| `export-sqlite` | No | Re-exports `rusqlite` |
-| `export-rocksdb` | No | Re-exports `rocksdb` |
+| `export-sqlite` | No | Re-exports `rusqlite` (pinned native version; mixing another `rusqlite` in the same binary duplicates symbols) |
+| `export-rocksdb` | No | Re-exports `rocksdb` (pinned native version; same caveat) |
 | `prometheus` | No | Optional Prometheus metrics via `prometheus-client` |
 
 ## Prometheus metrics
@@ -83,6 +83,11 @@ tracing = "0.1"
 ```
 
 The root crate re-exports the actor API, so you can start with a simple actor without importing subcrates directly.
+
+> With `default-features = false` there is no persistence API (`Store`,
+> `DbManager`, backends): add `features = ["sqlite"]` and/or
+> `features = ["rocksdb"]` for event sourcing. `prometheus` alone adds
+> actor metrics but no store.
 
 ```rust,ignore
 use ave_actors::{

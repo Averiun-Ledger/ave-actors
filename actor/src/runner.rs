@@ -317,9 +317,25 @@ where
                 // State: RESTARTED
                 ActorLifecycle::Restarted => {
                     ctx.timer_scheduler.set_accepting(true);
-                    // Apply supervision strategy.
-                    self.apply_supervision_strategy(&mut ctx, &mut retries)
-                        .await;
+                    // Apply supervision strategy. A stop arriving during
+                    // the backoff wait is returned for immediate handling
+                    // instead of stalling shutdown until the wait ends.
+                    if let Some(signal) = self
+                        .apply_supervision_strategy(&mut ctx, &mut retries)
+                        .await
+                    {
+                        match signal {
+                            StopSignal::Stop(ack) => {
+                                pending_stop_ack = ack;
+                                self.lifecycle = ActorLifecycle::Stopped;
+                            }
+                            StopSignal::Fault(fault, ack) => {
+                                self.pending_fault = Some(fault);
+                                pending_stop_ack = ack;
+                                self.lifecycle = ActorLifecycle::Failed;
+                            }
+                        }
+                    }
                 }
                 // State: STOPPED
                 ActorLifecycle::Stopped => {
@@ -515,14 +531,12 @@ where
                         };
                         #[cfg(feature = "prometheus")]
                         let critical = envelope.is_critical();
+                        // Skip clock reads when no metrics are installed.
                         #[cfg(feature = "prometheus")]
-                        let start = std::time::Instant::now();
-                        #[cfg(feature = "prometheus")]
-                        let queued_at = envelope.queued_at();
-                        #[cfg(feature = "prometheus")]
-                        let wait_seconds = start
-                            .saturating_duration_since(queued_at)
-                            .as_secs_f64();
+                        let start = self
+                            .metrics
+                            .as_ref()
+                            .map(|_| std::time::Instant::now());
                         #[cfg(feature = "prometheus")]
                         let result =
                             envelope.handle(&mut self.actor, ctx).await;
@@ -530,10 +544,20 @@ where
                         let _ = envelope.handle(&mut self.actor, ctx).await;
                         #[cfg(feature = "prometheus")]
                         {
-                            let duration = start.elapsed().as_secs_f64();
-                            let result_label =
-                                if result.is_ok() { "ok" } else { "err" };
-                            if let Some(m) = &self.metrics {
+                            if let (Some(m), Some(start)) =
+                                (&self.metrics, start)
+                            {
+                                let queued_at = envelope.queued_at();
+                                let wait_seconds = start
+                                    .saturating_duration_since(queued_at)
+                                    .as_secs_f64();
+                                let duration =
+                                    start.elapsed().as_secs_f64();
+                                let result_label = if result.is_ok() {
+                                    "ok"
+                                } else {
+                                    "err"
+                                };
                                 m.inc_messages_processed(
                                     Arc::clone(&self.scope),
                                     Arc::clone(&self.actor_type),
@@ -632,12 +656,8 @@ where
                 Envelope::Ask { .. } => "ask",
             };
             #[cfg(feature = "prometheus")]
-            let start = std::time::Instant::now();
-            #[cfg(feature = "prometheus")]
-            let queued_at = msg.queued_at();
-            #[cfg(feature = "prometheus")]
-            let wait_seconds =
-                start.saturating_duration_since(queued_at).as_secs_f64();
+            let start =
+                self.metrics.as_ref().map(|_| std::time::Instant::now());
 
             match tokio::time::timeout(
                 remaining,
@@ -648,10 +668,14 @@ where
                 Ok(_result) => {
                     #[cfg(feature = "prometheus")]
                     {
-                        let duration = start.elapsed().as_secs_f64();
-                        let result_label =
-                            if _result.is_ok() { "ok" } else { "err" };
-                        if let Some(m) = &self.metrics {
+                        if let (Some(m), Some(start)) = (&self.metrics, start) {
+                            let queued_at = msg.queued_at();
+                            let wait_seconds = start
+                                .saturating_duration_since(queued_at)
+                                .as_secs_f64();
+                            let duration = start.elapsed().as_secs_f64();
+                            let result_label =
+                                if _result.is_ok() { "ok" } else { "err" };
                             m.inc_messages_processed(
                                 Arc::clone(&self.scope),
                                 Arc::clone(&self.actor_type),
@@ -720,11 +744,14 @@ where
     /// Apply supervision strategy.
     /// If the actor fails, the strategy is applied.
     ///
+    /// Returns a stop signal when one arrives while waiting out the retry
+    /// backoff, so shutdown is not stalled by long backoffs. The caller
+    /// processes it as if received in the main loop.
     async fn apply_supervision_strategy(
         &mut self,
         ctx: &mut ActorContext<A>,
         retries: &mut usize,
-    ) {
+    ) -> Option<StopSignal> {
         let strategy = std::mem::replace(
             &mut self.supervision_strategy,
             SupervisionStrategy::Stop,
@@ -751,7 +778,16 @@ where
                             backoff_ms = duration.as_millis(),
                             "Waiting before retry"
                         );
-                        tokio::time::sleep(duration).await;
+                        let interrupted = tokio::select! {
+                            () = tokio::time::sleep(duration) => None,
+                            stop = self.stop_receiver.recv() => stop,
+                        };
+                        if let Some(signal) = interrupted {
+                            // Stop arrived mid-backoff: skip the restart.
+                            self.supervision_strategy =
+                                SupervisionStrategy::Retry(retry_strategy);
+                            return Some(signal);
+                        }
                     }
                     *retries += 1;
                     match ctx.restart(&mut self.actor).await {
@@ -797,6 +833,7 @@ where
                 }
             }
         }
+        None
     }
 }
 

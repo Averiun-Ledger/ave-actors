@@ -1,5 +1,20 @@
 #![doc = include_str!("../README.md")]
 
+//! # Feature matrix
+//!
+//! | Features | Actor runtime | Persistence (`Store`, backends) | Metrics |
+//! |---|---|---|
+//! | default (`sqlite`) | yes | SQLite | no |
+//! | `rocksdb` | yes | RocksDB | no |
+//! | `sqlite` + `rocksdb` | yes | both | no |
+//! | `prometheus` (alone) | yes | **no**: `Store`, `DbManager` and friends
+//! are unavailable; store metrics exist but nothing emits them | actor only |
+//! | `--no-default-features` | yes | **no** (actors only) | no |
+//!
+//! In short: persistence APIs require at least one of `sqlite`/`rocksdb`;
+//! `prometheus` alone adds actor metrics but no store. Backend tests are
+//! skipped (0 tests, green) when their feature is off.
+
 pub use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ActorSystemConfig,
     ChildAction, CustomIntervalStrategy, EncryptedKey, Error as ActorError,

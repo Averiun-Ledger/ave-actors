@@ -121,6 +121,11 @@ pub trait State: Sync + Send + 'static {
     /// Deletes the current value.
     ///
     /// Returns [`Error::EntryNotFound`] if there is nothing to delete.
+    /// Backends implement this as check-then-delete without a transaction
+    /// unless documented otherwise: under concurrent writers a delete may
+    /// remove a concurrently written value or report success for an
+    /// already-deleted one. The [`Store`](crate::store::Store) only deletes
+    /// during compensation and purge, never concurrently.
     fn del(&mut self) -> Result<(), Error>;
 
     /// Removes all data from this state store. Succeeds silently if the store is already empty.
@@ -146,7 +151,9 @@ pub trait Collection: Sync + Send + 'static {
 
     /// Removes the entry for `key`.
     ///
-    /// Returns [`Error::EntryNotFound`] if the key does not exist.
+    /// Returns [`Error::EntryNotFound`] if the key does not exist. Same
+    /// check-then-delete caveat as [`State::del`](State::del) under
+    /// concurrent writers.
     fn del(&mut self, key: &str) -> Result<(), Error>;
 
     /// Returns the last key-value pair in insertion/sort order, or `None` if the collection is empty.
@@ -205,7 +212,7 @@ pub trait Collection: Sync + Send + 'static {
         })))
     }
 
-    /// Returns at most `quantity.abs()` values, optionally starting after `from`.
+    /// Returns at most `quantity` values in magnitude, optionally starting after `from`.
     ///
     /// If `from` is `Some(key)`, iteration begins at the entry immediately after `key`.
     /// A positive `quantity` iterates forward; negative iterates in reverse.
@@ -215,6 +222,8 @@ pub trait Collection: Sync + Send + 'static {
         from: Option<&str>,
         quantity: isize,
     ) -> Result<Vec<Vec<u8>>, Error> {
+        // `unsigned_abs` (not `abs`): `isize::MIN.abs()` panics in debug
+        // and wraps in release.
         let (mut iter, quantity) = match from {
             Some(key) => {
                 // Find the key
@@ -240,13 +249,16 @@ pub trait Collection: Sync + Send + 'static {
                     iter.next();
                 }
                 iter.next(); // Exclusive From
-                (Box::new(iter) as CollectionIter<'_>, quantity.abs())
+                (
+                    Box::new(iter) as CollectionIter<'_>,
+                    quantity.unsigned_abs(),
+                )
             }
             None => {
                 if quantity >= 0 {
-                    (self.iter(false)?, quantity)
+                    (self.iter(false)?, quantity as usize)
                 } else {
-                    (self.iter(true)?, quantity.abs())
+                    (self.iter(true)?, quantity.unsigned_abs())
                 }
             }
         };

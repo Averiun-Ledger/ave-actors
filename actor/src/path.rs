@@ -82,8 +82,6 @@ impl ActorPath {
     pub fn at_level(&self, level: usize) -> Self {
         if level < 1 || level >= self.level() {
             self.clone()
-        } else if self.is_top_level() {
-            self.root()
         } else if level == self.level() - 1 {
             self.parent()
         } else {
