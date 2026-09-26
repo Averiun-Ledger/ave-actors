@@ -310,6 +310,20 @@ where
                         "Retry cycle already started, ignoring duplicate start"
                     );
                 } else {
+                    // Enforce strategy limits at the consumption point:
+                    // `new()` constructors are intentionally non-validating
+                    // (const), so an invalid strategy would otherwise
+                    // busy-loop here instead of failing loudly.
+                    if let Err(e) = self.retry_strategy.validate() {
+                        error!(
+                            error = %e,
+                            "Invalid retry strategy; ending cycle without \
+                             running"
+                        );
+                        self.started = true;
+                        self.finish_retry_cycle(ctx).await?;
+                        return Err(e);
+                    }
                     self.started = true;
                     self.handle_retry_attempt(ctx).await?;
                 }
@@ -845,5 +859,47 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), retry_ref.closed())
             .await
             .expect("retry actor should stop after End");
+    }
+
+    #[test(tokio::test)]
+    async fn test_invalid_strategy_rejected_at_cycle_start() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+
+        // Infinite retries without delay: `new()` accepts it, but
+        // starting the cycle must fail fast instead of busy-looping
+        // forever.
+        let retry_actor = RetryActor::new(
+            CountingTarget {
+                deliveries: Arc::new(AtomicUsize::new(0)),
+            },
+            CountMessage,
+            Strategy::Interval(IntervalStrategy::new(
+                usize::MAX,
+                Duration::ZERO,
+            )),
+        );
+        let retry_ref: ActorRef<RetryActor<CountingTarget>> = system
+            .create_root_actor("retry_invalid", retry_actor)
+            .await
+            .unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            retry_ref.ask(RetryMessage::Retry),
+        )
+        .await
+        .expect("invalid strategy must fail fast, not busy-loop");
+        assert!(
+            matches!(result, Err(Error::InvalidConfiguration { .. })),
+            "expected InvalidConfiguration, got {:?}",
+            result.as_ref().err()
+        );
+        system.stop_system();
     }
 }

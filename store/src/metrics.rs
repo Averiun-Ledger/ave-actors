@@ -13,18 +13,22 @@ use std::sync::Arc;
 /// [`ActorSystem`](ave_actors_actor::ActorSystem).
 pub const STORE_METRICS_HELPER: &str = "ave_actors_store_metrics";
 
-/// Labels identifying the actor path a store metric belongs to.
+/// Labels identifying a store metric by scope.
+///
+/// Paths embed runtime actor IDs and would create unbounded series, so
+/// store metrics aggregate by root scope. Per-actor detail lives in
+/// tracing spans, not in series.
 #[cfg(feature = "prometheus")]
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct StorePathLabels {
-    pub path: Arc<str>,
+pub struct StoreScopeLabels {
+    pub scope: Arc<str>,
 }
 
 /// Labels attached to the errors counter, including the operation that failed.
 #[cfg(feature = "prometheus")]
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct StoreErrorLabels {
-    pub path: Arc<str>,
+    pub scope: Arc<str>,
     pub operation: &'static str,
 }
 
@@ -32,8 +36,18 @@ pub struct StoreErrorLabels {
 #[cfg(feature = "prometheus")]
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct StoreDurationLabels {
-    pub path: Arc<str>,
+    pub scope: Arc<str>,
     pub operation: &'static str,
+}
+
+/// Labels for the pending-events gauge, per actor path.
+///
+/// Recorded only for actors opting in via `detailed_metrics`: pending
+/// counts are inherently per-instance and cannot aggregate by `set()`.
+#[cfg(feature = "prometheus")]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct StorePendingLabels {
+    pub path: Arc<str>,
 }
 
 #[cfg(feature = "prometheus")]
@@ -47,7 +61,7 @@ pub struct StoreMetrics {
     pub(crate) store_errors_total: Family<StoreErrorLabels, Counter>,
     pub(crate) store_operation_duration_seconds:
         Family<StoreDurationLabels, Histogram>,
-    pub(crate) store_pending_events: Family<StorePathLabels, Gauge>,
+    pub(crate) store_pending_events: Family<StorePendingLabels, Gauge>,
 }
 
 #[cfg(feature = "prometheus")]
@@ -86,7 +100,7 @@ impl StoreMetrics {
     pub fn inc_errors(&self, path: &Arc<str>, operation: &'static str) {
         self.store_errors_total
             .get_or_create(&StoreErrorLabels {
-                path: Arc::clone(path),
+                scope: scope_of(path),
                 operation,
             })
             .inc();
@@ -101,7 +115,7 @@ impl StoreMetrics {
     ) {
         self.store_operation_duration_seconds
             .get_or_create(&StoreDurationLabels {
-                path: Arc::clone(path),
+                scope: scope_of(path),
                 operation,
             })
             .observe(seconds);
@@ -110,7 +124,7 @@ impl StoreMetrics {
     /// Sets the number of events persisted since the last snapshot.
     fn set_pending_events(&self, path: &Arc<str>, count: i64) {
         self.store_pending_events
-            .get_or_create(&StorePathLabels {
+            .get_or_create(&StorePendingLabels {
                 path: Arc::clone(path),
             })
             .set(count);
@@ -123,6 +137,16 @@ impl StoreMetrics {
         let count = count.min(i64::MAX as u64) as i64;
         self.set_pending_events(path, count);
     }
+}
+
+/// Derives the root scope (`/user/...` → `user`) from an actor path.
+///
+/// Unknown shapes map to an empty scope rather than creating series.
+#[cfg(feature = "prometheus")]
+fn scope_of(path: &str) -> Arc<str> {
+    path.split('/')
+        .find(|segment| !segment.is_empty())
+        .map_or_else(|| Arc::from(""), Arc::from)
 }
 
 #[cfg(feature = "prometheus")]

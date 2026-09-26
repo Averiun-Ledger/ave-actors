@@ -133,6 +133,12 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
     /// first scheduled timer, so actors that never use timers do not pay the
     /// cost of an extra Tokio task.
     pub fn new(system: SystemRef, path: ActorPath, max_timers: usize) -> Self {
+        // Internal invariant: the runner validates `Actor::max_timers`
+        // before constructing; this type is not nameable outside the crate.
+        debug_assert!(
+            max_timers > 0,
+            "TimerScheduler requires max_timers >= 1"
+        );
         let running = Arc::new(AtomicBool::new(true));
         let accepting = Arc::new(AtomicBool::new(false));
         let epoch = Arc::new(AtomicU64::new(0));

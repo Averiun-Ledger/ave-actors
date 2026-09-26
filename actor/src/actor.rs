@@ -354,6 +354,8 @@ where
             name,
             max_concurrent,
             self.path().clone(),
+            crate::runner::actor_type_name::<A>(),
+            A::detailed_metrics(),
             self.system.actor_metrics(),
         )?;
         #[cfg(not(feature = "prometheus"))]
@@ -383,6 +385,8 @@ where
             max_concurrent,
             buffer_capacity,
             self.path().clone(),
+            crate::runner::actor_type_name::<A>(),
+            A::detailed_metrics(),
             self.system.actor_metrics(),
         )?;
         #[cfg(not(feature = "prometheus"))]
@@ -749,6 +753,16 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
         Some(Duration::from_secs(5))
     }
 
+    /// Enables per-actor-path metric series for this actor type.
+    ///
+    /// Aggregate metrics are always keyed by scope and actor type (bounded).
+    /// Returning `true` additionally records path-labeled detail series for
+    /// failures and mailbox events. Only opt in for small, fixed actor
+    /// sets: each distinct path creates permanent series.
+    fn detailed_metrics() -> bool {
+        false
+    }
+
     /// Returns the supervision strategy applied when this actor fails at startup.
     fn supervision_strategy() -> SupervisionStrategy {
         SupervisionStrategy::Stop
@@ -1063,6 +1077,8 @@ where
             name,
             max_concurrent,
             self.path(),
+            crate::runner::actor_type_name::<A>(),
+            A::detailed_metrics(),
             self.metrics.clone(),
         )?;
         #[cfg(not(feature = "prometheus"))]
@@ -1092,6 +1108,8 @@ where
             max_concurrent,
             buffer_capacity,
             self.path(),
+            crate::runner::actor_type_name::<A>(),
+            A::detailed_metrics(),
             self.metrics.clone(),
         )?;
         #[cfg(not(feature = "prometheus"))]

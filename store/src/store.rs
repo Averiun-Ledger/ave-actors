@@ -377,6 +377,10 @@ where
     key_box: Option<EncryptedKey>,
     /// Initial state to use when recovering without a snapshot.
     initial_state: Arc<A::State>,
+    /// Fencing generation owned by this store instance (see [`Store::new`]).
+    fence_id: u64,
+    /// Backend state holding the fencing generation (`{name}_fence`).
+    fence: Box<dyn State>,
     /// Atomic multi-write handle when the backend supports it. `Some`
     /// guarantees all-or-nothing batches, so multi-write paths skip
     /// compensation; `None` keeps sequential writes with rollback.
@@ -466,6 +470,29 @@ fn validate_store_prefix(prefix: &str) -> Result<(), Error> {
     }
 }
 
+/// Generates a fencing generation unique enough to disambiguate live
+/// `Store` instances sharing a prefix.
+///
+/// Cryptographic randomness first; on failure (no entropy source) falls
+/// back to time+pid+counter, which still separates instances in practice.
+/// Collisions only matter between two *live* writers, where even the
+/// fallback diverges.
+fn fresh_generation() -> u64 {
+    let mut bytes = [0u8; 8];
+    if fill_random(&mut bytes).is_ok() {
+        return u64::from_ne_bytes(bytes);
+    }
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    nanos
+        ^ (std::process::id() as u64).wrapping_mul(0x9E3779B97F4A7C15)
+        ^ FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Maximum length of a derived store prefix before the tail is hashed.
 const MAX_DERIVED_PREFIX_LEN: usize = 200;
 
@@ -535,10 +562,28 @@ where
         let batch_events = format!("{}_events", name);
         let batch_states = format!("{}_states", name);
         let batch_metadata = format!("{}_metadata", name);
+        let fence_name = format!("{}_fence", name);
         let events = manager.create_collection(&batch_events, prefix)?;
         let states = manager.create_state(&batch_states, prefix)?;
         let metadata = manager.create_state(&batch_metadata, prefix)?;
+        let fence = manager.create_state(&fence_name, prefix)?;
         let batch = manager.batch_writer();
+
+        // Fencing: this instance owns the prefix from now on. Any older
+        // live Store on the same handles fails its next fenced write
+        // instead of interleaving events or purging another owner's state.
+        // A missing fence (fresh or pre-fencing database) is adopted
+        // silently. Adoption is best-effort: a backend that cannot persist
+        // the fence will fail its data writes loudly anyway, and startup
+        // must not fail for a store whose reads still work.
+        let fence_id = fresh_generation();
+        let mut fence = fence;
+        if let Err(e) = Self::adopt_fence(&mut fence, fence_id) {
+            error!(
+                error = %e,
+                "Fence adoption failed; continuing without fencing"
+            );
+        }
 
         let mut store = Self {
             event_counter: 0,
@@ -548,6 +593,8 @@ where
             metadata: Box::new(metadata),
             key_box,
             initial_state,
+            fence_id,
+            fence: Box::new(fence),
             batch,
             batch_prefix: prefix.to_owned(),
             batch_events,
@@ -659,7 +706,12 @@ where
 
     #[cfg(feature = "prometheus")]
     fn record_pending_events(&self) {
-        if let Some(metrics) = &self.metrics {
+        // The pending gauge is inherently per-instance: only actors opting
+        // in via `detailed_metrics` export it, otherwise per-path series
+        // would grow without bound.
+        if A::detailed_metrics()
+            && let Some(metrics) = &self.metrics
+        {
             let pending = self.pending_events_since_snapshot();
             metrics.set_pending_events_u64(&self.actor_path, pending);
         }
@@ -691,6 +743,57 @@ where
             self.encode_metadata_bytes(self.event_counter, self.state_counter)?;
 
         self.metadata.put(&bytes)
+    }
+
+    /// Overwrites the fencing generation with `id`, adopting ownership of
+    /// the prefix. A missing fence (fresh or pre-fencing database) is
+    /// created; any other backend error fails startup loudly.
+    fn adopt_fence(fence: &mut impl State, id: u64) -> Result<(), Error> {
+        match fence.get() {
+            Ok(_) | Err(Error::EntryNotFound { .. }) => {}
+            Err(e) => return Err(e),
+        }
+        let bytes = borsh::to_vec(&id)
+            .map_err(|e| store_error(StoreOperation::StoreInit, e))?;
+        fence
+            .put(&bytes)
+            .map_err(|e| store_error(StoreOperation::StoreInit, e))
+    }
+
+    /// Verifies this instance still owns the prefix.
+    ///
+    /// Call before every mutating write (but not plain snapshots, whose
+    /// residue is recovery-benign). A missing fence is re-adopted; a
+    /// generation mismatch or corrupt value fails with `operation`.
+    fn check_fence(&mut self, operation: StoreOperation) -> Result<(), Error> {
+        match self.fence.get() {
+            Ok(bytes) => {
+                let current: u64 = borsh::from_slice(&bytes).map_err(|e| {
+                    store_error(operation, format!("fence decode failed: {e}"))
+                })?;
+                if current != self.fence_id {
+                    error!(
+                        expected = self.fence_id,
+                        found = current,
+                        "Store fenced by a newer generation"
+                    );
+                    return Err(store_error(
+                        operation,
+                        "store fenced by a newer generation: another live \
+                         Store owns this prefix",
+                    ));
+                }
+                Ok(())
+            }
+            Err(Error::EntryNotFound { .. }) => {
+                let bytes = borsh::to_vec(&self.fence_id)
+                    .map_err(|e| store_error(operation, e))?;
+                self.fence
+                    .put(&bytes)
+                    .map_err(|e| store_error(operation, e))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn encode_event_bytes<E: BorshSerialize>(
@@ -741,6 +844,8 @@ where
     {
         debug!("Persisting event: {:?}", event);
 
+        self.check_fence(StoreOperation::Persist)?;
+
         let bytes = self.encode_event_bytes(event)?;
 
         let next_event_number = self.event_counter;
@@ -774,6 +879,8 @@ where
 
     fn persist_light_state(&mut self, state: &A::State) -> Result<(), Error> {
         debug!("Persisting light snapshot");
+
+        self.check_fence(StoreOperation::PersistLight)?;
 
         self.event_counter =
             self.event_counter.checked_add(1).ok_or_else(|| {
@@ -819,6 +926,8 @@ where
         if !due {
             return self.persist(event);
         }
+
+        self.check_fence(StoreOperation::PersistFull)?;
 
         let next = self.event_counter.checked_add(1).ok_or_else(|| {
             store_error(StoreOperation::PersistFull, "event counter overflow")
@@ -1243,7 +1352,11 @@ where
 
     /// Deletes all events, snapshots, and metadata, then resets all counters
     /// to zero.
+    ///
+    /// Refuses to run when another live `Store` owns the prefix (fencing):
+    /// purging somebody else's log is never the right answer.
     pub fn purge(&mut self) -> Result<(), Error> {
+        self.check_fence(StoreOperation::Purge)?;
         self.events.purge()?;
         self.states.purge()?;
         self.metadata.purge()?;
@@ -1774,6 +1887,11 @@ mod tests {
             _parent_span: Option<tracing::Span>,
         ) -> tracing::Span {
             info_span!("CounterActor", id = %id)
+        }
+
+        fn detailed_metrics() -> bool {
+            // Exercise the opt-in per-actor pending gauge in metrics tests.
+            true
         }
 
         async fn pre_start(
@@ -2311,6 +2429,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_second_store_fences_first() {
+        let manager = MemoryManager::default();
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut first = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            manager.clone(),
+            None,
+            Arc::clone(&initial),
+        )
+        .unwrap();
+        // Same handles, second adoption: ownership moves to `second`.
+        let mut second = Store::<CounterActor>::test_new(
+            "store", "test", manager, None, initial,
+        )
+        .unwrap();
+
+        assert!(
+            first.persist(&CounterEvent(1)).is_err(),
+            "fenced store must refuse writes"
+        );
+        assert!(second.persist(&CounterEvent(1)).is_ok());
+        assert!(first.purge().is_err(), "fenced store must refuse purge");
+        // The owner still works and sees exactly its own event.
+        let response = second
+            .events
+            .last()
+            .unwrap()
+            .expect("owner event must be present");
+        assert_eq!(response.0, format!("{:020}", 0));
+    }
+
     #[test(tokio::test)]
     async fn test_persist_full_atomic_batch_failure_applies_nothing() {
         let (system, mut runner) = ActorSystem::create(
@@ -2546,6 +2697,10 @@ mod tests {
     struct FailingState {
         name: String,
         prefix: String,
+        /// When `false`, writes succeed as no-ops. The manager disables
+        /// failure for the fencing handle so startup (fence adoption) works
+        /// while snapshot/state writes keep failing.
+        fail_puts: bool,
     }
 
     impl State for FailingState {
@@ -2560,6 +2715,9 @@ mod tests {
         }
 
         fn put(&mut self, _data: &[u8]) -> Result<(), Error> {
+            if !self.fail_puts {
+                return Ok(());
+            }
             Err(Error::Store {
                 operation: StoreOperation::Snapshot,
                 reason: "injected snapshot failure".to_owned(),
@@ -2598,6 +2756,7 @@ mod tests {
             Ok(FailingState {
                 name: name.to_owned(),
                 prefix: prefix.to_owned(),
+                fail_puts: !name.ends_with("_fence"),
             })
         }
 

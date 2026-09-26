@@ -8,7 +8,9 @@
 use crate::{ActorPath, Error, Event};
 
 #[cfg(feature = "prometheus")]
-use crate::metrics::{SinkDropLabels, SinkLabels};
+use crate::metrics::{
+    SinkDetailLabels, SinkDropDetailLabels, SinkDropLabels, SinkLabels,
+};
 #[cfg(feature = "prometheus")]
 use prometheus_client::metrics::counter::Counter;
 
@@ -178,6 +180,12 @@ struct SinkInner<E: Event> {
     dropped_closed_counter: Option<Counter>,
     #[cfg(feature = "prometheus")]
     delivery_failure_counter: Option<Counter>,
+    #[cfg(feature = "prometheus")]
+    dropped_full_detail: Option<Counter>,
+    #[cfg(feature = "prometheus")]
+    dropped_closed_detail: Option<Counter>,
+    #[cfg(feature = "prometheus")]
+    delivery_failure_detail: Option<Counter>,
     entries: RwLock<Vec<ActiveSub<E>>>,
     /// Shared cap on concurrent subscriber deliveries. Swapped wholesale
     /// by `set_max_concurrent` so in-flight deliveries keep their permit.
@@ -208,6 +216,9 @@ impl<E: Event> SinkInner<E> {
         if let Some(c) = &self.dropped_full_counter {
             c.inc();
         }
+        if let Some(c) = &self.dropped_full_detail {
+            c.inc();
+        }
     }
 
     #[cfg(feature = "prometheus")]
@@ -215,11 +226,17 @@ impl<E: Event> SinkInner<E> {
         if let Some(c) = &self.dropped_closed_counter {
             c.inc();
         }
+        if let Some(c) = &self.dropped_closed_detail {
+            c.inc();
+        }
     }
 
     #[cfg(feature = "prometheus")]
     fn inc_delivery_failure(&self) {
         if let Some(c) = &self.delivery_failure_counter {
+            c.inc();
+        }
+        if let Some(c) = &self.delivery_failure_detail {
             c.inc();
         }
     }
@@ -404,6 +421,8 @@ impl<E: Event> Sink<E> {
         name: impl Into<String>,
         max_concurrent: Option<usize>,
         path: ActorPath,
+        actor_type: Arc<str>,
+        detailed: bool,
         metrics: Option<Arc<crate::metrics::ActorMetrics>>,
     ) -> Result<Self, Error> {
         Self::with_buffer_inner(
@@ -411,6 +430,8 @@ impl<E: Event> Sink<E> {
             max_concurrent,
             DEFAULT_SINK_BUFFER_CAPACITY,
             Some(path),
+            actor_type,
+            detailed,
             metrics,
         )
     }
@@ -425,6 +446,8 @@ impl<E: Event> Sink<E> {
         max_concurrent: Option<usize>,
         buffer_capacity: usize,
         path: ActorPath,
+        actor_type: Arc<str>,
+        detailed: bool,
         metrics: Option<Arc<crate::metrics::ActorMetrics>>,
     ) -> Result<Self, Error> {
         Self::with_buffer_inner(
@@ -432,6 +455,8 @@ impl<E: Event> Sink<E> {
             max_concurrent,
             buffer_capacity,
             Some(path),
+            actor_type,
+            detailed,
             metrics,
         )
     }
@@ -441,6 +466,8 @@ impl<E: Event> Sink<E> {
         max_concurrent: Option<usize>,
         buffer_capacity: usize,
         _path: Option<ActorPath>,
+        #[cfg(feature = "prometheus")] actor_type: Arc<str>,
+        #[cfg(feature = "prometheus")] detailed: bool,
         #[cfg(feature = "prometheus")] metrics: Option<
             Arc<crate::metrics::ActorMetrics>,
         >,
@@ -479,18 +506,25 @@ impl<E: Event> Sink<E> {
         }
         #[cfg(feature = "prometheus")]
         let scope = _path.as_ref().map(|p| Arc::from(p.scope_key()));
+        #[cfg(feature = "prometheus")]
+        let actor_path_str: Option<Arc<str>> =
+            _path.as_ref().map(|p| Arc::from(p.to_string()));
 
         #[cfg(feature = "prometheus")]
         let (
             dropped_full_counter,
             dropped_closed_counter,
             delivery_failure_counter,
+            dropped_full_detail,
+            dropped_closed_detail,
+            delivery_failure_detail,
         ) = if let (Some(m), Some(scope)) = (metrics.as_ref(), scope) {
             let sink_name = name.clone();
             let dropped_full = m
                 .sink_events_dropped_total
                 .get_or_create(&SinkDropLabels {
                     scope: Arc::clone(&scope),
+                    actor_type: Arc::clone(&actor_type),
                     sink_name: sink_name.clone(),
                     reason: "buffer_full",
                 })
@@ -499,6 +533,7 @@ impl<E: Event> Sink<E> {
                 .sink_events_dropped_total
                 .get_or_create(&SinkDropLabels {
                     scope: Arc::clone(&scope),
+                    actor_type: Arc::clone(&actor_type),
                     sink_name: sink_name.clone(),
                     reason: "closed",
                 })
@@ -507,16 +542,61 @@ impl<E: Event> Sink<E> {
                 .sink_delivery_failures_total
                 .get_or_create(&SinkLabels {
                     scope: Arc::clone(&scope),
-                    sink_name,
+                    actor_type: Arc::clone(&actor_type),
+                    sink_name: sink_name.clone(),
                 })
                 .clone();
+            // Per-actor detail series, pre-created once: only for actors
+            // opting in, so the path dimension stays operator-bounded.
+            let detail: Option<(Counter, Counter, Counter)> = if detailed {
+                actor_path_str.as_ref().map(|actor_path| {
+                    let full = m
+                        .sink_events_dropped_detail_total
+                        .get_or_create(&SinkDropDetailLabels {
+                            path: actor_path.to_string(),
+                            sink_name: sink_name.clone(),
+                            reason: "buffer_full",
+                        })
+                        .clone();
+                    let closed = m
+                        .sink_events_dropped_detail_total
+                        .get_or_create(&SinkDropDetailLabels {
+                            path: actor_path.to_string(),
+                            sink_name: sink_name.clone(),
+                            reason: "closed",
+                        })
+                        .clone();
+                    let failure = m
+                        .sink_delivery_failures_detail_total
+                        .get_or_create(&SinkDetailLabels {
+                            path: actor_path.to_string(),
+                            sink_name: sink_name.clone(),
+                        })
+                        .clone();
+                    (full, closed, failure)
+                })
+            } else {
+                None
+            };
+            let (
+                dropped_full_detail,
+                dropped_closed_detail,
+                delivery_failure_detail,
+            ): (Option<Counter>, Option<Counter>, Option<Counter>) = detail
+                .map(|(full, closed, failure)| {
+                    (Some(full), Some(closed), Some(failure))
+                })
+                .unwrap_or((None, None, None));
             (
                 Some(dropped_full),
                 Some(dropped_closed),
                 Some(delivery_failure),
+                dropped_full_detail,
+                dropped_closed_detail,
+                delivery_failure_detail,
             )
         } else {
-            (None, None, None)
+            (None, None, None, None, None, None)
         };
 
         let (sender, mut receiver) =
@@ -608,6 +688,12 @@ impl<E: Event> Sink<E> {
                 dropped_closed_counter,
                 #[cfg(feature = "prometheus")]
                 delivery_failure_counter,
+                #[cfg(feature = "prometheus")]
+                dropped_full_detail,
+                #[cfg(feature = "prometheus")]
+                dropped_closed_detail,
+                #[cfg(feature = "prometheus")]
+                delivery_failure_detail,
                 entries: RwLock::new(Vec::new()),
                 semaphore: RwLock::new(Arc::new(Semaphore::new(
                     max_concurrent,
@@ -872,6 +958,8 @@ mod tests {
                 name,
                 max_concurrent,
                 ActorPath::from("/user/test"),
+                Arc::from("TestSink"),
+                false,
                 None,
             )
         }
@@ -895,6 +983,8 @@ mod tests {
                 max_concurrent,
                 buffer_capacity,
                 ActorPath::from("/user/test"),
+                Arc::from("TestSink"),
+                false,
                 None,
             )
         }
@@ -1253,6 +1343,8 @@ mod prometheus_tests {
             None,
             2,
             ActorPath::from("/user/test"),
+            Arc::from("TestSink"),
+            false,
             Some(Arc::clone(&metrics)),
         )
         .expect("valid sink");
@@ -1266,6 +1358,7 @@ mod prometheus_tests {
             .sink_events_dropped_total
             .get_or_create(&SinkDropLabels {
                 scope: Arc::from("user"),
+                actor_type: Arc::from("TestSink"),
                 sink_name: "full".to_owned(),
                 reason: "buffer_full",
             })
@@ -1280,6 +1373,8 @@ mod prometheus_tests {
             "fail",
             None,
             ActorPath::from("/user/test"),
+            Arc::from("TestSink"),
+            false,
             Some(Arc::clone(&metrics)),
         )
         .expect("valid sink");
@@ -1295,6 +1390,7 @@ mod prometheus_tests {
                 .sink_delivery_failures_total
                 .get_or_create(&SinkLabels {
                     scope: Arc::from("user"),
+                    actor_type: Arc::from("TestSink"),
                     sink_name: "fail".to_owned(),
                 })
                 .get(),

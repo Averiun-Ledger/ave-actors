@@ -28,7 +28,7 @@ use tokio::{
 use tracing::{debug, error, warn};
 
 #[cfg(feature = "prometheus")]
-fn actor_type_name<A: Actor>() -> Arc<str> {
+pub(crate) fn actor_type_name<A: Actor>() -> Arc<str> {
     let full = std::any::type_name::<A>();
     let short = full
         .rsplit("::")
@@ -172,6 +172,10 @@ where
             #[cfg(feature = "prometheus")]
             path.clone(),
             #[cfg(feature = "prometheus")]
+            Arc::clone(&scope),
+            #[cfg(feature = "prometheus")]
+            Arc::clone(&actor_type),
+            #[cfg(feature = "prometheus")]
             metrics.clone(),
         );
         let sinks = Arc::new(DashMap::<String, Sink<A::SinkEvent>>::new());
@@ -264,10 +268,16 @@ where
                             #[cfg(feature = "prometheus")]
                             if let Some(m) = &self.metrics {
                                 m.inc_actor_failed(
-                                    &self.path,
+                                    Arc::clone(&self.scope),
                                     Arc::clone(&self.actor_type),
                                     "pre_start",
                                 );
+                                if A::detailed_metrics() {
+                                    m.inc_actor_failed_detailed(
+                                        &self.path,
+                                        "pre_start",
+                                    );
+                                };
                             }
                             self.lifecycle = ActorLifecycle::Failed;
                             ctx.set_startup_error(Error::FunctionalCritical {
@@ -288,10 +298,16 @@ where
                                 #[cfg(feature = "prometheus")]
                                 if let Some(m) = &self.metrics {
                                     m.inc_actor_failed(
-                                        &self.path,
+                                        Arc::clone(&self.scope),
                                         Arc::clone(&self.actor_type),
                                         "pre_start",
                                     );
+                                    if A::detailed_metrics() {
+                                        m.inc_actor_failed_detailed(
+                                            &self.path,
+                                            "pre_start",
+                                        );
+                                    };
                                 }
                                 ctx.set_startup_error(err);
                                 if self.parent_info.is_some() {
@@ -332,10 +348,15 @@ where
                         #[cfg(feature = "prometheus")]
                         if let Some(m) = &self.metrics {
                             m.inc_actor_failed(
-                                &self.path,
+                                Arc::clone(&self.scope),
                                 Arc::clone(&self.actor_type),
                                 "fault",
                             );
+                            if A::detailed_metrics() {
+                                m.inc_actor_failed_detailed(
+                                    &self.path, "fault",
+                                );
+                            };
                         }
                         self.lifecycle = ActorLifecycle::Failed;
                     }
@@ -709,7 +730,17 @@ where
                 msg.respond_stopped();
                 #[cfg(feature = "prometheus")]
                 if let Some(m) = &self.metrics {
-                    m.inc_mailbox_dropped(&self.path, "drain_discard");
+                    m.inc_mailbox_dropped(
+                        Arc::clone(&self.scope),
+                        Arc::clone(&self.actor_type),
+                        "drain_discard",
+                    );
+                    if A::detailed_metrics() {
+                        m.inc_mailbox_dropped_detailed(
+                            &self.path,
+                            "drain_discard",
+                        );
+                    }
                 }
             }
         }
@@ -726,7 +757,17 @@ where
                 msg.respond_stopped();
                 #[cfg(feature = "prometheus")]
                 if let Some(m) = &self.metrics {
-                    m.inc_mailbox_dropped(&self.path, "drain_timeout");
+                    m.inc_mailbox_dropped(
+                        Arc::clone(&self.scope),
+                        Arc::clone(&self.actor_type),
+                        "drain_timeout",
+                    );
+                    if A::detailed_metrics() {
+                        m.inc_mailbox_dropped_detailed(
+                            &self.path,
+                            "drain_timeout",
+                        );
+                    }
                 }
                 continue;
             }
@@ -741,7 +782,17 @@ where
                 msg.respond_stopped();
                 #[cfg(feature = "prometheus")]
                 if let Some(m) = &self.metrics {
-                    m.inc_mailbox_dropped(&self.path, "drain_timeout");
+                    m.inc_mailbox_dropped(
+                        Arc::clone(&self.scope),
+                        Arc::clone(&self.actor_type),
+                        "drain_timeout",
+                    );
+                    if A::detailed_metrics() {
+                        m.inc_mailbox_dropped_detailed(
+                            &self.path,
+                            "drain_timeout",
+                        );
+                    }
                 }
                 continue;
             }
@@ -807,7 +858,17 @@ where
                     });
                     #[cfg(feature = "prometheus")]
                     if let Some(m) = &self.metrics {
-                        m.inc_mailbox_dropped(&self.path, "drain_panic");
+                        m.inc_mailbox_dropped(
+                            Arc::clone(&self.scope),
+                            Arc::clone(&self.actor_type),
+                            "drain_panic",
+                        );
+                        if A::detailed_metrics() {
+                            m.inc_mailbox_dropped_detailed(
+                                &self.path,
+                                "drain_panic",
+                            );
+                        }
                     }
                 }
                 Err(_) => {
@@ -816,7 +877,17 @@ where
                     msg.respond_stopped();
                     #[cfg(feature = "prometheus")]
                     if let Some(m) = &self.metrics {
-                        m.inc_mailbox_dropped(&self.path, "drain_timeout");
+                        m.inc_mailbox_dropped(
+                            Arc::clone(&self.scope),
+                            Arc::clone(&self.actor_type),
+                            "drain_timeout",
+                        );
+                        if A::detailed_metrics() {
+                            m.inc_mailbox_dropped_detailed(
+                                &self.path,
+                                "drain_timeout",
+                            );
+                        }
                     }
                 }
             }
@@ -923,10 +994,16 @@ where
                             #[cfg(feature = "prometheus")]
                             if let Some(m) = &self.metrics {
                                 m.inc_actor_failed(
-                                    &self.path,
+                                    Arc::clone(&self.scope),
                                     Arc::clone(&self.actor_type),
                                     "pre_restart",
                                 );
+                                if A::detailed_metrics() {
+                                    m.inc_actor_failed_detailed(
+                                        &self.path,
+                                        "pre_restart",
+                                    );
+                                };
                             }
                             ctx.set_startup_error(err);
                             self.supervision_strategy =
@@ -2067,7 +2144,7 @@ mod prometheus_tests {
             metrics
                 .actor_failed_total
                 .get_or_create(&ActorFailureLabels {
-                    path: "/user/pre_start_failure".to_owned(),
+                    scope: Arc::from("user"),
                     actor_type: Arc::from("FailingPreStartActor"),
                     phase: "pre_start",
                 })
@@ -2114,7 +2191,7 @@ mod prometheus_tests {
             metrics
                 .actor_failed_total
                 .get_or_create(&ActorFailureLabels {
-                    path: "/user/handle_failure".to_owned(),
+                    scope: Arc::from("user"),
                     actor_type: Arc::from("FailingHandleActor"),
                     phase: "handle",
                 })
@@ -2290,7 +2367,7 @@ mod prometheus_tests {
             metrics
                 .actor_failed_total
                 .get_or_create(&ActorFailureLabels {
-                    path: "/user/pre_restart_failure".to_owned(),
+                    scope: Arc::from("user"),
                     actor_type: Arc::from("PreRestartFailingActor"),
                     phase: "pre_start",
                 })
@@ -2301,7 +2378,7 @@ mod prometheus_tests {
             metrics
                 .actor_failed_total
                 .get_or_create(&ActorFailureLabels {
-                    path: "/user/pre_restart_failure".to_owned(),
+                    scope: Arc::from("user"),
                     actor_type: Arc::from("PreRestartFailingActor"),
                     phase: "pre_restart",
                 })

@@ -330,3 +330,85 @@ async fn mailbox_full_metric_is_emitted() -> Result<(), Error> {
     );
     Ok(())
 }
+
+#[derive(Clone)]
+struct DoomedActor;
+
+impl NotPersistentActor for DoomedActor {}
+
+#[async_trait]
+impl Actor for DoomedActor {
+    type Message = Ping;
+    type Response = ();
+    type Event = ();
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("DoomedActor", id = %id)
+    }
+
+    fn detailed_metrics() -> bool {
+        true
+    }
+
+    async fn pre_start(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        Err(Error::FunctionalCritical {
+            description: "doomed from the start".to_owned(),
+        })
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for DoomedActor {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: Ping,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+#[test(tokio::test)]
+async fn detailed_metrics_add_path_series() -> Result<(), Error> {
+    let mut registry = Registry::default();
+    let (system, mut runner) = ActorSystem::create_with_registry(
+        CancellationToken::new(),
+        CancellationToken::new(),
+        &mut registry,
+    );
+    let runner_handle = tokio::spawn(async move { runner.run().await });
+
+    // Failing pre_start with the default Stop strategy: the failure is
+    // recorded and creation returns the error.
+    let result = system.create_root_actor("doomed", DoomedActor).await;
+    assert!(result.is_err());
+
+    system.stop_system();
+    join_runner(runner_handle).await?;
+
+    let body = encode_registry(&registry);
+    // Aggregate series keyed by scope, plus the opt-in per-actor detail.
+    assert!(
+        body.contains("ave_actors_actor_failed_total"),
+        "expected aggregate failures: {body}"
+    );
+    assert!(
+        body.contains("ave_actors_actor_failed_detail_total"),
+        "expected detail failures: {body}"
+    );
+    assert!(
+        body.contains("/user/doomed"),
+        "expected doomed path in detail series: {body}"
+    );
+    Ok(())
+}

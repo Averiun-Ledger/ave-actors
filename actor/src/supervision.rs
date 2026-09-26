@@ -436,7 +436,8 @@ pub struct CustomIntervalStrategy {
 impl CustomIntervalStrategy {
     /// Creates the strategy from `durations`; `max_retries` is set to `durations.len()`.
     ///
-    /// The returned strategy is **not** validated. Use
+    /// An empty queue is valid and means zero retries. The returned
+    /// strategy is otherwise **not** validated. Use
     /// [`CustomIntervalStrategy::try_new`] or wrap it in [`Strategy`] and call
     /// [`Strategy::validate`] to check limits.
     pub fn new(durations: VecDeque<Duration>) -> Self {

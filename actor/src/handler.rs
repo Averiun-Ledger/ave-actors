@@ -198,6 +198,12 @@ where
     /// The path of the actor this helper targets.
     #[cfg(feature = "prometheus")]
     path: ActorPath,
+    /// Cached root scope used as a Prometheus label.
+    #[cfg(feature = "prometheus")]
+    scope: Arc<str>,
+    /// Actor type name used as a Prometheus label.
+    #[cfg(feature = "prometheus")]
+    actor_type: Arc<str>,
     /// Optional Prometheus metrics collection shared by the actor system.
     #[cfg(feature = "prometheus")]
     metrics: Option<Arc<crate::metrics::ActorMetrics>>,
@@ -211,6 +217,8 @@ where
         sender: MailboxSender<A>,
         strategy: OverflowStrategy,
         #[cfg(feature = "prometheus")] path: ActorPath,
+        #[cfg(feature = "prometheus")] scope: Arc<str>,
+        #[cfg(feature = "prometheus")] actor_type: Arc<str>,
         #[cfg(feature = "prometheus")] metrics: Option<
             Arc<crate::metrics::ActorMetrics>,
         >,
@@ -220,6 +228,10 @@ where
             strategy,
             #[cfg(feature = "prometheus")]
             path,
+            #[cfg(feature = "prometheus")]
+            scope,
+            #[cfg(feature = "prometheus")]
+            actor_type,
             #[cfg(feature = "prometheus")]
             metrics,
         }
@@ -244,7 +256,17 @@ where
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         #[cfg(feature = "prometheus")]
                         if let Some(m) = &self.metrics {
-                            m.inc_mailbox_dropped(&self.path, "overflow_drop");
+                            m.inc_mailbox_dropped(
+                                Arc::clone(&self.scope),
+                                Arc::clone(&self.actor_type),
+                                "overflow_drop",
+                            );
+                            if A::detailed_metrics() {
+                                m.inc_mailbox_dropped_detailed(
+                                    &self.path,
+                                    "overflow_drop",
+                                );
+                            }
                         }
                         tracing::debug!(
                             strategy = ?self.strategy,
@@ -255,7 +277,16 @@ where
                     Err(mpsc::error::TrySendError::Closed(_)) => {
                         #[cfg(feature = "prometheus")]
                         if let Some(m) = &self.metrics {
-                            m.inc_mailbox_dropped(&self.path, "closed");
+                            m.inc_mailbox_dropped(
+                                Arc::clone(&self.scope),
+                                Arc::clone(&self.actor_type),
+                                "closed",
+                            );
+                            if A::detailed_metrics() {
+                                m.inc_mailbox_dropped_detailed(
+                                    &self.path, "closed",
+                                );
+                            }
                         }
                         Err(Error::ActorStopped)
                     }
@@ -267,14 +298,29 @@ where
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         #[cfg(feature = "prometheus")]
                         if let Some(m) = &self.metrics {
-                            m.inc_mailbox_full(&self.path);
+                            m.inc_mailbox_full(
+                                Arc::clone(&self.scope),
+                                Arc::clone(&self.actor_type),
+                            );
+                            if A::detailed_metrics() {
+                                m.inc_mailbox_full_detailed(&self.path);
+                            }
                         }
                         Err(Error::MailboxFull)
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
                         #[cfg(feature = "prometheus")]
                         if let Some(m) = &self.metrics {
-                            m.inc_mailbox_dropped(&self.path, "closed");
+                            m.inc_mailbox_dropped(
+                                Arc::clone(&self.scope),
+                                Arc::clone(&self.actor_type),
+                                "closed",
+                            );
+                            if A::detailed_metrics() {
+                                m.inc_mailbox_dropped_detailed(
+                                    &self.path, "closed",
+                                );
+                            }
                         }
                         Err(Error::ActorStopped)
                     }
@@ -304,7 +350,16 @@ where
                 {
                     #[cfg(feature = "prometheus")]
                     if let Some(m) = &self.metrics {
-                        m.inc_mailbox_dropped(&self.path, "closed");
+                        m.inc_mailbox_dropped(
+                            Arc::clone(&self.scope),
+                            Arc::clone(&self.actor_type),
+                            "closed",
+                        );
+                        if A::detailed_metrics() {
+                            m.inc_mailbox_dropped_detailed(
+                                &self.path, "closed",
+                            );
+                        }
                     }
                     return Err(Error::ActorStopped);
                 }
@@ -319,14 +374,29 @@ where
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         #[cfg(feature = "prometheus")]
                         if let Some(m) = &self.metrics {
-                            m.inc_mailbox_full(&self.path);
+                            m.inc_mailbox_full(
+                                Arc::clone(&self.scope),
+                                Arc::clone(&self.actor_type),
+                            );
+                            if A::detailed_metrics() {
+                                m.inc_mailbox_full_detailed(&self.path);
+                            }
                         }
                         return Err(Error::MailboxFull);
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
                         #[cfg(feature = "prometheus")]
                         if let Some(m) = &self.metrics {
-                            m.inc_mailbox_dropped(&self.path, "closed");
+                            m.inc_mailbox_dropped(
+                                Arc::clone(&self.scope),
+                                Arc::clone(&self.actor_type),
+                                "closed",
+                            );
+                            if A::detailed_metrics() {
+                                m.inc_mailbox_dropped_detailed(
+                                    &self.path, "closed",
+                                );
+                            }
                         }
                         return Err(Error::ActorStopped);
                     }
@@ -357,6 +427,10 @@ where
             strategy: self.strategy,
             #[cfg(feature = "prometheus")]
             path: self.path.clone(),
+            #[cfg(feature = "prometheus")]
+            scope: Arc::clone(&self.scope),
+            #[cfg(feature = "prometheus")]
+            actor_type: Arc::clone(&self.actor_type),
             #[cfg(feature = "prometheus")]
             metrics: self.metrics.clone(),
         }
@@ -418,6 +492,8 @@ mod prometheus_tests {
             sender,
             strategy,
             ActorPath::from("/test"),
+            Arc::from("test"),
+            Arc::from("MetricsTestActor"),
             metrics,
         );
         (helper, receiver)
@@ -436,9 +512,9 @@ mod prometheus_tests {
         let result = helper.tell(ActorPath::from("/sender"), ()).await;
 
         assert!(matches!(result, Err(Error::MailboxFull)));
-        assert_eq!(metrics.mailbox_full_count(&ActorPath::from("/test")), 1);
+        assert_eq!(metrics.mailbox_full_count("test", "MetricsTestActor"), 1);
         assert_eq!(
-            metrics.mailbox_dropped_count(&ActorPath::from("/test"), "closed"),
+            metrics.mailbox_dropped_count("test", "MetricsTestActor", "closed"),
             0
         );
     }
@@ -460,13 +536,14 @@ mod prometheus_tests {
         assert!(result.is_ok());
         assert_eq!(
             metrics.mailbox_dropped_count(
-                &ActorPath::from("/test"),
+                "test",
+                "MetricsTestActor",
                 "overflow_drop"
             ),
             1
         );
         assert_eq!(
-            metrics.mailbox_dropped_count(&ActorPath::from("/test"), "closed"),
+            metrics.mailbox_dropped_count("test", "MetricsTestActor", "closed"),
             0
         );
     }
@@ -484,7 +561,7 @@ mod prometheus_tests {
         let result = helper.ask(ActorPath::from("/sender"), ()).await;
 
         assert!(matches!(result, Err(Error::MailboxFull)));
-        assert_eq!(metrics.mailbox_full_count(&ActorPath::from("/test")), 1);
+        assert_eq!(metrics.mailbox_full_count("test", "MetricsTestActor"), 1);
     }
 
     #[test(tokio::test)]
@@ -499,7 +576,7 @@ mod prometheus_tests {
 
         assert!(matches!(result, Err(Error::ActorStopped)));
         assert_eq!(
-            metrics.mailbox_dropped_count(&ActorPath::from("/test"), "closed"),
+            metrics.mailbox_dropped_count("test", "MetricsTestActor", "closed"),
             1
         );
     }
@@ -518,7 +595,7 @@ mod prometheus_tests {
 
         assert!(matches!(result, Err(Error::ActorStopped)));
         assert_eq!(
-            metrics.mailbox_dropped_count(&ActorPath::from("/test"), "closed"),
+            metrics.mailbox_dropped_count("test", "MetricsTestActor", "closed"),
             1
         );
     }
@@ -535,7 +612,7 @@ mod prometheus_tests {
 
         assert!(matches!(result, Err(Error::ActorStopped)));
         assert_eq!(
-            metrics.mailbox_dropped_count(&ActorPath::from("/test"), "closed"),
+            metrics.mailbox_dropped_count("test", "MetricsTestActor", "closed"),
             1
         );
     }
@@ -554,7 +631,7 @@ mod prometheus_tests {
 
         assert!(matches!(result, Err(Error::ActorStopped)));
         assert_eq!(
-            metrics.mailbox_dropped_count(&ActorPath::from("/test"), "closed"),
+            metrics.mailbox_dropped_count("test", "MetricsTestActor", "closed"),
             1
         );
     }
