@@ -93,6 +93,19 @@ impl<A: Actor + Handler<A>> Envelope<A> {
         }
     }
 
+    /// Answers a pending `ask` with `err`, if this envelope holds one.
+    ///
+    /// Used when the handler panicked: the `rsvp` channel never fires on
+    /// its own, so without this the caller would hang forever.
+    pub(crate) fn respond_error(&mut self, err: Error) {
+        if let Self::Ask { rsvp, .. } = self
+            && let Some(r) = rsvp.take()
+            && r.send(Err(err)).is_err()
+        {
+            error!("Failed to send error response back to caller");
+        }
+    }
+
     pub async fn handle(
         &mut self,
         actor: &mut A,
@@ -126,6 +139,34 @@ impl<A: Actor + Handler<A>> Envelope<A> {
             }
         }
     }
+}
+
+/// Runs `future` to completion, converting a panic into `Err(payload)`
+/// instead of killing the calling task.
+///
+/// Actor handlers execute user code; without this boundary a single
+/// panicking message ends the whole actor task with pending asks hanging
+/// and watchers unnotified. Implemented over [`std::future::poll_fn`] so
+/// no extra dependency or nightly feature is needed.
+pub(crate) async fn catch_panic<F, T>(
+    future: F,
+) -> Result<T, Box<dyn std::any::Any + Send>>
+where
+    F: std::future::Future<Output = T>,
+{
+    use std::future::poll_fn;
+    use std::task::Poll;
+    let mut future = Box::pin(future);
+    poll_fn(|cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future.as_mut().poll(cx)
+        })) {
+            Ok(Poll::Ready(output)) => Poll::Ready(Ok(output)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
+    })
+    .await
 }
 
 /// Mailbox receiver side for consuming messages from the actor's queue.

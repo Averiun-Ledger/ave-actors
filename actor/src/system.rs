@@ -491,9 +491,7 @@ impl SystemRef {
             Err(timeout) => {
                 init_handle.abort();
                 self.cleanup_failed_actor_init(&path, is_root).await;
-                Err(Error::Timeout {
-                    ms: timeout.as_millis(),
-                })
+                Err(Error::Timeout { duration: timeout })
             }
         }
     }

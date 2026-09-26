@@ -45,8 +45,6 @@ pub enum StoreOperation {
     CreateCollection,
     /// Failure creating a state (snapshot) handle in a backend.
     CreateState,
-    /// Diagnostic discriminator used only by tests.
-    Test,
 }
 
 impl fmt::Display for StoreOperation {
@@ -88,7 +86,6 @@ impl fmt::Display for StoreOperation {
             Self::RocksdbOperation => "rocksdb_operation",
             Self::CreateCollection => "create_collection",
             Self::CreateState => "create_state",
-            Self::Test => "test",
         };
         f.write_str(value)
     }

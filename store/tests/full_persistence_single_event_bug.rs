@@ -193,7 +193,11 @@ async fn test_debug_event_counter_after_first_event() {
     }
 
     store_ref
-        .ask(StoreCommand::Persist(Arc::new(DataSet("test".to_string()))))
+        .ask(StoreCommand::PersistFull {
+            event: Arc::new(DataSet("test".to_string())),
+            state: Arc::new(SingleEventActorState::default()),
+            snapshot_every: None,
+        })
         .await
         .unwrap();
 

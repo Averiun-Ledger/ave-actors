@@ -137,7 +137,11 @@ async fn test_full_persistence_recovery_without_snapshot() {
     for i in 1..=3 {
         let event = TestEvent { delta: i };
         store_ref
-            .ask(StoreCommand::Persist(Arc::new(event)))
+            .ask(StoreCommand::PersistFull {
+                event: Arc::new(event),
+                state: Arc::new(TestActorState::default()),
+                snapshot_every: None,
+            })
             .await
             .unwrap();
     }
@@ -200,11 +204,19 @@ async fn test_recover_without_snapshot_replays_all_events() {
 
     // Persist two events (5 and 7) without ever creating a snapshot.
     store_ref
-        .ask(StoreCommand::Persist(Arc::new(TestEvent { delta: 5 })))
+        .ask(StoreCommand::PersistFull {
+            event: Arc::new(TestEvent { delta: 5 }),
+            state: Arc::new(TestActorState::default()),
+            snapshot_every: None,
+        })
         .await
         .unwrap();
     store_ref
-        .ask(StoreCommand::Persist(Arc::new(TestEvent { delta: 7 })))
+        .ask(StoreCommand::PersistFull {
+            event: Arc::new(TestEvent { delta: 7 }),
+            state: Arc::new(TestActorState::default()),
+            snapshot_every: None,
+        })
         .await
         .unwrap();
 

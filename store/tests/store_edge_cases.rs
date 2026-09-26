@@ -327,7 +327,7 @@ impl Collection for FailingCollection {
     fn get(&self, _key: &str) -> Result<Vec<u8>, StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: StoreOperation::Test,
+                operation: StoreOperation::GetEventsRange,
                 reason: "Intentional failure".to_string(),
                 source: None,
             })
@@ -341,7 +341,7 @@ impl Collection for FailingCollection {
     fn put(&mut self, key: &str, data: &[u8]) -> Result<(), StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: StoreOperation::Test,
+                operation: StoreOperation::Insert,
                 reason: "Intentional failure".to_string(),
                 source: None,
             })
@@ -354,7 +354,7 @@ impl Collection for FailingCollection {
     fn del(&mut self, _key: &str) -> Result<(), StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: StoreOperation::Test,
+                operation: StoreOperation::Delete,
                 reason: "Intentional failure".to_string(),
                 source: None,
             })
@@ -366,7 +366,7 @@ impl Collection for FailingCollection {
     fn purge(&mut self) -> Result<(), StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: StoreOperation::Test,
+                operation: StoreOperation::Purge,
                 reason: "Intentional failure".to_string(),
                 source: None,
             })
@@ -403,7 +403,7 @@ impl State for FailingCollection {
     fn put(&mut self, data: &[u8]) -> Result<(), StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: StoreOperation::Test,
+                operation: StoreOperation::Snapshot,
                 reason: "Intentional failure".to_string(),
                 source: None,
             })
@@ -416,7 +416,7 @@ impl State for FailingCollection {
     fn del(&mut self) -> Result<(), StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: StoreOperation::Test,
+                operation: StoreOperation::Delete,
                 reason: "Intentional failure".to_string(),
                 source: None,
             })
@@ -429,7 +429,7 @@ impl State for FailingCollection {
     fn purge(&mut self) -> Result<(), StoreError> {
         if self.fail_operations {
             Err(StoreError::Store {
-                operation: StoreOperation::Test,
+                operation: StoreOperation::Purge,
                 reason: "Intentional failure".to_string(),
                 source: None,
             })
@@ -639,7 +639,13 @@ async fn test_store_error_scenarios() {
         data: "test".to_string(),
     };
 
-    let result = store_ref.ask(StoreCommand::Persist(Arc::new(event))).await;
+    let result = store_ref
+        .ask(StoreCommand::PersistFull {
+            event: Arc::new(event),
+            state: Arc::new(EncryptedActorState::default()),
+            snapshot_every: None,
+        })
+        .await;
     assert!(matches!(result, Err(ActorError::StoreOperation { .. })));
 
     // Test snapshot failure
@@ -712,7 +718,11 @@ async fn test_store_commands_coverage() {
         data: "test1".to_string(),
     };
     store_ref
-        .ask(StoreCommand::Persist(Arc::new(event)))
+        .ask(StoreCommand::PersistFull {
+            event: Arc::new(event),
+            state: Arc::new(EncryptedActorState::default()),
+            snapshot_every: None,
+        })
         .await
         .unwrap();
 
@@ -721,7 +731,11 @@ async fn test_store_commands_coverage() {
         data: "test2".to_string(),
     };
     store_ref
-        .ask(StoreCommand::Persist(Arc::new(event)))
+        .ask(StoreCommand::PersistFull {
+            event: Arc::new(event),
+            state: Arc::new(EncryptedActorState::default()),
+            snapshot_every: None,
+        })
         .await
         .unwrap();
 
@@ -896,7 +910,11 @@ async fn test_encryption_failure_scenarios() {
     };
 
     store_ref
-        .ask(StoreCommand::Persist(Arc::new(event.clone())))
+        .ask(StoreCommand::PersistFull {
+            event: Arc::new(event.clone()),
+            state: Arc::new(EncryptedActorState::default()),
+            snapshot_every: None,
+        })
         .await
         .unwrap();
 

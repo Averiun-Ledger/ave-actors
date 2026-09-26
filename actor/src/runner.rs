@@ -9,7 +9,7 @@ use crate::{
         validate_mailbox_capacity, validate_max_timers,
         validate_optional_timeout, validate_timeout,
     },
-    handler::{Envelope, HandleHelper, MailboxReceiver, mailbox},
+    handler::{Envelope, HandleHelper, MailboxReceiver, catch_panic, mailbox},
     sink::Sink,
     supervision::{RetryStrategy, SupervisionStrategy},
     system::SystemRef,
@@ -252,14 +252,15 @@ where
                 // State: CREATED
                 ActorLifecycle::Created => {
                     ctx.timer_scheduler.set_accepting(true);
-                    // Pre-start hook.
-                    match self.actor.pre_start(&mut ctx).await {
-                        Ok(_) => {
-                            debug!("Actor started");
-                            self.lifecycle = ActorLifecycle::Started;
-                        }
-                        Err(err) => {
-                            error!(error = %err, "Actor failed to start");
+                    // Pre-start hook. A panic is treated like a startup
+                    // error so the actor follows the Failed path instead
+                    // of killing the init task silently.
+                    match catch_panic(self.actor.pre_start(&mut ctx)).await {
+                        Err(_) => {
+                            error!(
+                                path = %self.path,
+                                "Actor panicked in pre_start"
+                            );
                             #[cfg(feature = "prometheus")]
                             if let Some(m) = &self.metrics {
                                 m.inc_actor_failed(
@@ -268,16 +269,41 @@ where
                                     "pre_start",
                                 );
                             }
-                            ctx.set_startup_error(err);
+                            self.lifecycle = ActorLifecycle::Failed;
+                            ctx.set_startup_error(Error::FunctionalCritical {
+                                description: "pre_start panicked".to_owned(),
+                            });
                             if self.parent_info.is_some() {
-                                // Child actor: notify synchronously via the
-                                // init oneshot only; the parent already sees
-                                // the failure through create_child Err.
                                 self.lifecycle = ActorLifecycle::Terminated;
-                            } else {
-                                self.lifecycle = ActorLifecycle::Failed;
                             }
+                            continue;
                         }
+                        Ok(result) => match result {
+                            Ok(_) => {
+                                debug!("Actor started");
+                                self.lifecycle = ActorLifecycle::Started;
+                            }
+                            Err(err) => {
+                                error!(error = %err, "Actor failed to start");
+                                #[cfg(feature = "prometheus")]
+                                if let Some(m) = &self.metrics {
+                                    m.inc_actor_failed(
+                                        &self.path,
+                                        Arc::clone(&self.actor_type),
+                                        "pre_start",
+                                    );
+                                }
+                                ctx.set_startup_error(err);
+                                if self.parent_info.is_some() {
+                                    // Child actor: notify synchronously via the
+                                    // init oneshot only; the parent already sees
+                                    // the failure through create_child Err.
+                                    self.lifecycle = ActorLifecycle::Terminated;
+                                } else {
+                                    self.lifecycle = ActorLifecycle::Failed;
+                                }
+                            }
+                        },
                     }
                 }
                 // State: STARTED
@@ -339,9 +365,19 @@ where
                 }
                 // State: STOPPED
                 ActorLifecycle::Stopped => {
-                    // Post stop hook.
-                    if let Err(e) = self.actor.post_stop(&mut ctx).await {
-                        error!(error = %e, "Actor failed post_stop");
+                    // Post stop hook. A panic is logged; shutdown proceeds.
+                    match catch_panic(self.actor.post_stop(&mut ctx)).await {
+                        Ok(result) => {
+                            if let Err(e) = result {
+                                error!(error = %e, "Actor failed post_stop");
+                            }
+                        }
+                        Err(_) => {
+                            error!(
+                                path = %self.path,
+                                "post_stop panicked; continuing shutdown"
+                            );
+                        }
                     }
                     if let Some(stop_sender) = pending_stop_ack.take() {
                         let _ = stop_sender.send(());
@@ -456,9 +492,20 @@ where
                     // do not outlive the actor.
                     ctx.abort_spawned_tasks();
 
-                    // 3. Pre-stop hook.
-                    if let Err(e) = self.actor.pre_stop(ctx).await {
-                        error!(error = %e, "pre_stop failed");
+                    // 3. Pre-stop hook. A panic must not kill the
+                    // shutdown path: log and continue stopping.
+                    match catch_panic(self.actor.pre_stop(ctx)).await {
+                        Ok(result) => {
+                            if let Err(e) = result {
+                                error!(error = %e, "pre_stop failed");
+                            }
+                        }
+                        Err(_) => {
+                            error!(
+                                path = %self.path,
+                                "pre_stop panicked; continuing shutdown"
+                            );
+                        }
                     }
 
                     // 3. Drain mailbox: process critical, discard non-critical.
@@ -503,11 +550,35 @@ where
                         match error {
                             ChildError::Error { error } => {
                                 debug!(error = ?error, "Child error received");
-                                self.actor.on_child_error(error, ctx).await
+                                if catch_panic(
+                                    self.actor.on_child_error(error, ctx),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    error!(
+                                        path = %self.path,
+                                        "on_child_error panicked"
+                                    );
+                                }
                             },
                             ChildError::Fault { error, sender } => {
                                 warn!(error = ?error, "Child fault received");
-                                let action = self.actor.on_child_fault(error, ctx).await;
+                                let action = match catch_panic(
+                                    self.actor.on_child_fault(error, ctx),
+                                )
+                                .await
+                                {
+                                    Ok(action) => action,
+                                    Err(_) => {
+                                        error!(
+                                            path = %self.path,
+                                            "on_child_fault panicked; \
+                                             stopping child"
+                                        );
+                                        ChildAction::Stop
+                                    }
+                                };
                                 if sender.send(action).is_err() {
                                     error!("Failed to send action to child");
                                 }
@@ -537,11 +608,36 @@ where
                             .metrics
                             .as_ref()
                             .map(|_| std::time::Instant::now());
-                        #[cfg(feature = "prometheus")]
-                        let result =
-                            envelope.handle(&mut self.actor, ctx).await;
+                        // A panicking handler must not kill the actor task:
+                        // answer pending asks with an error and keep the
+                        // mailbox running under the usual error semantics.
+                        let result = match catch_panic(
+                            envelope.handle(&mut self.actor, ctx),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => {
+                                error!(
+                                    path = %self.path,
+                                    "Message handler panicked; answering \
+                                     with an error"
+                                );
+                                envelope.respond_error(
+                                    Error::FunctionalCritical {
+                                        description:
+                                            "message handler panicked"
+                                                .to_owned(),
+                                    },
+                                );
+                                Err(Error::FunctionalCritical {
+                                    description:
+                                        "message handler panicked".to_owned(),
+                                })
+                            }
+                        };
                         #[cfg(not(feature = "prometheus"))]
-                        let _ = envelope.handle(&mut self.actor, ctx).await;
+                        let _ = result;
                         #[cfg(feature = "prometheus")]
                         {
                             if let (Some(m), Some(start)) =
@@ -661,11 +757,11 @@ where
 
             match tokio::time::timeout(
                 remaining,
-                msg.handle(&mut self.actor, ctx),
+                catch_panic(msg.handle(&mut self.actor, ctx)),
             )
             .await
             {
-                Ok(_result) => {
+                Ok(Ok(_result)) => {
                     #[cfg(feature = "prometheus")]
                     {
                         if let (Some(m), Some(start)) = (&self.metrics, start) {
@@ -697,6 +793,21 @@ where
                                 wait_seconds,
                             );
                         }
+                    }
+                }
+                Ok(Err(_)) => {
+                    // The handler panicked mid-drain: answer and keep
+                    // draining instead of killing the shutdown path.
+                    error!(
+                        path = %self.path,
+                        "Message handler panicked during drain"
+                    );
+                    msg.respond_error(Error::FunctionalCritical {
+                        description: "message handler panicked".to_owned(),
+                    });
+                    #[cfg(feature = "prometheus")]
+                    if let Some(m) = &self.metrics {
+                        m.inc_mailbox_dropped(&self.path, "drain_panic");
                     }
                 }
                 Err(_) => {

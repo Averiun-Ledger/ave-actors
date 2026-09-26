@@ -42,7 +42,7 @@ impl State for FailingStateStore {
 
     fn put(&mut self, _data: &[u8]) -> Result<(), StoreError> {
         Err(StoreError::Store {
-            operation: StoreOperation::Test,
+            operation: StoreOperation::Snapshot,
             reason: "forced snapshot failure".to_owned(),
             source: None,
         })
@@ -90,7 +90,7 @@ impl Collection for RangeCollection {
     fn last(&self) -> Result<Option<(String, Vec<u8>)>, StoreError> {
         if self.fail_last {
             return Err(StoreError::Store {
-                operation: StoreOperation::Test,
+                operation: StoreOperation::LastEvent,
                 reason: "forced last failure".to_owned(),
                 source: None,
             });
@@ -142,7 +142,7 @@ impl Collection for RangeCollection {
     > {
         if self.fail_iter {
             return Err(StoreError::Store {
-                operation: StoreOperation::Test,
+                operation: StoreOperation::GetEventsRange,
                 reason: "forced iter failure".to_owned(),
                 source: None,
             });
@@ -473,14 +473,22 @@ async fn test_recover_fails_when_event_log_has_gap() {
 
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::Persist(Arc::new(ValueEvent(1))))
+            .ask(StoreCommand::PersistFull {
+                event: Arc::new(ValueEvent(1)),
+                state: Arc::new(GapActorState::default()),
+                snapshot_every: None,
+            })
             .await
             .unwrap(),
         StoreResponse::Persisted
     ));
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::Persist(Arc::new(ValueEvent(2))))
+            .ask(StoreCommand::PersistFull {
+                event: Arc::new(ValueEvent(2)),
+                state: Arc::new(GapActorState::default()),
+                snapshot_every: None,
+            })
             .await
             .unwrap(),
         StoreResponse::Persisted
@@ -550,7 +558,7 @@ fn test_get_by_range_propagates_iter_initialization_error() {
     assert!(matches!(
         result,
         Err(StoreError::Store {
-            operation: StoreOperation::Test,
+            operation: StoreOperation::GetEventsRange,
             ..
         })
     ));
@@ -570,7 +578,7 @@ fn test_store_new_propagates_collection_last_error() {
     assert!(matches!(
         result,
         Err(StoreError::Store {
-            operation: StoreOperation::Test,
+            operation: StoreOperation::LastEvent,
             ..
         })
     ));
@@ -674,7 +682,11 @@ async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
     ));
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::Persist(Arc::new(ValueEvent(3))))
+            .ask(StoreCommand::PersistFull {
+                event: Arc::new(ValueEvent(3)),
+                state: Arc::new(GapActorState::default()),
+                snapshot_every: None,
+            })
             .await
             .unwrap(),
         StoreResponse::Persisted

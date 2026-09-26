@@ -237,11 +237,19 @@ async fn test_full_persistence_store_command_returns_last_event() {
         .unwrap();
 
     store_ref
-        .ask(StoreCommand::Persist(Arc::new(FullEvent(5))))
+        .ask(StoreCommand::PersistFull {
+            event: Arc::new(FullEvent(5)),
+            state: Arc::new(FullActorState::default()),
+            snapshot_every: None,
+        })
         .await
         .unwrap();
     store_ref
-        .ask(StoreCommand::Persist(Arc::new(FullEvent(3))))
+        .ask(StoreCommand::PersistFull {
+            event: Arc::new(FullEvent(3)),
+            state: Arc::new(FullActorState::default()),
+            snapshot_every: None,
+        })
         .await
         .unwrap();
 

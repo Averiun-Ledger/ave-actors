@@ -1388,8 +1388,6 @@ pub enum StoreCommand<A: PersistentActor>
 where
     A::Event: BorshSerialize + BorshDeserialize,
 {
-    /// Persist an event without forcing a snapshot.
-    Persist(Arc<A::Event>),
     /// Persist an event and snapshot the supplied state if required.
     PersistFull {
         /// Event to append to the event log.
@@ -1423,7 +1421,6 @@ where
 {
     fn clone(&self) -> Self {
         match self {
-            Self::Persist(e) => Self::Persist(Arc::clone(e)),
             Self::PersistFull {
                 event,
                 state,
@@ -1533,25 +1530,6 @@ where
         _ctx: &mut ActorContext<Self>,
     ) -> Result<StoreResponse<A>, ActorError> {
         match msg {
-            StoreCommand::Persist(event) => {
-                #[cfg(feature = "prometheus")]
-                let start = Instant::now();
-                let result = self.persist(event.as_ref());
-                #[cfg(feature = "prometheus")]
-                self.record_command_metrics(
-                    start,
-                    "persist",
-                    "persist",
-                    &result.as_ref().map(|_| ()),
-                );
-                result.map_err(|e| {
-                    actor_store_error(StoreOperation::Persist, e)
-                })?;
-                debug!("Persisted event: {:?}", event);
-                #[cfg(feature = "prometheus")]
-                self.record_pending_events();
-                Ok(StoreResponse::Persisted)
-            }
             StoreCommand::PersistFull {
                 event,
                 state,
@@ -2116,7 +2094,11 @@ mod tests {
         let store_ref = system.create_root_actor("store", store).await.unwrap();
 
         store_ref
-            .tell(StoreCommand::Persist(Arc::new(CounterEvent(5))))
+            .tell(StoreCommand::PersistFull {
+                event: Arc::new(CounterEvent(5)),
+                state: Arc::new(CounterState { value: 0 }),
+                snapshot_every: None,
+            })
             .await
             .unwrap();
         store_ref
@@ -2124,7 +2106,11 @@ mod tests {
             .await
             .unwrap();
         store_ref
-            .tell(StoreCommand::Persist(Arc::new(CounterEvent(3))))
+            .tell(StoreCommand::PersistFull {
+                event: Arc::new(CounterEvent(3)),
+                state: Arc::new(CounterState { value: 0 }),
+                snapshot_every: None,
+            })
             .await
             .unwrap();
 
@@ -3082,12 +3068,16 @@ mod tests {
             assert_eq!(pending_events_value(&buf, &path), Some(0));
 
             store_ref
-                .ask(StoreCommand::Persist(Arc::new(CounterEvent(5))))
+                .ask(StoreCommand::PersistFull {
+                    event: Arc::new(CounterEvent(5)),
+                    state: Arc::new(CounterState::default()),
+                    snapshot_every: None,
+                })
                 .await
                 .expect("persist command should succeed");
 
             let buf = encode_registry(&registry);
-            assert!(buf.contains("operation=\"persist\""));
+            assert!(buf.contains("operation=\"persist_full\""));
             assert_eq!(pending_events_value(&buf, &path), Some(1));
 
             store_ref

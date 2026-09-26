@@ -699,7 +699,9 @@ async fn test_startup_timeout_aborts_stuck_actor_and_releases_path() {
         )
         .await;
 
-    assert!(matches!(result, Err(Error::Timeout { ms }) if ms == 20));
+    assert!(
+        matches!(result, Err(Error::Timeout { duration }) if duration == Duration::from_millis(20))
+    );
     assert!(
         handle
             .system

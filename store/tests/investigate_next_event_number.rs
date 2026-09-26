@@ -137,7 +137,11 @@ async fn test_next_event_number_after_persist() {
     }
 
     store_ref
-        .ask(StoreCommand::Persist(Arc::new(TestEvent(10))))
+        .ask(StoreCommand::PersistFull {
+            event: Arc::new(TestEvent(10)),
+            state: Arc::new(TestActorState::default()),
+            snapshot_every: None,
+        })
         .await
         .unwrap();
 
@@ -147,7 +151,11 @@ async fn test_next_event_number_after_persist() {
     }
 
     store_ref
-        .ask(StoreCommand::Persist(Arc::new(TestEvent(20))))
+        .ask(StoreCommand::PersistFull {
+            event: Arc::new(TestEvent(20)),
+            state: Arc::new(TestActorState::default()),
+            snapshot_every: None,
+        })
         .await
         .unwrap();
 

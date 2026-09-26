@@ -733,14 +733,20 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
         std::time::Duration::from_secs(5)
     }
 
-    /// Maximum time to wait for `pre_start` to complete; `None` disables the startup timeout.
+    /// Maximum time to wait for `pre_start` to complete.
+    ///
+    /// Defaults to 5 seconds; `None` disables the timeout (waits forever).
+    /// Override per actor when startup legitimately takes longer.
     fn startup_timeout() -> Option<Duration> {
-        None
+        Some(Duration::from_secs(5))
     }
 
-    /// Maximum time a parent waits for this actor to acknowledge a stop request; `None` disables the stop timeout.
+    /// Maximum time a parent waits for this actor to acknowledge a stop request.
+    ///
+    /// Defaults to 5 seconds; `None` disables the timeout (waits forever).
+    /// Override per actor with slow shutdown sequences.
     fn stop_timeout() -> Option<Duration> {
-        None
+        Some(Duration::from_secs(5))
     }
 
     /// Returns the supervision strategy applied when this actor fails at startup.
@@ -993,9 +999,7 @@ where
         validate_timeout("ask_timeout", timeout)?;
         tokio::time::timeout(timeout, self.sender.ask(self.path(), message))
             .await
-            .map_err(|_| Error::Timeout {
-                ms: timeout.as_millis(),
-            })?
+            .map_err(|_| Error::Timeout { duration: timeout })?
     }
 
     /// Requests the actor to stop gracefully and waits for it to confirm shutdown.

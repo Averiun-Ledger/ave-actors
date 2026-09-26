@@ -102,10 +102,10 @@ pub enum Error {
     MailboxFull,
 
     /// The ask request timed out before the actor responded.
-    #[error("ask timed out after {ms}ms")]
+    #[error("ask timed out after {duration:?}")]
     Timeout {
-        /// Duration waited in milliseconds.
-        ms: u128,
+        /// How long the caller waited.
+        duration: std::time::Duration,
     },
 
     // ===== Functional Errors =====

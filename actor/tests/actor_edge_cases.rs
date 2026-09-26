@@ -503,3 +503,96 @@ async fn test_system_stop() {
         tokio::time::timeout(Duration::from_millis(100), runner_handle).await;
     assert!(result.is_ok());
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum PanicMsg {
+    Panic,
+    Ping,
+}
+
+impl Message for PanicMsg {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum PanicResp {
+    Pong,
+}
+
+impl Response for PanicResp {}
+
+#[derive(Clone)]
+struct PanicActor;
+
+impl ave_actors_actor::NotPersistentActor for PanicActor {}
+
+#[async_trait]
+impl Actor for PanicActor {
+    type Message = PanicMsg;
+    type Response = PanicResp;
+    type Event = EdgeCaseEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("PanicActor", id = %id)
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for PanicActor {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: PanicMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<PanicResp, Error> {
+        match msg {
+            PanicMsg::Panic => panic!("intentional handler panic"),
+            PanicMsg::Ping => Ok(PanicResp::Pong),
+        }
+    }
+}
+
+#[test(tokio::test)]
+async fn test_handler_panic_answers_ask_and_keeps_actor_alive() {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    let actor_ref = system
+        .create_root_actor("panicker", PanicActor)
+        .await
+        .unwrap();
+
+    // A panicking ask must resolve with an error, not hang: the task
+    // survives and the rsvp channel fires.
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        actor_ref.ask(PanicMsg::Panic),
+    )
+    .await
+    .expect("panicking ask must resolve");
+    assert!(
+        matches!(
+            result,
+            Err(Error::FunctionalCritical { ref description })
+                if description == "message handler panicked"
+        ),
+        "expected panic error, got {:?}",
+        result.as_ref().err()
+    );
+
+    // The actor is still alive and processes the next message.
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        actor_ref.ask(PanicMsg::Ping),
+    )
+    .await
+    .expect("actor must survive a handler panic");
+    assert_eq!(result.unwrap(), PanicResp::Pong);
+
+    system.stop_system();
+}

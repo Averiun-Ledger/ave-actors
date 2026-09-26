@@ -193,11 +193,19 @@ async fn test_snapshot_created_when_events_pending() {
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     store_ref
-        .ask(StoreCommand::Persist(Arc::new(AddEvent(5))))
+        .ask(StoreCommand::PersistFull {
+            event: Arc::new(AddEvent(5)),
+            state: Arc::new(TestActorState::default()),
+            snapshot_every: None,
+        })
         .await
         .unwrap();
     store_ref
-        .ask(StoreCommand::Persist(Arc::new(AddEvent(7))))
+        .ask(StoreCommand::PersistFull {
+            event: Arc::new(AddEvent(7)),
+            state: Arc::new(TestActorState::default()),
+            snapshot_every: None,
+        })
         .await
         .unwrap();
 
