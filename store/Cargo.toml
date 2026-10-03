@@ -27,7 +27,12 @@ prometheus = ["dep:prometheus-client", "ave-actors-actor/prometheus"]
 
 [dev-dependencies]
 ave-actors-sqlite = { path = "../databases/sqlite_db", features = ["sqlite"] }
+criterion = { workspace = true }
 tempfile = { workspace = true }
 test-log = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+
+[[bench]]
+name = "persist"
+harness = false

@@ -18,7 +18,13 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 ave-actors-sqlite = { path = ".", features = ["sqlite"] }
+ave-actors-store = { workspace = true }
+criterion = { workspace = true }
 tempfile = { workspace = true }
+
+[[bench]]
+name = "backend"
+harness = false
 
 [features]
 sqlite = ["dep:rusqlite"]
