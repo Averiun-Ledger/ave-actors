@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 use tokio::time::Instant;
-use tracing::debug;
+use tracing::{debug, error};
 
 use crate::{Actor, ActorPath, Error, Handler, SystemRef};
 
@@ -168,15 +168,17 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
     }
 
     fn lock_heap(&self) -> MutexGuard<'_, BinaryHeap<TimerEntry<A>>> {
-        self.heap
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.heap.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("Timer heap lock poisoned; recovering state");
+            poisoned.into_inner()
+        })
     }
 
     fn lock_cancelled(&self) -> MutexGuard<'_, HashSet<TimerKey>> {
-        self.cancelled
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.cancelled.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("Timer cancelled-set lock poisoned; recovering");
+            poisoned.into_inner()
+        })
     }
 
     /// Starts the background timer task if it has not been started yet and the
@@ -367,7 +369,10 @@ async fn timer_loop<A: Actor + Handler<A>>(state: TimerLoopState<A>) {
         let next_deadline = state
             .heap
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| {
+                error!("Timer heap lock poisoned; recovering state");
+                poisoned.into_inner()
+            })
             .peek()
             .map(|entry| entry.deadline);
 
@@ -398,10 +403,10 @@ async fn fire_expired_timers<A: Actor + Handler<A>>(
     let mut to_fire = Vec::new();
 
     {
-        let mut heap = state
-            .heap
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut heap = state.heap.lock().unwrap_or_else(|poisoned| {
+            error!("Timer heap lock poisoned; recovering state");
+            poisoned.into_inner()
+        });
 
         while let Some(entry) = heap.pop() {
             if entry.deadline > now {
@@ -414,7 +419,10 @@ async fn fire_expired_timers<A: Actor + Handler<A>>(
             let was_cancelled = state
                 .cancelled
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(|poisoned| {
+                    error!("Timer cancelled-set lock poisoned; recovering");
+                    poisoned.into_inner()
+                })
                 .remove(&entry.key);
 
             let active = !was_cancelled && entry.epoch == current_epoch;

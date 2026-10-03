@@ -640,6 +640,8 @@ impl Subscriber<TestEvent> for FailingSubscriber {
     }
 }
 
+mod helpers;
+
 #[test(tokio::test)]
 async fn test_one_subscriber_fails_others_ok() {
     let (system, mut runner) =
@@ -664,11 +666,21 @@ async fn test_one_subscriber_fails_others_ok() {
 
     actor_ref.tell(TestMsg::Emit(77)).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     // Both ok subscribers should have received the event.
-    assert_eq!(ok_sub_a.drain().await.len(), 1);
-    assert_eq!(ok_sub_b.drain().await.len(), 1);
+    helpers::assert_eventually(
+        "both ok subscribers receive the event",
+        Duration::from_secs(2),
+        || async {
+            let a = ok_sub_a.clone_events().await;
+            let b = ok_sub_b.clone_events().await;
+            if a.len() == 1 && b.len() == 1 {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
     // The failing subscriber never stores anything (it errors immediately).
     assert!(failing_sub.drain().await.is_empty());
 }

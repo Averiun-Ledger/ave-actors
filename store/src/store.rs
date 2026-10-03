@@ -767,7 +767,7 @@ where
             Err(e) => {
                 error!(error = %e, "Can't decode metadata: incompatible format");
                 Err(store_error(
-                    StoreOperation::DecodeState,
+                    StoreOperation::DecodeMetadata,
                     format!("Metadata format is incompatible: {e}"),
                 ))
             }
@@ -868,7 +868,7 @@ where
         };
         let data = borsh::to_vec(&metadata).map_err(|e| {
             error!("Can't encode metadata: {}", e);
-            store_error(StoreOperation::EncodeActor, e)
+            store_error(StoreOperation::EncodeMetadata, e)
         })?;
 
         self.maybe_encrypt(&data)
@@ -1402,8 +1402,9 @@ where
     /// Deletes all events, snapshots, and metadata, then resets all counters
     /// to zero.
     ///
-    /// Refuses to run when another live `Store` owns the prefix (fencing):
-    /// purging somebody else's log is never the right answer.
+    /// This is irreversible: there is no confirmation and no backup. Only
+    /// purge a prefix that is really abandoned. Purging a prefix still
+    /// owned by another live `Store` is refused (fencing).
     pub fn purge(&mut self) -> Result<(), Error> {
         self.check_fence(StoreOperation::Purge)?;
         self.events.purge()?;

@@ -347,7 +347,6 @@ async fn test_sqlite_full_persistence_recovers_across_restart() {
     actor_ref.ask(FullMessage::Increment(5)).await.unwrap();
     actor_ref.ask(FullMessage::Increment(3)).await.unwrap();
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Same name: full-path prefix matches, state recovers from snapshot +
     // replayed tail event.
@@ -390,7 +389,6 @@ async fn test_sqlite_light_persistence_recovers_snapshot_without_events() {
 
     actor_ref.ask(LightMessage::Increment(7)).await.unwrap();
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let actor_ref = system
         .create_root_actor("light-sqlite", LightActor::initial(()))
@@ -424,7 +422,6 @@ async fn test_sqlite_same_leaf_under_different_parents_is_isolated() {
 
     parent_a.ask(FullMessage::Increment(10)).await.unwrap();
     parent_b.ask(FullMessage::Increment(100)).await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     assert_eq!(
         parent_a.ask(FullMessage::Get).await.unwrap(),

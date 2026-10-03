@@ -11,7 +11,7 @@ use ave_actors_actor::{
     SystemRef,
 };
 use ave_actors_store::{
-    database::{Collection, DbManager},
+    database::{Collection, DbManager, State},
     default_store_prefix,
     memory::MemoryManager,
     store::{FullPersistence, PersistentActor},
@@ -215,5 +215,32 @@ async fn test_wrong_key_fails_recovery_loudly() {
         result.is_err(),
         "unauthentic ciphertext must fail pre_start"
     );
+    system.stop_system();
+}
+
+#[test(tokio::test)]
+async fn test_garbage_metadata_reports_decode_metadata() {
+    let manager = MemoryManager::default();
+    let prefix = prefix_for("corrupt-meta");
+    let mut metadata = manager.create_state("store_metadata", &prefix).unwrap();
+    State::put(&mut metadata, b"junk-bytes").unwrap();
+
+    let (system, _runner) = test_system(manager);
+    let result = system
+        .create_root_actor("corrupt-meta", CorruptActor::initial(()))
+        .await;
+    match result {
+        Err(ActorError::StoreOperation { operation, reason }) => {
+            assert_eq!(
+                operation, "store_init",
+                "init must report its own operation"
+            );
+            assert!(
+                reason.contains("decode_metadata"),
+                "the metadata cause must survive wrapping, got: {reason}"
+            );
+        }
+        other => panic!("expected StoreOperation error, got {other:?}"),
+    }
     system.stop_system();
 }
