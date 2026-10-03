@@ -473,6 +473,8 @@ impl Actor for HangingStartActor {
         _ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         self.started.notify_one();
+        // timing: hangs far beyond startup_timeout so the test verifies the
+        // timeout aborts the stuck actor.
         tokio::time::sleep(Duration::from_secs(60)).await;
         Ok(())
     }
@@ -539,6 +541,8 @@ impl Handler<Self> for BlockingChild {
         _ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         self.entered.notify_one();
+        // timing: blocks far beyond stop_timeout so the test verifies the
+        // configured shutdown timeout path.
         tokio::time::sleep(Duration::from_secs(60)).await;
         Ok(())
     }
@@ -635,6 +639,8 @@ impl Handler<Self> for BlockingRootActor {
         _ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         self.entered.notify_one();
+        // timing: blocks far beyond the root stop timeout so the test
+        // verifies system shutdown respects the configured timeout.
         tokio::time::sleep(Duration::from_secs(60)).await;
         Ok(())
     }
@@ -1133,6 +1139,8 @@ async fn test_stop_interrupts_retry_backoff() {
     // Fault the child: the parent restarts it, landing the child in its
     // 30s retry backoff. Stopping it then must not wait out the backoff.
     parent_ref.tell(BackoffMsg::Trigger).await.unwrap();
+    // timing: waits out the fault-to-backoff cycle, which exposes no
+    // observable signal to poll before stopping the child.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let child_ref: ActorRef<BackoffChild> = system
@@ -1240,6 +1248,8 @@ impl Actor for TimeoutInitParent {
         )
         .await?;
         // Never finish: the startup timeout aborts this init.
+        // timing: hangs far beyond startup_timeout (100ms) so the test
+        // verifies the timeout stops already-created children.
         tokio::time::sleep(Duration::from_secs(30)).await;
         Ok(())
     }

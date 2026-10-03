@@ -155,7 +155,6 @@ async fn test_full_persistence_first_stop_no_previous_snapshot() {
 
     // Graceful stop must snapshot the pending events (value=30).
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let actor_ref2 = system
         .create_root_actor("test_actor", TestActor::initial(()))

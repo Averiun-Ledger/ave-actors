@@ -154,7 +154,6 @@ async fn test_full_persistence_duplication_on_restart() {
 
     // Stop the actor (FullPersistence will create snapshot on stop if there are events)
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Restart
     let actor_ref2 = system

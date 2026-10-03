@@ -1335,19 +1335,30 @@ sqlite_store_error(StoreOperation::GetEventsRange, e)
         }
 
         let from_key: Option<&str> = from;
-        let (cmp, order) = match (from_key, quantity >= 0) {
-            (Some(_), true) => ("sn > ?2", "ASC"),
-            (Some(_), false) => ("sn < ?2", "DESC"),
-            (None, true) => ("sn >= char(0)", "ASC"),
-            (None, false) => ("sn >= char(0)", "DESC"),
+        // Two query shapes instead of one tautological condition: without
+        // `from` there is no lower bound to compare.
+        let query = match (from_key, quantity >= 0) {
+            (Some(_), true) => format!(
+                "SELECT value FROM {} WHERE prefix = ?1 AND sn > ?2 ORDER \
+                 BY sn ASC LIMIT ?3",
+                self.table
+            ),
+            (Some(_), false) => format!(
+                "SELECT value FROM {} WHERE prefix = ?1 AND sn < ?2 ORDER \
+                 BY sn DESC LIMIT ?3",
+                self.table
+            ),
+            (None, true) => format!(
+                "SELECT value FROM {} WHERE prefix = ?1 ORDER BY sn ASC \
+                 LIMIT ?2",
+                self.table
+            ),
+            (None, false) => format!(
+                "SELECT value FROM {} WHERE prefix = ?1 ORDER BY sn DESC \
+                 LIMIT ?2",
+                self.table
+            ),
         };
-        // `from` is exclusive; without `from` the tautology keeps one
-        // query shape for all four cases.
-        let query = format!(
-            "SELECT value FROM {} WHERE prefix = ?1 AND {} ORDER BY sn {} \
-             LIMIT ?3",
-            self.table, cmp, order
-        );
         let mut stmt = conn.prepare_cached(&query).map_err(|e| {
             error!(table = %self.table, error = %e, "Failed to prepare range query");
 sqlite_store_error(StoreOperation::GetEventsRange, e)
@@ -1359,7 +1370,7 @@ sqlite_store_error(StoreOperation::GetEventsRange, e)
                 .query_map(params![self.prefix, key, limit], |row| row.get(0))
                 .and_then(|rows| rows.collect()),
             None => stmt
-                .query_map(params![self.prefix, "", limit], |row| row.get(0))
+                .query_map(params![self.prefix, limit], |row| row.get(0))
                 .and_then(|rows| rows.collect()),
         }
         .map_err(|e| {

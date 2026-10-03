@@ -7,10 +7,13 @@ use ave_actors_actor::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use test_log::test;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
+
+mod helpers;
 
 // Test structures for sink and handler testing
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,10 +158,8 @@ async fn test_sink_basic_functionality() {
         .expect("valid sink");
     sink.add("sub1", subscriber);
 
-    // Give sink time to start
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    // Emit some events
+    // Emit some events (sink registration needs no warm-up sleep: sends queue
+    // in the sink buffer regardless).
     actor_ref
         .tell(TestMessage::Emit(1, "test1".to_string()))
         .await
@@ -172,8 +173,16 @@ async fn test_sink_basic_functionality() {
         .await
         .unwrap();
 
-    // Wait for events to be processed
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // Poll for all three events instead of a fixed sleep.
+    helpers::assert_eventually(
+        "sink collects all three events",
+        Duration::from_secs(2),
+        || async {
+            let events = subscriber_clone.get_events().await;
+            if events.len() == 3 { Some(()) } else { None }
+        },
+    )
+    .await;
 
     // Verify events were collected
     let events = subscriber_clone.get_events().await;
@@ -206,18 +215,14 @@ async fn test_sink_with_failing_subscriber() {
         .expect("valid sink");
     sink.add("sub1", subscriber);
 
-    // Give sink time to start
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
     // Emit event - this should not crash the system even though subscriber fails
     actor_ref
         .tell(TestMessage::Emit(1, "test".to_string()))
         .await
         .unwrap();
 
-    // Wait and verify system is still running
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
+    // The following `ask` synchronizes with message processing, so no sleep
+    // is needed before asserting the actor is still alive.
     let response = actor_ref.ask(TestMessage::GetCounter).await.unwrap();
     assert_eq!(response.value, 1);
 }
@@ -266,6 +271,8 @@ impl Handler<Self> for FailingHandlerActor {
 
         if self.fail_with_timeout {
             // Simulate a very long operation
+            // timing: long handler block so ask_timeout tests exercise the
+            // timeout path deterministically.
             tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
         }
 
@@ -450,8 +457,8 @@ async fn test_message_ordering_and_mailbox() {
             .unwrap();
     }
 
-    // Wait for all messages to be processed
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // The final `ask` is queued after all tells (FIFO mailbox), so it
+    // synchronizes with their processing: no sleep needed.
 
     // Verify final count
     let result = actor_ref.ask(OrderedMessage { sequence: 0 }).await.unwrap();

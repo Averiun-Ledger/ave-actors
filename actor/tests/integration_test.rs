@@ -7,10 +7,13 @@ use ave_actors_actor::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use test_log::test;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
+
+mod helpers;
 
 // Defines parent actor
 #[derive(Debug, Clone)]
@@ -285,7 +288,18 @@ async fn test_actor() {
     let parent = TestActor { state: 0 };
     let parent_ref = system.create_root_actor("parent", parent).await.unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    // Poll until pre_start has created the child instead of a fixed sleep.
+    helpers::assert_eventually(
+        "child created by parent pre_start",
+        Duration::from_secs(2),
+        || async {
+            system
+                .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
+                .await
+                .ok()
+        },
+    )
+    .await;
 
     let child_actor = system
         .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
@@ -302,14 +316,19 @@ async fn test_actor() {
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
     assert_eq!(response, TestResponse::State(10));
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    {
-        let events = child_sub.events.lock().await;
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, 10);
-        drop(events);
-    }
+    helpers::assert_eventually(
+        "child receives Increment event",
+        Duration::from_secs(2),
+        || async {
+            let events = child_sub.events.lock().await;
+            if events.len() == 1 && events[0].0 == 10 {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
     let response = child_actor.ask(ChildCommand::GetState).await.unwrap();
     assert_eq!(response, ChildResponse::State(10));
 
@@ -317,14 +336,19 @@ async fn test_actor() {
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
     assert_eq!(response, TestResponse::State(8));
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    {
-        let events = child_sub.events.lock().await;
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[1].0, 8);
-        drop(events);
-    }
+    helpers::assert_eventually(
+        "child receives Decrement event",
+        Duration::from_secs(2),
+        || async {
+            let events = child_sub.events.lock().await;
+            if events.len() == 2 && events[1].0 == 8 {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
     let response = child_actor.ask(ChildCommand::GetState).await.unwrap();
     assert_eq!(response, ChildResponse::State(8));
 }
@@ -350,14 +374,19 @@ async fn test_actor_error() {
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
     assert_eq!(response, TestResponse::State(50));
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    {
-        let events = parent_sub.events.lock().await;
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, 0);
-        drop(events);
-    }
+    helpers::assert_eventually(
+        "parent publishes child-error event",
+        Duration::from_secs(2),
+        || async {
+            let events = parent_sub.events.lock().await;
+            if events.len() == 1 && events[0].0 == 0 {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
 }
 
 #[test(tokio::test)]
@@ -369,7 +398,17 @@ async fn test_actor_fault() {
     });
     let parent = TestActor { state: 0 };
     let parent_ref = system.create_root_actor("parent", parent).await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    helpers::assert_eventually(
+        "child created by parent pre_start",
+        Duration::from_secs(2),
+        || async {
+            system
+                .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
+                .await
+                .ok()
+        },
+    )
+    .await;
     let child_ref = system
         .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
         .await;
@@ -385,16 +424,36 @@ async fn test_actor_fault() {
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
     assert_eq!(response, TestResponse::State(110));
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    helpers::assert_eventually(
+        "parent publishes child-fault event",
+        Duration::from_secs(2),
+        || async {
+            let events = parent_sub.events.lock().await;
+            if events.len() == 1 && events[0].0 == 100 {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
 
-    {
-        let events = parent_sub.events.lock().await;
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, 100);
-        drop(events);
-    }
-
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    helpers::assert_eventually(
+        "faulted child is removed",
+        Duration::from_secs(2),
+        || async {
+            if system
+                .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
+                .await
+                .is_err()
+            {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
     let child_ref = system
         .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
         .await;

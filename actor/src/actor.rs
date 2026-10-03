@@ -1285,7 +1285,19 @@ mod test {
         let response = actor_ref.ask(TestMessage(10)).await.unwrap();
         assert_eq!(response.0, 20);
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Poll for both sink events instead of a fixed sleep.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if subscriber.events.lock().await.len() == 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "sink did not deliver both events"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
 
         {
             let events = subscriber.events.lock().await;

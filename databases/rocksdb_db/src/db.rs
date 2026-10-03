@@ -763,6 +763,9 @@ impl Collection for RocksDbStore {
             let wopts = write_options(self.strong_durability.is_sync());
             let start = format!("{}.", self.prefix).into_bytes();
             let mut end = start.clone();
+            // Upper bound for UTF-8 keys only: a hypothetical non-UTF8 key
+            // `prefix.\xFF...` would escape it (unreachable through the
+            // `&str` API, which rejects such keys on write paths).
             end.push(0xFF);
             // Contract: collection keys in this column family follow
             // "{prefix}.{key}", and unrelated keys are not mixed into the same
@@ -782,7 +785,9 @@ impl Collection for RocksDbStore {
             // Reclaim the range tombstones just written, scoped to this
             // prefix only: a full-CF compaction would punish neighbors
             // sharing the column family. Best-effort: the delete above
-            // already succeeded.
+            // already succeeded. Synchronous and proportional to the
+            // range size; purge/del_range are explicit maintenance ops,
+            // never hot paths.
             self.store.compact_range_cf(
                 &handle,
                 Some(&start[..]),
@@ -855,6 +860,79 @@ impl Collection for RocksDbStore {
         )?))
     }
 
+    fn get_by_range(
+        &self,
+        from: Option<&str>,
+        quantity: isize,
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        // Native keyset pagination with the same contract as the default
+        // implementation: `from` is exclusive (and must exist), a positive
+        // `quantity` reads forward, a negative one reads in reverse.
+        let limit = quantity.unsigned_abs();
+        let reverse = quantity < 0;
+        let Some(handle) = self.cf() else {
+            error!(cf = %self.name, "Column family not found for range read");
+            return Err(Error::Store {
+                source: None,
+                code: None,
+                operation: StoreOperation::ColumnAccess,
+                reason: "RocksDB column for the store does not exist."
+                    .to_owned(),
+            });
+        };
+        if let Some(key) = from {
+            Collection::get(self, key)?;
+        }
+
+        let prefix_dot = format!("{}.", self.prefix).into_bytes();
+        let seek_key = match from {
+            Some(key) => format!("{}.{}", self.prefix, key).into_bytes(),
+            None if reverse => {
+                let mut upper = prefix_dot.clone();
+                upper.push(0xFF);
+                upper
+            }
+            None => prefix_dot.clone(),
+        };
+        let mut upper_bound = prefix_dot.clone();
+        upper_bound.push(0xFF);
+        let mut read_options = ReadOptions::default();
+        read_options.set_iterate_lower_bound(prefix_dot.clone());
+        read_options.set_iterate_upper_bound(upper_bound);
+        let mode = if reverse {
+            IteratorMode::From(&seek_key, Direction::Reverse)
+        } else {
+            IteratorMode::From(&seek_key, Direction::Forward)
+        };
+        let mut iter = self.store.iterator_cf_opt(&handle, read_options, mode);
+
+        let mut values = Vec::new();
+        let mut skipped = from.is_none();
+        while values.len() < limit {
+            let Some(item) = iter.next() else {
+                break;
+            };
+            let (key, value) = item.map_err(|e| {
+                error!(cf = %self.name, error = %e, "RocksDB range read error");
+                Error::Get {
+                    key: self.prefix.clone(),
+                    reason: format!("{:?}", e),
+                }
+            })?;
+            let Some(decoded) = decode_entry(&prefix_dot, &key, &value) else {
+                break;
+            };
+            let (_, bytes) = decoded?;
+            // Skip the exclusive `from` key itself (verified present above).
+            if !skipped {
+                skipped = true;
+                continue;
+            }
+            values.push(bytes);
+        }
+        Ok(values)
+    }
+
     fn del_range(&mut self, start: &str, end: &str) -> Result<(), Error> {
         if let Some(handle) = self.cf() {
             let wopts = write_options(self.strong_durability.is_sync());
@@ -879,6 +957,8 @@ impl Collection for RocksDbStore {
                 })?;
             // Reclaim just-deleted range tombstones, scoped to the range
             // (see `purge`): best-effort, the delete already succeeded.
+            // Synchronous and proportional to the range; del_range is an
+            // explicit maintenance op, never a hot path.
             self.store.compact_range_cf(
                 &handle,
                 Some(&start_key[..]),
@@ -1426,5 +1506,45 @@ mod prefix_validation_tests {
         assert!(manager.create_collection("c", "a.b").is_err());
         assert!(manager.create_state("s", "a.b").is_err());
         assert!(manager.create_collection("c", "").is_err());
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+    use ave_actors_store::database::{Collection, DbManager};
+
+    fn seeded() -> RocksDbStore {
+        let manager = RocksDbManager::default();
+        let mut events = manager.create_collection("rng", "p").unwrap();
+        for i in 0..10u64 {
+            Collection::put(&mut events, &format!("{:020}", i), &[i as u8])
+                .unwrap();
+        }
+        events
+    }
+
+    #[test]
+    fn test_get_by_range_matches_default_semantics() {
+        let events = seeded();
+
+        // Forward from exclusive key.
+        let values =
+            Collection::get_by_range(&events, Some(&format!("{:020}", 2)), 3)
+                .unwrap();
+        assert_eq!(values, vec![vec![3u8], vec![4u8], vec![5u8]]);
+
+        // Reverse from exclusive key.
+        let values =
+            Collection::get_by_range(&events, Some(&format!("{:020}", 7)), -2)
+                .unwrap();
+        assert_eq!(values, vec![vec![6u8], vec![5u8]]);
+
+        // Missing `from` is an error, like the default implementation.
+        assert!(Collection::get_by_range(&events, Some("nope"), 3).is_err());
+
+        // Unbounded reverse.
+        let values = Collection::get_by_range(&events, None, -2).unwrap();
+        assert_eq!(values, vec![vec![9u8], vec![8u8]]);
     }
 }

@@ -14,6 +14,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
+mod helpers;
+
 #[derive(Debug, Clone)]
 enum WatchMsg {
     Watch(ActorRef<TargetActor>),
@@ -238,6 +240,8 @@ async fn test_unwatch_prevents_notification() -> Result<(), Error> {
         .await?;
     target_ref.tell(TargetMsg::Stop).await?;
 
+    // timing: absence check — wait a full window so a stray notification
+    // would have arrived before asserting none did.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let resp = watcher_ref.ask(WatchMsg::GetNotifications).await?;
@@ -412,6 +416,8 @@ async fn test_watcher_termination_does_not_crash() -> Result<(), Error> {
     watcher_ref.ask_stop().await?;
     target_ref.tell(TargetMsg::Stop).await?;
 
+    // timing: pacing pause so the target termination races a dead watcher
+    // delivery before shutdown; absence of a crash is the assertion.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     system.stop_system();
@@ -439,11 +445,13 @@ async fn test_no_notification_on_target_restart() -> Result<(), Error> {
         .await?;
     target_ref.tell(TargetMsg::Fail).await?;
 
-    // Wait enough time for a retry/restart cycle to happen.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Ensure the target is still alive (it restarted).
-    let resp = target_ref.ask(TargetMsg::GetStopped).await?;
+    // Poll until the actor restarts and answers instead of a fixed sleep.
+    let resp = helpers::assert_eventually(
+        "target restarts after failure",
+        Duration::from_secs(2),
+        || async { target_ref.ask(TargetMsg::GetStopped).await.ok() },
+    )
+    .await;
     assert!(!resp.stopped);
 
     let notifications = watcher_ref.ask(WatchMsg::GetNotifications).await?;

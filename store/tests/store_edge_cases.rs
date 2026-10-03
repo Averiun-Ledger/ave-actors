@@ -513,9 +513,25 @@ async fn test_encrypted_store_operations() {
         .tell(EncryptedMessage::Increment(5))
         .await
         .unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    let response = actor_ref.ask(EncryptedMessage::GetState).await.unwrap();
+    // `tell` is fire-and-forget: poll until the actor applies the message.
+    let response = helpers::assert_eventually(
+        "encrypted counter reaches 5",
+        std::time::Duration::from_secs(3),
+        || {
+            let actor_ref = actor_ref.clone();
+            async move {
+                let response =
+                    actor_ref.ask(EncryptedMessage::GetState).await.ok()?;
+                match &response {
+                    EncryptedResponse::State { counter: 5, .. } => {
+                        Some(response)
+                    }
+                    _ => None,
+                }
+            }
+        },
+    )
+    .await;
     if let EncryptedResponse::State { counter, data } = response {
         assert_eq!(counter, 5);
         assert_eq!(data, ""); // initial state has empty string
@@ -528,9 +544,27 @@ async fn test_encrypted_store_operations() {
         .tell(EncryptedMessage::SetData("updated".to_string()))
         .await
         .unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    let response = actor_ref.ask(EncryptedMessage::GetState).await.unwrap();
+    // `tell` is fire-and-forget: poll until the actor applies the message.
+    let response = helpers::assert_eventually(
+        "encrypted data becomes updated",
+        std::time::Duration::from_secs(3),
+        || {
+            let actor_ref = actor_ref.clone();
+            async move {
+                let response =
+                    actor_ref.ask(EncryptedMessage::GetState).await.ok()?;
+                match &response {
+                    EncryptedResponse::State { counter: 5, data }
+                        if data == "updated" =>
+                    {
+                        Some(response)
+                    }
+                    _ => None,
+                }
+            }
+        },
+    )
+    .await;
     if let EncryptedResponse::State { counter, data } = response {
         assert_eq!(counter, 5);
         assert_eq!(data, "updated");
@@ -570,9 +604,25 @@ async fn test_light_persistence() {
         .tell(EncryptedMessage::Increment(10))
         .await
         .unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    let response = actor_ref.ask(EncryptedMessage::GetState).await.unwrap();
+    // `tell` is fire-and-forget: poll until the actor applies the message.
+    let response = helpers::assert_eventually(
+        "light counter reaches 10",
+        std::time::Duration::from_secs(3),
+        || {
+            let actor_ref = actor_ref.clone();
+            async move {
+                let response =
+                    actor_ref.ask(EncryptedMessage::GetState).await.ok()?;
+                match &response {
+                    EncryptedResponse::State { counter: 10, .. } => {
+                        Some(response)
+                    }
+                    _ => None,
+                }
+            }
+        },
+    )
+    .await;
     if let EncryptedResponse::State { counter, .. } = response {
         assert_eq!(counter, 10);
     } else {
@@ -580,7 +630,6 @@ async fn test_light_persistence() {
     }
 
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // A second actor with a different name uses a different persistence
     // prefix (derived from its path), so it must not see the first actor's

@@ -155,7 +155,6 @@ async fn test_full_persistence_doesnt_recover_state() {
     );
 
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let actor_ref2 = system
         .create_root_actor("counter_actor", CounterActor::initial(()))

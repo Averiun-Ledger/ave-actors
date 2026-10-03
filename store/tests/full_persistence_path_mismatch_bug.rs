@@ -134,7 +134,6 @@ async fn test_path_mismatch_scenario() {
     actor_ref.ask(PathMsg(42)).await.unwrap();
 
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Recreate with the same actor name so the path-derived prefix matches.
     let actor_ref2 = system
@@ -253,7 +252,6 @@ async fn test_explicit_prefix_usage() {
 
     actor_ref.ask(PathMsg(99)).await.unwrap();
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Different actor name but the same explicit prefix must still recover.
     let actor_ref2 = system

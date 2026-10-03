@@ -69,6 +69,7 @@ impl Handler<Self> for SpawnActor {
             SpawnMsg::RunTask => {
                 let flag = self.flag.clone();
                 ctx.spawn(async move {
+                    // timing: simulated work delay inside the spawned task.
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     *flag.lock().await = true;
                 });
@@ -76,6 +77,8 @@ impl Handler<Self> for SpawnActor {
             SpawnMsg::RunLongTask => {
                 let flag = self.flag.clone();
                 ctx.spawn(async move {
+                    // timing: very long task so the abort-on-stop test can
+                    // verify cancellation well before completion.
                     tokio::time::sleep(Duration::from_secs(10)).await;
                     *flag.lock().await = true;
                 });
@@ -83,6 +86,8 @@ impl Handler<Self> for SpawnActor {
             SpawnMsg::SendToOther => {
                 if let Some(target) = self.target.clone() {
                     ctx.spawn(async move {
+                        // timing: simulated delay before the spawned task
+                        // delivers to the other actor.
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         let _ = target.tell(TargetMsg::Ping).await;
                     });
@@ -219,11 +224,13 @@ async fn test_spawn_aborted_on_actor_stop() -> Result<(), Error> {
     let actor_ref = system.create_root_actor("spawn_aborted", actor).await?;
 
     actor_ref.tell(SpawnMsg::RunLongTask).await?;
-    // Give the spawned task time to start, then stop the actor.
+    // timing: pacing pause so the spawned task starts before the actor is
+    // stopped; there is no observable start signal to poll.
     tokio::time::sleep(Duration::from_millis(50)).await;
     actor_ref.ask_stop().await?;
 
-    // Wait briefly; the task would have set the flag only after 10 seconds.
+    // timing: absence check — the task would set the flag only after 10s,
+    // so a short wait plus the assert verifies it was aborted.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!*flag.lock().await, "spawned task should have been aborted");
 

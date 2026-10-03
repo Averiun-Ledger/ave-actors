@@ -16,6 +16,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
+mod helpers;
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -120,6 +122,7 @@ struct SlowSubscriber {
 #[async_trait]
 impl Subscriber<TestEvent> for SlowSubscriber {
     async fn notify(&self, _event: Arc<TestEvent>) -> Result<(), Error> {
+        // timing: simulates a slow subscriber for the parallel-dispatch test.
         tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
         Ok(())
     }
@@ -261,7 +264,19 @@ async fn test_sink_survives_restart() {
 
     // First message triggers a failure, actor restarts.
     let _ = actor_ref.tell(TestMsg::Emit(1)).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Poll until the first event is dispatched instead of a fixed sleep.
+    helpers::assert_eventually(
+        "first event dispatched before restart",
+        Duration::from_secs(2),
+        || async {
+            if subscriber.clone_events().await.is_empty() {
+                None
+            } else {
+                Some(())
+            }
+        },
+    )
+    .await;
 
     // Second message should still reach the *same* sink.
     let _ = actor_ref.tell(TestMsg::Emit(2)).await;
@@ -302,7 +317,7 @@ async fn test_parallel_dispatch() {
     let start = Instant::now();
     actor_ref.tell(TestMsg::Emit(1)).await.unwrap();
 
-    // Wait a bit for dispatch to complete.
+    // timing: fixed wait to measure wall-clock parallel dispatch speed.
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     let elapsed = start.elapsed();
@@ -381,7 +396,18 @@ async fn test_publish_filtered() {
 
     actor_ref.tell(FilteredMsg).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    helpers::assert_eventually(
+        "audit sink receives the filtered event",
+        Duration::from_secs(2),
+        || async {
+            if audit_sub.clone_events().await.len() == 1 {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
 
     let audit_evts = audit_sub.drain().await;
     let metrics_evts = metrics_sub.drain().await;
@@ -440,8 +466,8 @@ async fn test_publish_to_missing_sink_is_noop() {
 
     let actor_ref = system.create_root_actor("noop", NoopActor).await.unwrap();
 
-    actor_ref.tell(NoopMsg).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // `ask` already synchronizes with message processing, no sleep needed.
+    actor_ref.ask(NoopMsg).await.unwrap();
 
     // Should not panic or error.
 }
@@ -472,7 +498,20 @@ async fn test_sink_entry_filter() {
     actor_ref.tell(TestMsg::Emit(3)).await.unwrap();
     actor_ref.tell(TestMsg::Emit(7)).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    helpers::assert_eventually(
+        "both filter branches receive their events",
+        Duration::from_secs(2),
+        || async {
+            if all_sub.clone_events().await.len() == 2
+                && high_sub.clone_events().await.len() == 1
+            {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
 
     let all_evts = all_sub.drain().await;
     let high_evts = high_sub.drain().await;
@@ -498,13 +537,25 @@ async fn test_remove_sink() {
     sink.add("sub1", subscriber.clone());
 
     actor_ref.tell(TestMsg::Emit(1)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    helpers::assert_eventually(
+        "first event reaches the sink",
+        Duration::from_secs(2),
+        || async {
+            if subscriber.clone_events().await.len() == 1 {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
     assert_eq!(subscriber.drain().await.len(), 1);
 
     actor_ref.remove_sink("tmp");
 
-    actor_ref.tell(TestMsg::Emit(2)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // `ask` synchronizes with processing of Emit(2); the removed sink must
+    // then stay empty without any extra sleep.
+    actor_ref.ask(TestMsg::Emit(2)).await.unwrap();
     assert!(subscriber.drain().await.is_empty());
 }
 
@@ -534,11 +585,19 @@ async fn test_retry_policy_delivers_after_failures() {
 
     actor_ref.tell(TestMsg::Emit(100)).await.unwrap();
 
-    // Wait for retries (2 failures * 10ms + margin).
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // The subscriber should have succeeded on the 3rd attempt.
-    assert_eq!(subscriber.fail_count.load(Ordering::SeqCst), 3);
+    // Poll the retry counter instead of waiting a fixed 100ms.
+    helpers::assert_eventually(
+        "subscriber succeeds after retries",
+        Duration::from_secs(2),
+        || async {
+            if subscriber.fail_count.load(Ordering::SeqCst) == 3 {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
 }
 
 // ============================================================================
@@ -618,7 +677,18 @@ async fn test_actor_routes_to_named_sink() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    helpers::assert_eventually(
+        "event routed to sink_a only",
+        Duration::from_secs(2),
+        || async {
+            if sink_a_sub.clone_events().await.len() == 1 {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
 
     let a_evts = sink_a_sub.drain().await;
     let b_evts = sink_b_sub.drain().await;
@@ -639,8 +709,6 @@ impl Subscriber<TestEvent> for FailingSubscriber {
         })
     }
 }
-
-mod helpers;
 
 #[test(tokio::test)]
 async fn test_one_subscriber_fails_others_ok() {
@@ -940,6 +1008,8 @@ async fn test_add_remove_during_slow_filter() {
                 move |_: &TestEvent| {
                     entered_filter.store(true, Ordering::SeqCst);
                     // Park the dispatcher inside user filter code.
+                    // timing: busy-park keeps the dispatcher inside the
+                    // filter so add/remove must proceed concurrently.
                     while release_filter.lock().unwrap().try_recv().is_err() {
                         std::thread::sleep(Duration::from_millis(1));
                     }
@@ -958,6 +1028,8 @@ async fn test_add_remove_during_slow_filter() {
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    // timing: brief pacing pause so the dispatcher parks inside the slow
+    // filter before management ops run against it.
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Management operations must not block behind user filter code.

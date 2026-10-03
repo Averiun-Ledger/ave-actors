@@ -154,13 +154,10 @@ async fn test_full_persistence_actor_recovers_from_snapshot_and_events() {
     actor_ref.ask(FullMessage::Increment(5)).await.unwrap();
     actor_ref.ask(FullMessage::Increment(3)).await.unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
     let response = actor_ref.ask(FullMessage::Get).await.unwrap();
     assert_eq!(response, FullResponse::Counter(18));
 
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let actor_ref = system
         .create_root_actor("full-recover", FullActor::initial(()))
@@ -189,8 +186,6 @@ async fn test_full_persistence_actor_keeps_event_history() {
 
     actor_ref.ask(FullMessage::Increment(2)).await.unwrap();
     actor_ref.ask(FullMessage::Increment(3)).await.unwrap();
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // The store was started with name "store" and the default prefix
     // derived from the actor's full path, so the backend collections are
@@ -381,8 +376,6 @@ async fn test_full_persistence_actor_snapshot_every_respected() {
     actor_ref.ask(FullMessage::Increment(2)).await.unwrap();
     actor_ref.ask(FullMessage::Increment(3)).await.unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
     let prefix = default_store_prefix(&actor_ref.path());
     let state = manager.create_state("store_states", &prefix).unwrap();
     assert!(
@@ -391,8 +384,6 @@ async fn test_full_persistence_actor_snapshot_every_respected() {
     );
 
     actor_ref.ask(FullMessage::Increment(5)).await.unwrap();
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let collection =
         manager.create_collection("store_events", &prefix).unwrap();
@@ -429,8 +420,6 @@ async fn test_full_persistence_actor_no_snapshot_before_due() {
     actor_ref.ask(FullMessage::Increment(3)).await.unwrap();
     actor_ref.ask(FullMessage::Increment(4)).await.unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
     let prefix = default_store_prefix(&actor_ref.path());
     let state = manager.create_state("store_states", &prefix).unwrap();
     assert!(
@@ -459,10 +448,7 @@ async fn test_full_persistence_actor_snapshot_on_stop() {
     actor_ref.ask(FullMessage::Increment(2)).await.unwrap();
     actor_ref.ask(FullMessage::Increment(3)).await.unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let prefix = default_store_prefix(&actor_ref.path());
     let state = manager.create_state("store_states", &prefix).unwrap();
@@ -555,8 +541,6 @@ async fn test_same_leaf_name_under_different_parents_is_isolated() {
 
     parent_a.ask(FullMessage::Increment(10)).await.unwrap();
     parent_b.ask(FullMessage::Increment(100)).await.unwrap();
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Each subtree keeps its own state: previously both children shared
     // the "counter" prefix and the second write corrupted the first.

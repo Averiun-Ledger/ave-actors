@@ -5,9 +5,12 @@ use ave_actors_actor::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
+
+mod helpers;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InternalEvent(usize);
@@ -97,14 +100,21 @@ async fn test_custom_sink_event() {
     actor_ref.ask(()).await.unwrap();
     actor_ref.ask(()).await.unwrap();
 
-    // Give some time for the sink to process
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    {
-        let received = notifications.lock().await;
-        assert_eq!(received.len(), 2);
-        assert_eq!(received[0], "Counter is now 1");
-        assert_eq!(received[1], "Counter is now 2");
-        drop(received);
-    }
+    // Poll for both notifications instead of a fixed sleep.
+    helpers::assert_eventually(
+        "sink delivers both notifications",
+        Duration::from_secs(2),
+        || async {
+            let received = notifications.lock().await;
+            if received.len() == 2
+                && received[0] == "Counter is now 1"
+                && received[1] == "Counter is now 2"
+            {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
 }

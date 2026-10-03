@@ -15,6 +15,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
+mod helpers;
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -293,6 +295,8 @@ async fn test_ask_timeout_hits_deadline() {
             _msg: SimpleMsg,
             _ctx: &mut ActorContext<Self>,
         ) -> Result<(), Error> {
+            // timing: blocks far beyond the ask timeout so the test verifies
+            // the timeout path deterministically.
             tokio::time::sleep(Duration::from_secs(10)).await;
             Ok(())
         }
@@ -554,7 +558,19 @@ async fn test_child_fault_propagates_to_parent() {
         .unwrap();
 
     parent_ref.tell(ParentMsg::CreateFaultyChild).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    helpers::assert_eventually(
+        "faulty child is created",
+        Duration::from_secs(2),
+        || async {
+            system
+                .get_actor::<FaultyChildActor>(&ActorPath::from(
+                    "/user/faulty_parent/faulty",
+                ))
+                .await
+                .ok()
+        },
+    )
+    .await;
 
     // Send a message to the child to trigger emit_fail
     let child = system
@@ -565,17 +581,19 @@ async fn test_child_fault_propagates_to_parent() {
         .unwrap();
     child.tell(FaultyChildMsg).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let counts = parent_ref.ask(ParentMsg::GetCounts).await.unwrap();
-    match counts {
-        ParentResponse::Counts(faults, _errors) => {
-            assert!(
-                faults >= 1,
-                "parent should have received at least one child fault"
-            );
-        }
-    }
+    helpers::assert_eventually(
+        "parent observes the child fault",
+        Duration::from_secs(5),
+        || async {
+            match parent_ref.ask(ParentMsg::GetCounts).await {
+                Ok(ParentResponse::Counts(faults, _)) if faults >= 1 => {
+                    Some(())
+                }
+                _ => None,
+            }
+        },
+    )
+    .await;
 }
 
 #[test(tokio::test)]
@@ -596,7 +614,19 @@ async fn test_child_error_propagates_to_parent() {
         .unwrap();
 
     parent_ref.tell(ParentMsg::CreateErrorChild).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    helpers::assert_eventually(
+        "error child is created",
+        Duration::from_secs(2),
+        || async {
+            system
+                .get_actor::<ErrorChildActor>(&ActorPath::from(
+                    "/user/error_parent/error_child",
+                ))
+                .await
+                .ok()
+        },
+    )
+    .await;
 
     // Send a message to the child to trigger emit_error
     let child = system
@@ -607,17 +637,19 @@ async fn test_child_error_propagates_to_parent() {
         .unwrap();
     child.tell(ErrorChildMsg).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let counts = parent_ref.ask(ParentMsg::GetCounts).await.unwrap();
-    match counts {
-        ParentResponse::Counts(_faults, errors) => {
-            assert!(
-                errors >= 1,
-                "parent should have received at least one child error"
-            );
-        }
-    }
+    helpers::assert_eventually(
+        "parent observes the child error",
+        Duration::from_secs(5),
+        || async {
+            match parent_ref.ask(ParentMsg::GetCounts).await {
+                Ok(ParentResponse::Counts(_, errors)) if errors >= 1 => {
+                    Some(())
+                }
+                _ => None,
+            }
+        },
+    )
+    .await;
 }
 
 // ============================================================================
@@ -702,7 +734,19 @@ async fn test_create_child_duplicate_returns_error() {
         .unwrap();
 
     parent_ref.tell(CreatorMsg::CreateChild).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    helpers::assert_eventually(
+        "child exists before duplicate create",
+        Duration::from_secs(2),
+        || async {
+            system
+                .get_actor::<MinimalActor>(&ActorPath::from(
+                    "/user/creator/dup",
+                ))
+                .await
+                .ok()
+        },
+    )
+    .await;
 
     let result = parent_ref.ask(CreatorMsg::CreateDuplicate).await.unwrap();
     match result {
@@ -946,10 +990,39 @@ async fn test_child_stopped_removes_from_parent() {
         system.create_root_actor("watching", parent).await.unwrap();
 
     parent_ref.tell(WatchMsg::SpawnChild).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    helpers::assert_eventually(
+        "watched child is spawned",
+        Duration::from_secs(2),
+        || async {
+            system
+                .get_actor::<MinimalActor>(&ActorPath::from(
+                    "/user/watching/watched",
+                ))
+                .await
+                .ok()
+        },
+    )
+    .await;
 
     parent_ref.tell(WatchMsg::StopChild).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    helpers::assert_eventually(
+        "watched child is removed after stop",
+        Duration::from_secs(2),
+        || async {
+            if system
+                .get_actor::<MinimalActor>(&ActorPath::from(
+                    "/user/watching/watched",
+                ))
+                .await
+                .is_err()
+            {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
 
     // After child stops, get_child should fail
     let result = system
@@ -1235,6 +1308,8 @@ impl Handler<Self> for DrainTestActor {
     ) -> Result<DrainTestResponse, Error> {
         match msg {
             DrainTestMsg::Block => {
+                // timing: holds the actor busy so the non-critical message
+                // queues behind it and the stop drain path is exercised.
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 self.processed.lock().await.push("block");
             }
@@ -1261,6 +1336,8 @@ async fn test_non_critical_discarded_on_stop() {
 
     // Block the actor first
     actor_ref.tell(DrainTestMsg::Block).await.unwrap();
+    // timing: pacing pause so the actor enters the blocking handler before
+    // the non-critical ask is queued behind it.
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Queue non-critical message while blocked
@@ -1269,6 +1346,8 @@ async fn test_non_critical_discarded_on_stop() {
         async move { r.ask(DrainTestMsg::NonCritical).await }
     });
 
+    // timing: pacing pause so the ask is queued in the mailbox before the
+    // stop signal triggers the drain.
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Stop the actor
@@ -1438,11 +1517,17 @@ async fn test_system_runner_handles_child_error_events() {
 
     actor_ref.tell(ErrorPublisherMsg).await.unwrap();
 
-    // Give the runner time to process the child error internally
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let count = parent_ref.ask(RunnerErrorMsg::GetCount).await.unwrap().0;
-    assert!(count >= 1, "parent should have observed the child error");
+    helpers::assert_eventually(
+        "parent observes the published child error",
+        Duration::from_secs(2),
+        || async {
+            match parent_ref.ask(RunnerErrorMsg::GetCount).await {
+                Ok(RunnerErrorResponse(count)) if count >= 1 => Some(count),
+                _ => None,
+            }
+        },
+    )
+    .await;
 
     system.stop_system();
 
@@ -1594,10 +1679,13 @@ async fn test_default_pre_restart_and_supervision() {
         .await
         .unwrap();
 
-    // Wait for retry to succeed
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let resp = actor_ref.ask(DefaultBehaviorMsg::GetCounts).await.unwrap();
+    // Poll until the retried actor answers instead of a fixed sleep.
+    let resp = helpers::assert_eventually(
+        "actor answers after retry",
+        Duration::from_secs(5),
+        || async { actor_ref.ask(DefaultBehaviorMsg::GetCounts).await.ok() },
+    )
+    .await;
     assert_eq!(resp.errors, 0);
     assert_eq!(resp.faults, 0);
 }

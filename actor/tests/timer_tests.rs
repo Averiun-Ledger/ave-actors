@@ -14,6 +14,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
+mod helpers;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum TimerMsg {
     ScheduleOnce,
@@ -190,6 +192,8 @@ async fn test_schedule_periodic_and_cancel() -> Result<(), Error> {
     }
 
     actor_ref.tell(TimerMsg::Cancel).await?;
+    // timing: absence check — wait a full window so a stray tick would have
+    // fired before asserting the timer stayed cancelled.
     tokio::time::sleep(Duration::from_millis(100)).await;
     let resp = actor_ref.ask(TimerMsg::GetCounts).await?;
     assert!(
@@ -219,6 +223,8 @@ async fn test_timers_are_cancelled_on_actor_stop() -> Result<(), Error> {
     actor_ref.tell(TimerMsg::ScheduleOnce).await?;
     actor_ref.ask_stop().await?;
 
+    // timing: absence check — the 50ms timer must not fire after the actor
+    // stopped; wait past its deadline before asserting zero fires.
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(*fires.lock().await, 0);
 
@@ -244,6 +250,8 @@ async fn test_cancel_timer_before_fire() -> Result<(), Error> {
     actor_ref.tell(TimerMsg::ScheduleOnce).await?;
     actor_ref.tell(TimerMsg::Cancel).await?;
 
+    // timing: absence check — the 50ms timer must not fire after cancel;
+    // wait past its deadline before asserting zero fires.
     tokio::time::sleep(Duration::from_millis(150)).await;
     let resp = actor_ref.ask(TimerMsg::GetCounts).await?;
     assert_eq!(resp.fires, 0, "cancelled timer should not fire");
@@ -338,9 +346,20 @@ async fn test_max_timers_limits_new_timers() -> Result<(), Error> {
     };
     let actor_ref = system.create_root_actor("max_timers", actor).await?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let resp = actor_ref.ask(LimitedMsg::GetCount).await?;
+    // Poll until both allowed timers fire instead of a fixed sleep. The
+    // third schedule is rejected synchronously by max_timers, so reaching
+    // exactly 2 needs no extra absence wait.
+    let resp = helpers::assert_eventually(
+        "allowed timers fire",
+        Duration::from_secs(2),
+        || async {
+            match actor_ref.ask(LimitedMsg::GetCount).await {
+                Ok(resp) if resp.fires == 2 => Some(resp),
+                _ => None,
+            }
+        },
+    )
+    .await;
     assert_eq!(resp.fires, 2);
 
     system.stop_system();

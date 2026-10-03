@@ -12,6 +12,8 @@ use test_log::test;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
+mod helpers;
+
 // Test actors for edge cases
 #[derive(Debug, Clone)]
 pub struct EdgeCaseActor {
@@ -282,11 +284,18 @@ async fn test_actor_with_retry_supervision() {
         .await
         .unwrap();
 
-    // Wait for retry to complete
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let response = actor_ref.ask(EdgeCaseCommand::GetValue).await.unwrap();
-    assert_eq!(response, EdgeCaseResponse::Value(42));
+    // Poll until the retry cycle revives the actor instead of a fixed sleep.
+    helpers::assert_eventually(
+        "actor recovers after start retry",
+        Duration::from_secs(5),
+        || async {
+            match actor_ref.ask(EdgeCaseCommand::GetValue).await {
+                Ok(EdgeCaseResponse::Value(42)) => Some(()),
+                _ => None,
+            }
+        },
+    )
+    .await;
 }
 
 #[test(tokio::test)]
@@ -351,11 +360,19 @@ async fn test_actor_ref_operations() {
     // Test tell_stop
     actor_ref.tell_stop().await;
 
-    // Wait for stop
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Should be closed now
-    assert!(actor_ref.is_closed());
+    // Poll for closure instead of a fixed sleep.
+    helpers::assert_eventually(
+        "actor closes after tell_stop",
+        Duration::from_secs(2),
+        || async {
+            if actor_ref.is_closed() {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
 }
 
 #[test(tokio::test)]
@@ -375,7 +392,19 @@ async fn test_child_actor_management() {
 
     // Create child
     parent_ref.tell(EdgeCaseCommand::CreateChild).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    helpers::assert_eventually(
+        "child appears after CreateChild",
+        Duration::from_secs(2),
+        || async {
+            system
+                .get_actor::<EdgeCaseActor>(&ActorPath::from(
+                    "/user/parent/test_child",
+                ))
+                .await
+                .ok()
+        },
+    )
+    .await;
 
     // Verify child exists
     let child = system
@@ -434,7 +463,16 @@ async fn test_system_children_listing() {
 
     // Create multiple children
     parent_ref.tell(EdgeCaseCommand::CreateChild).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    helpers::assert_eventually(
+        "child appears for children listing",
+        Duration::from_secs(2),
+        || async {
+            let children =
+                system.children(&ActorPath::from("/user/parent_with_children"));
+            if children.is_empty() { None } else { Some(()) }
+        },
+    )
+    .await;
 
     // Test children listing
     let parent_path = ActorPath::from("/user/parent_with_children");
@@ -468,7 +506,6 @@ async fn test_retry_actor_functionality() {
 
     // Start retry process
     retry_ref.tell(RetryMessage::Retry).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // RetryActor now auto-stops when the retry budget is exhausted.
     tokio::time::timeout(Duration::from_secs(1), retry_ref.closed())
@@ -494,9 +531,6 @@ async fn test_system_stop() {
 
     // Stop system
     system.stop_system();
-
-    // Wait for system to stop
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Runner should have finished
     let result =

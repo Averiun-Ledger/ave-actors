@@ -1002,6 +1002,7 @@ mod tests {
     #[async_trait]
     impl Subscriber<()> for SleepSubscriber {
         async fn notify(&self, _event: Arc<()>) -> Result<(), Error> {
+            // timing: simulated work delay to exercise concurrency limits.
             tokio::time::sleep(Duration::from_millis(self.millis)).await;
             self.done.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -1230,7 +1231,20 @@ mod tests {
         assert!(sink.remove_entry("b").is_none());
 
         sink.send(Arc::new(()));
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Poll for delivery instead of a fixed sleep.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if sub_a.events.lock().await.len() == 1
+                && sub_c.events.lock().await.len() == 1
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "sink did not deliver to remaining subscribers"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
         assert_eq!(sub_a.drain().await.len(), 1);
         assert_eq!(sub_b.drain().await.len(), 0); // removed
@@ -1238,10 +1252,16 @@ mod tests {
 
         sink.clear();
         sink.send(Arc::new(()));
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        assert_eq!(sub_a.drain().await.len(), 0);
-        assert_eq!(sub_c.drain().await.len(), 0);
+        // Poll to confirm nothing is delivered after clear.
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < deadline {
+            assert!(
+                sub_a.events.lock().await.is_empty()
+                    && sub_c.events.lock().await.is_empty(),
+                "cleared sink must not deliver"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[test]
@@ -1382,20 +1402,27 @@ mod prometheus_tests {
         sink.add("failing", FailingSubscriber);
         sink.send(Arc::new(()));
 
-        // Give the worker time to process the failed delivery.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        assert_eq!(
-            metrics
+        // Poll the metric instead of a fixed sleep.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let count = metrics
                 .sink_delivery_failures_total
                 .get_or_create(&SinkLabels {
                     scope: Arc::from("user"),
                     actor_type: Arc::from("TestSink"),
                     sink_name: "fail".to_owned(),
                 })
-                .get(),
-            1
-        );
+                .get();
+            if count == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "delivery failure was never recorded"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]

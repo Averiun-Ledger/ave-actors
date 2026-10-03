@@ -1168,21 +1168,18 @@ mod tests {
             }
             .instrument(TestActor::get_span("spawn", None)),
         );
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // No sleep needed before `tell`: the message queues in the mailbox
+        // and `init` processes it once the runner starts.
 
         actor_ref
             .tell(TestMessage(ErrorMessage::Stop))
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        assert!(
-            system
-                .get_actor::<TestActor>(&ActorPath::from("/user/test"))
-                .await
-                .is_err()
-        );
+        // Wait for the stop to complete instead of a fixed sleep.
+        tokio::time::timeout(Duration::from_secs(5), actor_ref.closed())
+            .await
+            .expect("actor should stop after Stop message");
     }
 
     // ========== Shutdown drain tests ==========
@@ -1316,6 +1313,8 @@ mod tests {
                 }
                 SlowMsg::SlowCritical => {
                     // Sleeps well beyond mailbox_drain_timeout (50ms)
+                    // timing: simulated slow handler so the drain timeout
+                    // fires deterministically.
                     tokio::time::sleep(Duration::from_millis(300)).await;
                 }
             }
@@ -1399,6 +1398,8 @@ mod tests {
         });
 
         // Give the spawned tasks time to place their messages in the mailbox.
+        // timing: pacing pause so both asks queue behind the block before
+        // the stop signal triggers the drain.
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         // Step 3: send stop signal (non-blocking, no confirmation wait)
@@ -1459,13 +1460,16 @@ mod tests {
             async move { r.ask(SlowMsg::SlowCritical).await }
         });
 
+        // timing: pacing pause so the ask queues behind the block before
+        // the stop signal triggers the drain.
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         actor_ref.tell_stop().await;
         release.notify_one();
 
         // mailbox_drain_timeout = 50ms, SlowCritical handler sleeps 300ms
-        // -> timeout fires
+        // -> timeout fires (timing: handler/sleep above + this drain window
+        // are the timeout under test, not sync sleeps).
         let result = slow_join.await.unwrap();
         assert!(
             matches!(result, Err(Error::ActorStopped)),
@@ -1693,6 +1697,8 @@ mod tests {
                 )
                 .await;
         });
+        // timing: pacing pause so the runner init starts before the
+        // mailbox is dropped; there is no observable start signal to poll.
         tokio::time::sleep(Duration::from_millis(50)).await;
         drop(actor_ref);
         tokio::time::timeout(Duration::from_secs(2), handle)
@@ -1881,7 +1887,19 @@ mod tests {
                 .await;
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Poll until the retry cycle revives the actor instead of a fixed
+        // sleep.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if actor_ref.ask(()).await.is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "actor never recovered from retry"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         actor_ref.tell_stop().await;
 
         tokio::time::timeout(Duration::from_secs(2), actor_ref.closed())

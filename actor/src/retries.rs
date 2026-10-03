@@ -66,6 +66,10 @@ where
 /// `RetryMessage::End` is always terminal:
 /// - before the cycle starts, it stops the actor without sending the target message
 /// - while a retry is scheduled, it cancels the pending retry and finishes the cycle
+///
+/// In both cases the completion notifier fires if one was configured: `End`
+/// acknowledges the waiter even when no retry ever ran, so a parent waiting
+/// for completion cannot hang on a cycle that never started.
 pub struct RetryActor<T>
 where
     T: Actor + Handler<T> + Clone + NotPersistentActor,
@@ -660,7 +664,8 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // No fixed sleep: creation above already synchronizes actor startup,
+        // and this smoke test performs no time-dependent assertions.
     }
 
     #[derive(Clone)]

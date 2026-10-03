@@ -209,6 +209,8 @@ pub trait Collection: Sync + Send + 'static {
     /// Removes all entries whose keys fall within the inclusive range
     /// `[start, end]`.
     ///
+    /// An inverted range (`start > end`) matches nothing and succeeds.
+    ///
     /// The default implementation iterates over the range (via
     /// [`iter_range`](Collection::iter_range)) and deletes each entry
     /// individually. Backends that support native range deletes should

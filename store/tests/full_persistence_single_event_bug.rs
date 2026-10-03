@@ -151,7 +151,6 @@ async fn test_single_event_no_recovery() {
     assert_eq!(resp.data, "Hello World");
 
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
 
     let actor_ref2 = system
         .create_root_actor("my_actor", SingleEventActor::initial(()))

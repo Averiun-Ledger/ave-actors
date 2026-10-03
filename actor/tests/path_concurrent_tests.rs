@@ -274,8 +274,8 @@ async fn test_concurrent_message_handling() {
         handle.await.unwrap();
     }
 
-    // Give time for all messages to be processed
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // The `ask` below is queued after all tells (FIFO mailbox), so it
+    // synchronizes with their processing: no sleep needed.
 
     // The counter should be 0 (5 increments - 5 decrements)
     let response = actor_ref.ask(ConcurrentMessage::GetCounter).await.unwrap();
@@ -307,8 +307,8 @@ async fn test_multiple_actor_communication() {
         .await
         .unwrap();
 
-    // Wait for children to be created
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    // Both creates above used `ask`, which already synchronizes with child
+    // creation: no sleep needed.
 
     // Send messages to children through parent
     parent_ref
@@ -373,11 +373,8 @@ async fn test_rapid_actor_lifecycle() {
         // Send a message to ensure it's fully initialized
         actor_ref.ask(ConcurrentMessage::GetCounter).await.unwrap();
 
-        // Stop the actor
+        // Stop the actor (`ask_stop` waits for shutdown confirmation).
         actor_ref.ask_stop().await.unwrap();
-
-        // Small delay to allow cleanup
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
     // System should still be functional
@@ -446,7 +443,8 @@ async fn test_system_shutdown_with_active_actors() {
         actor_ref.tell(ConcurrentMessage::Increment).await.unwrap();
     }
 
-    // Wait a bit for messages to be processed
+    // timing: pacing pause so the actors pick up their messages and are
+    // busy when the system shutdown runs through them.
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Stop the system

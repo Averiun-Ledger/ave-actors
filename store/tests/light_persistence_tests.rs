@@ -180,13 +180,10 @@ async fn test_light_persistence_actor_recovers_state() {
     actor_ref.ask(LightMessage::Increment(10)).await.unwrap();
     actor_ref.ask(LightMessage::Increment(5)).await.unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
     let response = actor_ref.ask(LightMessage::Get).await.unwrap();
     assert_eq!(response, LightResponse::Counter(15));
 
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let actor_ref = system
         .create_root_actor("light-recover", LightActor::initial(()))
@@ -214,10 +211,7 @@ async fn test_light_persistence_actor_no_event_replay() {
 
     actor_ref.ask(LightMessage::AddNumber(3)).await.unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let actor_ref = system
         .create_root_actor("light-no-replay", LightActor::initial(()))
@@ -247,7 +241,6 @@ async fn test_light_persistence_does_not_store_events() {
         .unwrap();
 
     actor_ref.ask(LightMessage::Increment(7)).await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // The store was started with name "store" and the default prefix
     // derived from the actor's full path, so the event collection is

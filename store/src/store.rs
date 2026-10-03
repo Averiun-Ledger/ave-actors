@@ -2285,13 +2285,10 @@ mod tests {
         actor_ref.ask(CounterMessage::Add(10)).await.unwrap();
         actor_ref.ask(CounterMessage::Add(5)).await.unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
         let value = actor_ref.ask(CounterMessage::Get).await.unwrap();
         assert_eq!(value, CounterResponse::Value(15));
 
         actor_ref.ask_stop().await.unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         // Recreate and verify recovery
         let actor_ref = system
@@ -2330,13 +2327,10 @@ mod tests {
         actor_ref.ask(CounterMessage::Add(7)).await.unwrap();
         actor_ref.ask(CounterMessage::Add(2)).await.unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
         let value = actor_ref.ask(CounterMessage::Get).await.unwrap();
         assert_eq!(value, CounterResponse::Value(12));
 
         actor_ref.ask_stop().await.unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         // Recreate and verify recovery (events + snapshots)
         let actor_ref = system

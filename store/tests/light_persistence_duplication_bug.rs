@@ -158,7 +158,6 @@ async fn test_light_persistence_duplicates_data_on_restart() {
 
     // Stop the actor (this will trigger snapshot in pre_stop)
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Create a NEW actor with the same name (simulating restart)
     // It will use the SAME shared MemoryManager via pre_start
