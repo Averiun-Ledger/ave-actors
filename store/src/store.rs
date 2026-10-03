@@ -1176,26 +1176,35 @@ where
 
     /// Replays events in `[from..=to]`, folding them over `state`.
     ///
-    /// Shared by both recovery paths so replay semantics cannot diverge.
+    /// Shared by recovery and pre-stop paths so replay semantics cannot
+    /// diverge. Events stream in bounded windows instead of materializing
+    /// the whole range at once, so replaying a huge log (e.g.
+    /// `snapshot_every=None`) bounds peak memory to one window of
+    /// decrypted events.
     fn apply_events(
         &mut self,
         from: u64,
         to: u64,
         state: Arc<A::State>,
+        operation: StoreOperation,
     ) -> Result<Arc<A::State>, Error> {
-        let events = self.events(from, to)?;
-        debug!("Found {} events to replay", events.len());
+        const REPLAY_WINDOW: u64 = 1024;
 
         let mut state = state;
-        for (i, event) in events.iter().enumerate() {
-            debug!("Applying event {} of {}", i + 1, events.len());
-            state = A::apply(state, event).map_err(|e| {
-                store_error_with_source(
-                    StoreOperation::ApplyEvent,
-                    format!("{:?}", e),
-                    e,
-                )
-            })?;
+        let mut cursor = from;
+        while cursor <= to {
+            let end = to.min(cursor.saturating_add(REPLAY_WINDOW - 1));
+            let events = self.events(cursor, end)?;
+            for (i, event) in events.iter().enumerate() {
+                debug!("Applying event {} of {}", i + 1, events.len());
+                state = A::apply(state, event).map_err(|e| {
+                    store_error_with_source(operation, format!("{:?}", e), e)
+                })?;
+            }
+            if end == to {
+                break;
+            }
+            cursor = end + 1;
         }
         Ok(state)
     }
@@ -1249,6 +1258,7 @@ where
                 self.state_counter,
                 self.event_counter - 1,
                 state,
+                StoreOperation::ApplyEvent,
             )?;
 
             debug!("Updating snapshot after applying events");
@@ -1293,7 +1303,12 @@ where
         let mut state = Arc::clone(&self.initial_state);
 
         debug!("Replaying events from scratch");
-        state = self.apply_events(0, self.event_counter - 1, state)?;
+        state = self.apply_events(
+            0,
+            self.event_counter - 1,
+            state,
+            StoreOperation::ApplyEvent,
+        )?;
 
         debug!("Creating snapshot after replaying events");
         if let Err(e) = self.snapshot(state.as_ref()) {
@@ -1326,16 +1341,12 @@ where
             .map(|s| s.state)
             .unwrap_or_else(|| Arc::clone(&self.initial_state));
 
-        let events = self.events(self.state_counter, self.event_counter - 1)?;
-        for event in &events {
-            state = A::apply(state, event).map_err(|e| {
-                store_error_with_source(
-                    StoreOperation::ApplyEventOnStop,
-                    format!("{:?}", e),
-                    e,
-                )
-            })?;
-        }
+        state = self.apply_events(
+            self.state_counter,
+            self.event_counter - 1,
+            state,
+            StoreOperation::ApplyEventOnStop,
+        )?;
 
         #[cfg(feature = "prometheus")]
         let start = Instant::now();
@@ -2961,6 +2972,28 @@ mod tests {
 
         let recovered = store.recover().unwrap();
         assert_eq!(recovered.unwrap().value, 8);
+    }
+
+    #[test]
+    fn test_full_persistence_replays_many_windows_on_recovery() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<FullCounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        // 2500 events span multiple replay windows without snapshots.
+        let total: u64 = 2500;
+        for _ in 0..total {
+            store.persist(&CounterEvent(1)).unwrap();
+        }
+
+        let recovered = store.recover().unwrap();
+        assert_eq!(recovered.unwrap().value, total as i32);
     }
 
     #[test]

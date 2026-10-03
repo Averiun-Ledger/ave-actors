@@ -19,7 +19,7 @@ memsecurity = { workspace = true }
 prometheus-client = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 zeroize = { workspace = true }

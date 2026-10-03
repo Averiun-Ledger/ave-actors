@@ -1301,3 +1301,133 @@ async fn test_init_timeout_stops_already_created_children() {
 
     system.stop_system();
 }
+
+#[derive(Clone)]
+struct PanicStartChild {
+    terminated: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NotPersistentActor for PanicStartChild {}
+
+#[async_trait]
+impl Actor for PanicStartChild {
+    type Message = StartMessage;
+    type Response = StartResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("PanicStartChild", id = %id)
+    }
+
+    async fn post_stop(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        self.terminated.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for PanicStartChild {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: StartMessage,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<StartResponse, Error> {
+        Ok(StartResponse::Pong)
+    }
+}
+
+#[derive(Clone)]
+struct PanicStartParent {
+    terminated_child: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NotPersistentActor for PanicStartParent {}
+
+#[async_trait]
+impl Actor for PanicStartParent {
+    type Message = StartMessage;
+    type Response = StartResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("PanicStartParent", id = %id)
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        ctx.create_child(
+            "child",
+            PanicStartChild {
+                terminated: Arc::clone(&self.terminated_child),
+            },
+        )
+        .await?;
+        panic!("intentional pre_start panic");
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for PanicStartParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: StartMessage,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<StartResponse, Error> {
+        Ok(StartResponse::Pong)
+    }
+}
+
+#[test(tokio::test)]
+async fn test_pre_start_panic_cleans_up_children() {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    let terminated_child = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let result = system
+        .create_root_actor(
+            "panic-parent",
+            PanicStartParent {
+                terminated_child: Arc::clone(&terminated_child),
+            },
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "panicking pre_start must fail creation loudly"
+    );
+
+    // The child created before the panic must be stopped, not orphaned.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if terminated_child.load(Ordering::SeqCst) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "orphaned child was never stopped"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    system.stop_system();
+}

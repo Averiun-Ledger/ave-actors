@@ -895,3 +895,71 @@ async fn test_retry_preserves_per_subscriber_order() {
 
     actor_ref.ask_stop().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_add_remove_during_slow_filter() {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let entered = Arc::new(AtomicBool::new(false));
+
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    let actor_ref = system
+        .create_root_actor("filter_block", EmitterActor)
+        .await
+        .unwrap();
+
+    let mut sink = actor_ref
+        .register_sink("filter_sink", None)
+        .expect("valid sink");
+    {
+        let entered_filter = Arc::clone(&entered);
+        let release_filter = Arc::clone(&release_rx);
+        sink.add_entry(
+            SinkEntry::new("slow_filter", CollectingSubscriber::new()).filter(
+                move |_: &TestEvent| {
+                    entered_filter.store(true, Ordering::SeqCst);
+                    // Park the dispatcher inside user filter code.
+                    while release_filter.lock().unwrap().try_recv().is_err() {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    true
+                },
+            ),
+        );
+    }
+
+    actor_ref.tell(TestMsg::Emit(1)).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !entered.load(Ordering::SeqCst) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "dispatcher never reached the filter"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Management operations must not block behind user filter code.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::task::spawn_blocking(move || {
+            sink.add("late", CollectingSubscriber::new());
+            sink.remove_entry("slow_filter");
+        })
+        .await
+        .expect("management ops must not block on a slow filter");
+    })
+    .await
+    .expect("add/remove must complete while a filter is slow");
+
+    let _ = release_tx.send(());
+    actor_ref.ask_stop().await.unwrap();
+}

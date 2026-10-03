@@ -1397,4 +1397,45 @@ mod prometheus_tests {
             1
         );
     }
+
+    #[tokio::test]
+    async fn test_sink_detail_counters_recorded_when_opted_in() {
+        use crate::metrics::SinkDetailLabels;
+
+        let metrics = Arc::new(ActorMetrics::new());
+        let mut sink = Sink::new_with_metrics(
+            "detail",
+            None,
+            ActorPath::from("/user/test"),
+            Arc::from("TestSink"),
+            true,
+            Some(Arc::clone(&metrics)),
+        )
+        .expect("valid sink");
+        sink.add("failing", FailingSubscriber);
+
+        sink.send(Arc::new(()));
+
+        // The opt-in detail series must appear; aggregate delivery
+        // failures are covered by the sibling test above.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let count = metrics
+                .sink_delivery_failures_detail_total
+                .get_or_create(&SinkDetailLabels {
+                    path: "/user/test".to_owned(),
+                    sink_name: "detail".to_owned(),
+                })
+                .get();
+            if count == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detail delivery failure was never recorded"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
 }

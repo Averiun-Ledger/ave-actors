@@ -2111,3 +2111,34 @@ mod batch_extra_tests {
         assert_eq!(last_key, format!("{:020}", 8u64 * 25 - 1));
     }
 }
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn test_stop_survives_busy_checkpoint() {
+        let manager = SqliteManager::default();
+        manager.create_state("s", "p").unwrap();
+
+        // A competing connection holds a RESERVED lock; stop() must still
+        // complete (waiting out or warning on the busy checkpoint).
+        let holder = Connection::open_with_flags(
+            &manager.pool.path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        holder
+            .execute("INSERT INTO s (prefix, value) VALUES ('p', x'00')", ())
+            .unwrap();
+
+        let handle = std::thread::spawn(move || manager.stop());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        holder.execute_batch("COMMIT;").unwrap();
+        handle
+            .join()
+            .expect("stop thread panicked")
+            .expect("stop must tolerate a busy checkpoint");
+    }
+}

@@ -10,7 +10,7 @@ use ave_actors_store::{
 use rocksdb::{
     BlockBasedOptions, BoundColumnFamily, Cache, ColumnFamilyDescriptor, DB,
     DBCompactionStyle, DBCompressionType, DBIteratorWithThreadMode, Direction,
-    IteratorMode, LogLevel, Options, WriteBatch, WriteOptions,
+    IteratorMode, LogLevel, Options, ReadOptions, WriteBatch, WriteOptions,
 };
 use tracing::{debug, error, info, warn};
 
@@ -276,11 +276,20 @@ fn apply_tuning(options: &mut Options, ram_mb: u64, cores: usize) {
     options.set_write_buffer_size(wb_size as usize);
     options.set_max_write_buffer_number(wb_count as i32);
     options.set_min_write_buffer_number_to_merge(merge);
-    options.set_target_file_size_base(wb_size);
+    // SST size follows the write buffer but stays portable: unbounded it
+    // would swing from ~5 MB on tiny hosts to ~100 MB on large ones,
+    // making compaction behavior machine-dependent.
+    options.set_target_file_size_base(sst_target_bytes(wb_size));
     options.set_max_total_wal_size(wal_bytes);
+
+    // Bound open files with cores (flush/compaction parallelism scales the
+    // same way); unbounded FDs risk exhaustion with many column families.
+    options.set_max_open_files(max_open_files(cores));
 
     // ── Block cache ────────────────────────────────────────────────────────────
     let mut bb = BlockBasedOptions::default();
+    // 16 KiB blocks favor the sequential event-log scans over point reads.
+    bb.set_block_size(16 * 1024);
     bb.set_bloom_filter(10.0, false);
     bb.set_cache_index_and_filter_blocks(true);
     bb.set_block_cache(&Cache::new_lru_cache(cache_bytes as usize));
@@ -291,6 +300,17 @@ fn write_options(sync: bool) -> WriteOptions {
     let mut opts = WriteOptions::default();
     opts.set_sync(sync);
     opts
+}
+
+/// SST target size derived from the write-buffer size, clamped to a
+/// portable band so compaction behavior does not depend on host size.
+fn sst_target_bytes(wb_size: u64) -> u64 {
+    wb_size.clamp(16 * 1024 * 1024, 64 * 1024 * 1024)
+}
+
+/// Open-file ceiling derived from CPU cores.
+fn max_open_files(cores: usize) -> i32 {
+    ((cores * 128) as i32).clamp(256, 2048)
 }
 
 impl RocksDbManager {
@@ -558,8 +578,42 @@ impl State for RocksDbStore {
 
 impl Collection for RocksDbStore {
     fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
-        let mut iter = self.iter(true)?;
-        let value = iter.next().transpose()?;
+        let Some(handle) = self.cf() else {
+            error!(cf = %self.name, "Column family not found for last");
+            return Err(Error::Store {
+                source: None,
+                operation: StoreOperation::ColumnAccess,
+                reason: "RocksDB column for the store does not exist."
+                    .to_owned(),
+            });
+        };
+        // Consistent point read: the snapshot pins the view for this call,
+        // unlike the lazy iterators below (documented quiescent-only).
+        let snapshot = self.store.snapshot();
+        let prefix_dot = format!("{}.", self.prefix).into_bytes();
+        let mut upper_bound = prefix_dot.clone();
+        upper_bound.push(0xFF);
+        let mut read_options = ReadOptions::default();
+        read_options.set_snapshot(&snapshot);
+        read_options.set_iterate_upper_bound(upper_bound.clone());
+        read_options.set_iterate_lower_bound(prefix_dot.clone());
+        let mut iter = self.store.iterator_cf_opt(
+            &handle,
+            read_options,
+            IteratorMode::From(&upper_bound, Direction::Reverse),
+        );
+        let result = match iter.next() {
+            None => None,
+            Some(Err(e)) => {
+                error!(error = %e, "RocksDB iteration error");
+                return Err(Error::Get {
+                    key: String::from_utf8_lossy(&prefix_dot).into_owned(),
+                    reason: format!("{}", e),
+                });
+            }
+            Some(Ok((key, value))) => decode_entry(&prefix_dot, &key, &value),
+        };
+        let value = result.transpose()?;
         debug!(has_value = value.is_some(), "last() fetched");
         Ok(value)
     }
@@ -669,7 +723,7 @@ impl Collection for RocksDbStore {
             // range. This lets the backend delete only this actor's entries.
             debug!(cf = %self.name, "Purging collection with range delete");
             self.store
-                .delete_range_cf_opt(&handle, start, end, &wopts)
+                .delete_range_cf_opt(&handle, start.clone(), end.clone(), &wopts)
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to purge collection");
                     Error::Store {
@@ -677,7 +731,17 @@ impl Collection for RocksDbStore {
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
-                })
+                })?;
+            // Reclaim the range tombstones just written, scoped to this
+            // prefix only: a full-CF compaction would punish neighbors
+            // sharing the column family. Best-effort: the delete above
+            // already succeeded.
+            self.store.compact_range_cf(
+                &handle,
+                Some(&start[..]),
+                Some(&end[..]),
+            );
+            Ok(())
         } else {
             error!(cf = %self.name, "Column family not found for collection purge");
             Err(Error::Store {
@@ -753,7 +817,7 @@ impl Collection for RocksDbStore {
             end_key.push(0x00);
             debug!(cf = %self.name, "Deleting collection range");
             self.store
-                .delete_range_cf_opt(&handle, start_key, end_key, &wopts)
+                .delete_range_cf_opt(&handle, start_key.clone(), end_key.clone(), &wopts)
                 .map_err(|e| {
                     error!(cf = %self.name, error = %e, "Failed to delete collection range");
                     Error::Store {
@@ -761,7 +825,15 @@ impl Collection for RocksDbStore {
                         operation: StoreOperation::RocksdbOperation,
                         reason: format!("{:?}", e),
                     }
-                })
+                })?;
+            // Reclaim just-deleted range tombstones, scoped to the range
+            // (see `purge`): best-effort, the delete already succeeded.
+            self.store.compact_range_cf(
+                &handle,
+                Some(&start_key[..]),
+                Some(&end_key[..]),
+            );
+            Ok(())
         } else {
             error!(cf = %self.name, "Column family not found for collection del_range");
             Err(Error::Store {
@@ -777,6 +849,31 @@ impl Collection for RocksDbStore {
 pub(crate) struct RocksDbIterator<'a> {
     prefix_dot: Vec<u8>,
     iter: DBIteratorWithThreadMode<'a, DB>,
+}
+
+/// Strips the `{prefix}.` namespace from one raw iterator entry.
+///
+/// Returns `None` when the key leaves the prefix (end of range for the
+/// caller to stop at).
+fn decode_entry(
+    prefix_dot: &[u8],
+    key: &[u8],
+    value: &[u8],
+) -> Option<Result<(String, Vec<u8>), Error>> {
+    if !key.starts_with(prefix_dot) {
+        return None;
+    }
+    let suffix = &key[prefix_dot.len()..];
+    let key_str = match std::str::from_utf8(suffix) {
+        Ok(s) => s.to_owned(),
+        Err(error) => {
+            return Some(Err(Error::Get {
+                key: String::from_utf8_lossy(key).into_owned(),
+                reason: format!("{}", error),
+            }));
+        }
+    };
+    Some(Ok((key_str, value.to_vec())))
 }
 
 impl<'a> RocksDbIterator<'a> {
@@ -799,13 +896,19 @@ impl<'a> RocksDbIterator<'a> {
             });
         };
 
+        // Hard bounds keep the scan inside this prefix instead of walking
+        // to the end of the column family when it is the last one.
+        let mut read_options = ReadOptions::default();
+        read_options.set_iterate_upper_bound(upper_bound.clone());
+        read_options.set_iterate_lower_bound(prefix_dot.clone());
+
         let mode = if reverse {
             IteratorMode::From(&upper_bound, Direction::Reverse)
         } else {
             IteratorMode::From(&prefix_dot, Direction::Forward)
         };
 
-        let iter = store.iterator_cf(&handle, mode);
+        let iter = store.iterator_cf_opt(&handle, read_options, mode);
         Ok(Self { prefix_dot, iter })
     }
 }
@@ -816,22 +919,7 @@ impl Iterator for RocksDbIterator<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         let item = self.iter.next()?;
         match item {
-            Ok((key, value)) => {
-                if !key.starts_with(&self.prefix_dot) {
-                    return None;
-                }
-                let suffix = &key[self.prefix_dot.len()..];
-                let key_str = match std::str::from_utf8(suffix) {
-                    Ok(s) => s.to_owned(),
-                    Err(error) => {
-                        return Some(Err(Error::Get {
-                            key: String::from_utf8_lossy(&key).into_owned(),
-                            reason: format!("{}", error),
-                        }));
-                    }
-                };
-                Some(Ok((key_str, value.to_vec())))
-            }
+            Ok((key, value)) => decode_entry(&self.prefix_dot, &key, &value),
             Err(e) => {
                 error!(error = %e, "RocksDB iteration error");
                 Some(Err(Error::Get {
@@ -863,6 +951,10 @@ impl<'a> RocksDbRangeIterator<'a> {
         let prefix_dot = format!("{}.", prefix).into_bytes();
         let start_key = format!("{}.{}", prefix, start).into_bytes();
         let end_key = format!("{}.{}", prefix, end).into_bytes();
+        // Exclusive upper bound matching the inclusive `end` (same trick
+        // as `del_range`).
+        let mut end_exclusive = end_key.clone();
+        end_exclusive.push(0x00);
 
         let Some(handle) = store.cf_handle(&name) else {
             return Err(Error::Store {
@@ -873,13 +965,17 @@ impl<'a> RocksDbRangeIterator<'a> {
             });
         };
 
+        let mut read_options = ReadOptions::default();
+        read_options.set_iterate_lower_bound(start_key.clone());
+        read_options.set_iterate_upper_bound(end_exclusive.clone());
+
         let mode = if reverse {
             IteratorMode::From(&end_key, Direction::Reverse)
         } else {
             IteratorMode::From(&start_key, Direction::Forward)
         };
 
-        let iter = store.iterator_cf(&handle, mode);
+        let iter = store.iterator_cf_opt(&handle, read_options, mode);
         Ok(Self {
             start_key,
             end_key,
@@ -897,6 +993,8 @@ impl Iterator for RocksDbRangeIterator<'_> {
         let item = self.iter.next()?;
         match item {
             Ok((key, value)) => {
+                // The engine bounds already confine the scan; these stays
+                // as defense for hand-built iterators.
                 if !key.starts_with(&self.prefix_dot) {
                     return None;
                 }
@@ -906,17 +1004,7 @@ impl Iterator for RocksDbRangeIterator<'_> {
                 if self.reverse && key.as_ref() < self.start_key.as_slice() {
                     return None;
                 }
-                let suffix = &key[self.prefix_dot.len()..];
-                let key_str = match std::str::from_utf8(suffix) {
-                    Ok(s) => s.to_owned(),
-                    Err(error) => {
-                        return Some(Err(Error::Get {
-                            key: String::from_utf8_lossy(&key).into_owned(),
-                            reason: format!("{}", error),
-                        }));
-                    }
-                };
-                Some(Ok((key_str, value.to_vec())))
+                decode_entry(&self.prefix_dot, &key, &value)
             }
             Err(e) => {
                 error!(error = %e, "RocksDB range iteration error");
@@ -1211,5 +1299,27 @@ mod tests {
         // Sibling sharing the `a` prefix must survive an exact range delete.
         assert_eq!(Collection::get(&store, "a_extra").unwrap(), b"2".to_vec());
         assert_eq!(Collection::get(&store, "b").unwrap(), b"3".to_vec());
+    }
+}
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::{max_open_files, sst_target_bytes};
+
+    #[test]
+    fn test_sst_target_stays_portable() {
+        // Tiny host buffer: floored, not 5 MB.
+        assert_eq!(sst_target_bytes(5 * 1024 * 1024), 16 * 1024 * 1024);
+        // Huge host buffer: capped, not 100+ MB.
+        assert_eq!(sst_target_bytes(256 * 1024 * 1024), 64 * 1024 * 1024);
+        // In-band value passes through.
+        assert_eq!(sst_target_bytes(32 * 1024 * 1024), 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_max_open_files_scales_with_cores() {
+        assert_eq!(max_open_files(1), 256);
+        assert_eq!(max_open_files(4), 512);
+        assert_eq!(max_open_files(64), 2048);
     }
 }
