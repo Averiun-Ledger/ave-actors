@@ -27,14 +27,14 @@ ave-actors-store = "0.6.0"
 use ave_actors_sqlite::SqliteManager;
 use ave_actors_store::{
     config::{MachineProfile, MachineSpec},
-    database::{Collection, DbManager, State},
+    database::{Collection, DbManager, Durability, State},
 };
 
 fn main() -> Result<(), ave_actors_store::Error> {
     let path = std::env::temp_dir().join("ave-actors-sqlite-docs");
     let manager = SqliteManager::new(
         &path,
-        true,
+        Durability::Relaxed,
         Some(MachineSpec::Profile(MachineProfile::Small)),
     )?;
 

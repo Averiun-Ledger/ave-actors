@@ -139,6 +139,83 @@ impl StoreMetrics {
     }
 }
 
+/// Pre-created metric handles for one store.
+///
+/// Like the actor runtime cache: per-operation `get_or_create` costs a
+/// hash + lock on every persist, so handles are resolved once here.
+/// Owned by the [`Store`](crate::store::Store), which persists
+/// sequentially.
+#[cfg(feature = "prometheus")]
+pub(crate) struct StoreMetricsCache {
+    scope: Arc<str>,
+    errors: std::collections::HashMap<&'static str, Counter>,
+    durations: std::collections::HashMap<&'static str, Histogram>,
+    pending: Option<Gauge>,
+}
+
+#[cfg(feature = "prometheus")]
+impl StoreMetricsCache {
+    pub(crate) fn new(
+        metrics: &StoreMetrics,
+        actor_path: &Arc<str>,
+        detailed: bool,
+    ) -> Self {
+        Self {
+            scope: scope_of(actor_path),
+            errors: std::collections::HashMap::new(),
+            durations: std::collections::HashMap::new(),
+            pending: detailed.then(|| {
+                metrics
+                    .store_pending_events
+                    .get_or_create(&StorePendingLabels {
+                        path: Arc::clone(actor_path),
+                    })
+                    .clone()
+            }),
+        }
+    }
+
+    pub(crate) fn record(
+        &mut self,
+        metrics: &StoreMetrics,
+        operation: &'static str,
+        seconds: f64,
+        failed: bool,
+    ) {
+        let scope = Arc::clone(&self.scope);
+        let error_handle = self.errors.entry(operation).or_insert_with(|| {
+            metrics
+                .store_errors_total
+                .get_or_create(&StoreErrorLabels {
+                    scope: Arc::clone(&scope),
+                    operation,
+                })
+                .clone()
+        });
+        if failed {
+            error_handle.inc();
+        }
+        self.durations
+            .entry(operation)
+            .or_insert_with(|| {
+                metrics
+                    .store_operation_duration_seconds
+                    .get_or_create(&StoreDurationLabels {
+                        scope: Arc::clone(&scope),
+                        operation,
+                    })
+                    .clone()
+            })
+            .observe(seconds);
+    }
+
+    pub(crate) fn set_pending(&self, count: i64) {
+        if let Some(gauge) = &self.pending {
+            gauge.set(count);
+        }
+    }
+}
+
 /// Derives the root scope (`/user/...` → `user`) from an actor path.
 ///
 /// Unknown shapes map to an empty scope rather than creating series.

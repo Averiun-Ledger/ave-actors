@@ -4,7 +4,10 @@
 use ave_actors_store::{
     Error, StoreOperation,
     config::{MachineSpec, resolve_spec},
-    database::{BatchOp, BatchWrite, Collection, DbManager, State},
+    database::{
+        BatchOp, BatchWrite, Collection, DbManager, Durability, State,
+        validate_key_prefix,
+    },
 };
 
 use rocksdb::{
@@ -27,7 +30,7 @@ use std::{
 /// events as `{prefix}.{key}`, states as `{prefix}`.
 struct RocksBatchWriter {
     db: Arc<DB>,
-    durability: bool,
+    durability: Durability,
 }
 
 impl BatchWrite for RocksBatchWriter {
@@ -79,7 +82,7 @@ impl BatchWrite for RocksBatchWriter {
                 }
             }
         }
-        let wopts = write_options(self.durability);
+        let wopts = write_options(self.durability.is_sync());
         self.db.write_opt(batch, &wopts).map_err(|e| {
             error!(error = %e, "Failed to write batch");
             Error::Store {
@@ -111,7 +114,7 @@ pub struct RocksDbManager {
     /// Thread-safe shared RocksDB instance.
     db: Arc<DB>,
     /// Per-write durability policy.
-    strong_durability: bool,
+    strong_durability: Durability,
 }
 
 impl RocksDbManager {
@@ -124,9 +127,9 @@ impl RocksDbManager {
     /// * `path` - Directory path where the RocksDB database will be created.
     ///   Unlike `SqliteManager::new` (which creates `path/database.db`),
     ///   `path` itself is opened as the RocksDB database directory.
-    /// * `durability` - when `true`, every write is synced to the WAL
-    ///   (`WriteOptions::set_sync(true)`); when `false`, writes return
-    ///   once in the OS buffers (faster, small window of loss on crash).
+    /// * `durability` - [`Durability::Sync`] syncs every write to the WAL;
+    ///   [`Durability::Relaxed`] returns once writes reach OS buffers
+    ///   (faster, small window of loss on crash).
     ///
     /// # Returns
     ///
@@ -146,7 +149,7 @@ impl RocksDbManager {
     ///
     pub fn new(
         path: &Path,
-        durability: bool,
+        durability: Durability,
         spec: Option<MachineSpec>,
     ) -> Result<Self, Error> {
         info!("Creating RocksDB database manager");
@@ -367,6 +370,7 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         name: &str,
         prefix: &str,
     ) -> Result<RocksDbStore, Error> {
+        validate_key_prefix(prefix)?;
         self.ensure_cf(name)?;
         debug!(cf = name, prefix = prefix, "Collection created");
         Ok(RocksDbStore {
@@ -382,6 +386,7 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
         name: &str,
         prefix: &str,
     ) -> Result<RocksDbStore, Error> {
+        validate_key_prefix(prefix)?;
         self.ensure_cf(name)?;
         debug!(cf = name, prefix = prefix, "State created");
         Ok(RocksDbStore {
@@ -466,7 +471,7 @@ pub struct RocksDbStore {
     /// Shared RocksDB instance.
     store: Arc<DB>,
     /// Per-write durability policy.
-    strong_durability: bool,
+    strong_durability: Durability,
 }
 
 impl RocksDbStore {
@@ -514,7 +519,7 @@ impl State for RocksDbStore {
 
     fn put(&mut self, data: &[u8]) -> Result<(), Error> {
         if let Some(handle) = self.cf() {
-            let wopts = write_options(self.strong_durability);
+            let wopts = write_options(self.strong_durability.is_sync());
             Ok(self
                 .store
                 .put_cf_opt(&handle, &self.prefix, data, &wopts)
@@ -557,7 +562,7 @@ impl State for RocksDbStore {
                 return Err(Error::EntryNotFound { key });
             }
 
-            let wopts = write_options(self.strong_durability);
+            let wopts = write_options(self.strong_durability.is_sync());
             Ok(self
                 .store
                 .delete_cf_opt(&handle, &self.prefix, &wopts)
@@ -584,7 +589,7 @@ impl State for RocksDbStore {
 
     fn purge(&mut self) -> Result<(), Error> {
         if let Some(handle) = self.cf() {
-            let wopts = write_options(self.strong_durability);
+            let wopts = write_options(self.strong_durability.is_sync());
             // Delete only the exact state key to avoid touching other prefixes,
             // even if someone reused or nested prefixes.
             self.store
@@ -685,7 +690,7 @@ impl Collection for RocksDbStore {
     fn put(&mut self, key: &str, data: &[u8]) -> Result<(), Error> {
         if let Some(handle) = self.cf() {
             let key = format!("{}.{}", self.prefix, key);
-            let wopts = write_options(self.strong_durability);
+            let wopts = write_options(self.strong_durability.is_sync());
             Ok(self
                 .store
                 .put_cf_opt(&handle, key, data, &wopts)
@@ -728,7 +733,7 @@ impl Collection for RocksDbStore {
                 return Err(Error::EntryNotFound { key });
             }
 
-            let wopts = write_options(self.strong_durability);
+            let wopts = write_options(self.strong_durability.is_sync());
             Ok(self
                 .store
                 .delete_cf_opt(&handle, key, &wopts)
@@ -755,7 +760,7 @@ impl Collection for RocksDbStore {
 
     fn purge(&mut self) -> Result<(), Error> {
         if let Some(handle) = self.cf() {
-            let wopts = write_options(self.strong_durability);
+            let wopts = write_options(self.strong_durability.is_sync());
             let start = format!("{}.", self.prefix).into_bytes();
             let mut end = start.clone();
             end.push(0xFF);
@@ -852,7 +857,7 @@ impl Collection for RocksDbStore {
 
     fn del_range(&mut self, start: &str, end: &str) -> Result<(), Error> {
         if let Some(handle) = self.cf() {
-            let wopts = write_options(self.strong_durability);
+            let wopts = write_options(self.strong_durability.is_sync());
             let start_key = format!("{}.{}", self.prefix, start).into_bytes();
             // Exclusive end: `end + \x00` is the smallest key strictly
             // greater than the inclusive `end` key, so `[start, end]`
@@ -1080,7 +1085,8 @@ mod tests {
                 .expect("Can not create temporal directory.");
             let path = dir.path().to_path_buf();
             TEMP_DIRS.lock().unwrap().push(dir);
-            Self::new(&path, false, None).expect("Can not create the database.")
+            Self::new(&path, Durability::Relaxed, None)
+                .expect("Can not create the database.")
         }
     }
 
@@ -1097,7 +1103,7 @@ mod tests {
             name: "no_such_cf".to_owned(),
             prefix: "pref".to_owned(),
             store: manager.raw_db(),
-            strong_durability: false,
+            strong_durability: Durability::Relaxed,
         };
 
         assert!(matches!(
@@ -1407,5 +1413,18 @@ mod cf_validation_tests {
         }
         manager.ensure_cf("valid_name_123").unwrap();
         manager.ensure_cf("_also_valid").unwrap();
+    }
+}
+
+#[cfg(test)]
+mod prefix_validation_tests {
+    use super::*;
+
+    #[test]
+    fn test_dotted_prefix_rejected() {
+        let manager = RocksDbManager::default();
+        assert!(manager.create_collection("c", "a.b").is_err());
+        assert!(manager.create_state("s", "a.b").is_err());
+        assert!(manager.create_collection("c", "").is_err());
     }
 }

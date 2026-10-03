@@ -3,7 +3,7 @@
 use ave_actors_sqlite::SqliteManager;
 use ave_actors_store::{
     Error,
-    database::{Collection, DbManager, State},
+    database::{Collection, DbManager, Durability, State},
 };
 use rusqlite::Connection;
 use tempfile::tempdir;
@@ -12,7 +12,8 @@ use tempfile::tempdir;
 fn test_sqlite_manager_edge_cases() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test");
-    let manager = SqliteManager::new(&db_path, false, None).unwrap();
+    let manager =
+        SqliteManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     // Test collection operations
     let mut collection = manager.create_collection("test", "prefix").unwrap();
@@ -44,7 +45,8 @@ fn test_sqlite_manager_edge_cases() {
 fn test_sqlite_state_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("state_test");
-    let manager = SqliteManager::new(&db_path, false, None).unwrap();
+    let manager =
+        SqliteManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     let mut state = manager.create_state("state", "prefix").unwrap();
 
@@ -79,7 +81,8 @@ fn test_sqlite_state_operations() {
 fn test_sqlite_iteration() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("iteration");
-    let manager = SqliteManager::new(&db_path, false, None).unwrap();
+    let manager =
+        SqliteManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     let mut collection = manager.create_collection("iter", "prefix").unwrap();
 
@@ -117,7 +120,8 @@ fn test_sqlite_iteration() {
 fn test_sqlite_get_preserves_operational_errors() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("broken_get");
-    let manager = SqliteManager::new(&db_path, false, None).unwrap();
+    let manager =
+        SqliteManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     let state = manager.create_state("state_table", "prefix").unwrap();
     let collection = manager
@@ -146,7 +150,8 @@ fn test_sqlite_get_preserves_operational_errors() {
 fn test_sqlite_collection_get_reports_requested_key() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("missing_collection_key");
-    let manager = SqliteManager::new(&db_path, false, None).unwrap();
+    let manager =
+        SqliteManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     let collection = manager.create_collection("test", "prefix").unwrap();
     let result = Collection::get(&collection, "missing");
@@ -161,7 +166,8 @@ fn test_sqlite_collection_get_reports_requested_key() {
 fn test_sqlite_identifier_validation() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("identifier_validation");
-    let manager = SqliteManager::new(&db_path, false, None).unwrap();
+    let manager =
+        SqliteManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     manager
         .create_collection("valid_name_42", "prefix")

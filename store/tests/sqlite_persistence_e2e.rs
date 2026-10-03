@@ -11,7 +11,7 @@ use ave_actors_actor::{
 };
 use ave_actors_sqlite::SqliteManager;
 use ave_actors_store::{
-    database::{Collection, DbManager},
+    database::{Collection, DbManager, Durability},
     default_store_prefix,
     store::{FullPersistence, LightPersistence, PersistentActor},
 };
@@ -324,8 +324,12 @@ impl Handler<Self> for BranchParent {
 
 fn sqlite_manager() -> (tempfile::TempDir, SqliteManager) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let manager = SqliteManager::new(&PathBuf::from(dir.path()), false, None)
-        .expect("sqlite manager");
+    let manager = SqliteManager::new(
+        &PathBuf::from(dir.path()),
+        Durability::Relaxed,
+        None,
+    )
+    .expect("sqlite manager");
     (dir, manager)
 }
 

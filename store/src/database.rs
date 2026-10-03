@@ -38,6 +38,50 @@ pub enum BatchOp<'a> {
     },
 }
 
+/// Validates a key prefix for backends that namespace keys.
+///
+/// Flat keyspaces join keys as `{prefix}.{key}`, so a `.` inside `prefix`
+/// aliases nested prefixes (`a` vs `a.b`) in range scans, purges and
+/// iterators. Backends must reject dotted prefixes in `create_collection`
+/// and `create_state`, even when their own layout (e.g. SQL columns) would
+/// tolerate them, to keep one uniform contract.
+pub fn validate_key_prefix(prefix: &str) -> Result<(), Error> {
+    if prefix.is_empty() {
+        return Err(Error::CreateStore {
+            reason: "backend prefix must not be empty".to_owned(),
+        });
+    }
+    if prefix.contains('.') {
+        return Err(Error::CreateStore {
+            reason: format!(
+                "backend prefix '{prefix}' must not contain '.': it aliases \
+                 nested prefixes in flat keyspaces"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Write durability contract for database backends.
+///
+/// A positional `bool` reads ambiguously at call sites (`new(&p, false,
+/// None)`); this enum forces every opener to state intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Durability {
+    /// Every write is synced before acknowledgement (durable, slower).
+    Sync,
+    /// Writes may sit in OS buffers briefly (faster, small window of loss
+    /// on power cut or crash).
+    Relaxed,
+}
+
+impl Durability {
+    /// Returns `true` for [`Durability::Sync`].
+    pub const fn is_sync(self) -> bool {
+        matches!(self, Self::Sync)
+    }
+}
+
 /// Factory for creating [`Collection`] and [`State`] storage backends.
 ///
 /// Implement this trait to plug in a custom database (SQLite, RocksDB, etc.).

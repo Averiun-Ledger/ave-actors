@@ -33,6 +33,43 @@ use std::time::Instant;
 /// Nonce size for XChaCha20-Poly1305 encryption.
 const NONCE_SIZE: usize = 24;
 
+/// Magic prefix marking versioned records: `[b'AVE', 0x00]`.
+const RECORD_MAGIC: [u8; 4] = [b'A', b'V', b'E', 0x00];
+
+/// Version of the framework-owned metadata record format.
+const METADATA_VERSION: u32 = 1;
+
+/// Wraps `payload` as `[MAGIC | version: u32 LE | payload]`.
+///
+/// The header stays outside encryption on purpose: the store can route
+/// decoding (and future migration tooling can inspect versions) without
+/// the data key.
+fn encode_versioned(version: u32, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + payload.len());
+    out.extend_from_slice(&RECORD_MAGIC);
+    out.extend_from_slice(&version.to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Splits `(version, payload)` from a stored record.
+///
+/// Records written before versioning carry no header and are reported as
+/// version 1, which matches the default `EVENT_VERSION`/`STATE_VERSION`:
+/// upgrading the framework never invalidates existing data by itself.
+/// (A legacy ciphertext whose random nonce happens to start with the magic
+/// bytes would misroute; at 1-in-4B odds the resulting version mismatch
+/// still fails loudly instead of decoding fiction.)
+fn decode_versioned(data: &[u8]) -> (u32, &[u8]) {
+    if data.len() >= 8 && data[..4] == RECORD_MAGIC {
+        let mut version = [0u8; 4];
+        version.copy_from_slice(&data[4..8]);
+        (u32::from_le_bytes(version), &data[8..])
+    } else {
+        (1, data)
+    }
+}
+
 fn store_error(operation: StoreOperation, reason: impl ToString) -> Error {
     Error::Store {
         operation,
@@ -195,6 +232,71 @@ where
     /// Default: `Some(100)`.
     fn snapshot_every() -> Option<u64> {
         Some(100)
+    }
+
+    /// Version of the serialized `Event` format written by this actor.
+    ///
+    /// Bump it when the event shape changes and migrate old records in
+    /// [`upcast_event`](PersistentActor::upcast_event). Stored records
+    /// carry their version, so history survives the upgrade.
+    const EVENT_VERSION: u32 = 1;
+
+    /// Version of the serialized `State` snapshot format. See
+    /// [`EVENT_VERSION`](PersistentActor::EVENT_VERSION).
+    const STATE_VERSION: u32 = 1;
+
+    /// Migrates a stored event payload from `version` to the current shape.
+    ///
+    /// The default decodes when `version` matches
+    /// [`EVENT_VERSION`](PersistentActor::EVENT_VERSION) and fails otherwise.
+    /// Override to support older versions instead of losing history.
+    fn upcast_event(
+        version: u32,
+        bytes: &[u8],
+    ) -> Result<Self::Event, ActorError>
+    where
+        Self::Event: BorshDeserialize,
+    {
+        if version != Self::EVENT_VERSION {
+            return Err(ActorError::InvalidConfiguration {
+                component: "persistent event".to_owned(),
+                reason: format!(
+                    "unsupported event version {version} (current {}); \
+                     implement upcast_event to migrate it",
+                    Self::EVENT_VERSION
+                ),
+            });
+        }
+        borsh::from_slice(bytes).map_err(|e| ActorError::InvalidConfiguration {
+            component: "persistent event".to_owned(),
+            reason: format!("cannot decode event version {version}: {e}"),
+        })
+    }
+
+    /// Migrates a stored snapshot payload from `version` to the current
+    /// shape, keeping its event counter. See
+    /// [`upcast_event`](PersistentActor::upcast_event).
+    fn upcast_state(
+        version: u32,
+        bytes: &[u8],
+    ) -> Result<(Self::State, u64), ActorError>
+    where
+        Self::State: BorshDeserialize,
+    {
+        if version != Self::STATE_VERSION {
+            return Err(ActorError::InvalidConfiguration {
+                component: "persistent state".to_owned(),
+                reason: format!(
+                    "unsupported state version {version} (current {}); \
+                     implement upcast_state to migrate it",
+                    Self::STATE_VERSION
+                ),
+            });
+        }
+        borsh::from_slice(bytes).map_err(|e| ActorError::InvalidConfiguration {
+            component: "persistent state".to_owned(),
+            reason: format!("cannot decode state version {version}: {e}"),
+        })
     }
 
     /// Returns the current actor state.
@@ -402,6 +504,9 @@ where
     /// Optional Prometheus metrics collection for the store.
     #[cfg(feature = "prometheus")]
     metrics: Option<Arc<crate::metrics::StoreMetrics>>,
+    /// Pre-created per-operation metric handles (hot path without lookups).
+    #[cfg(feature = "prometheus")]
+    metrics_cache: Option<crate::metrics::StoreMetricsCache>,
 }
 
 impl<A> ave_actors_actor::NotPersistentActor for Store<A>
@@ -640,6 +745,8 @@ where
             actor_path,
             #[cfg(feature = "prometheus")]
             metrics,
+            #[cfg(feature = "prometheus")]
+            metrics_cache: None,
         };
 
         let last_event_counter = store
@@ -676,6 +783,17 @@ where
             "Initializing Store with event_counter: {}, state_counter: {}",
             store.event_counter, store.state_counter
         );
+
+        #[cfg(feature = "prometheus")]
+        {
+            store.metrics_cache = store.metrics.as_ref().map(|m| {
+                crate::metrics::StoreMetricsCache::new(
+                    m,
+                    &store.actor_path,
+                    A::detailed_metrics(),
+                )
+            });
+        }
 
         #[cfg(feature = "prometheus")]
         store.record_pending_events();
@@ -721,22 +839,18 @@ where
 
     #[cfg(feature = "prometheus")]
     fn record_command_metrics(
-        &self,
+        &mut self,
         start: Instant,
-        duration_operation: &'static str,
-        error_operation: &'static str,
+        operation: &'static str,
         result: &Result<(), &Error>,
     ) {
-        if let Some(metrics) = self.metrics.as_ref() {
+        if let Some(cache) = self.metrics_cache.as_mut() {
+            let metrics = match self.metrics.as_ref() {
+                Some(metrics) => metrics,
+                None => return,
+            };
             let duration = start.elapsed().as_secs_f64();
-            metrics.observe_operation_duration(
-                &self.actor_path,
-                duration_operation,
-                duration,
-            );
-            if result.is_err() {
-                metrics.inc_errors(&self.actor_path, error_operation);
-            }
+            cache.record(metrics, operation, duration, result.is_err());
         }
     }
 
@@ -745,11 +859,11 @@ where
         // The pending gauge is inherently per-instance: only actors opting
         // in via `detailed_metrics` export it, otherwise per-path series
         // would grow without bound.
-        if A::detailed_metrics()
-            && let Some(metrics) = &self.metrics
-        {
+        #[cfg(feature = "prometheus")]
+        if let Some(cache) = self.metrics_cache.as_ref() {
             let pending = self.pending_events_since_snapshot();
-            metrics.set_pending_events_u64(&self.actor_path, pending);
+            let count = pending.min(i64::MAX as u64) as i64;
+            cache.set_pending(count);
         }
     }
 
@@ -760,7 +874,15 @@ where
             Err(err) => return Err(err),
         };
 
-        let bytes = self.maybe_decrypt(data)?;
+        let (version, payload) = decode_versioned(&data);
+        if version != METADATA_VERSION {
+            error!(version, "Unsupported metadata version");
+            return Err(store_error(
+                StoreOperation::DecodeMetadata,
+                format!("unsupported metadata version {version}"),
+            ));
+        }
+        let bytes = self.maybe_decrypt(payload.to_vec())?;
 
         match borsh::from_slice::<StoreMetadata>(&bytes) {
             Ok(metadata) => Ok(Some(metadata)),
@@ -832,16 +954,14 @@ where
         }
     }
 
-    fn encode_event_bytes<E: BorshSerialize>(
-        &self,
-        event: &E,
-    ) -> Result<Vec<u8>, Error> {
+    fn encode_event_bytes(&self, event: &A::Event) -> Result<Vec<u8>, Error> {
         let data = borsh::to_vec(event).map_err(|e| {
             error!("Can't encode event: {}", e);
             store_error(StoreOperation::EncodeEvent, e)
         })?;
 
-        self.maybe_encrypt(&data)
+        let bytes = self.maybe_encrypt(&data)?;
+        Ok(encode_versioned(A::EVENT_VERSION, &bytes))
     }
 
     fn encode_snapshot_bytes(
@@ -854,7 +974,8 @@ where
             store_error(StoreOperation::EncodeActor, e)
         })?;
 
-        self.maybe_encrypt(&data)
+        let bytes = self.maybe_encrypt(&data)?;
+        Ok(encode_versioned(A::STATE_VERSION, &bytes))
     }
 
     fn encode_metadata_bytes(
@@ -871,16 +992,17 @@ where
             store_error(StoreOperation::EncodeMetadata, e)
         })?;
 
-        self.maybe_encrypt(&data)
+        let bytes = self.maybe_encrypt(&data)?;
+        Ok(encode_versioned(METADATA_VERSION, &bytes))
     }
 
-    fn persist<E>(&mut self, event: &E) -> Result<(), Error>
-    where
-        E: Event + BorshSerialize + BorshDeserialize,
-    {
+    fn persist(&mut self, event: &A::Event) -> Result<(), Error> {
         // Never log the event payload: domain events may carry PII or
         // secrets, which must not land in `RUST_LOG=debug` output.
-        debug!(event_type = std::any::type_name::<E>(), "Persisting event");
+        debug!(
+            event_type = std::any::type_name::<A::Event>(),
+            "Persisting event"
+        );
 
         self.check_fence(StoreOperation::Persist)?;
 
@@ -890,7 +1012,7 @@ where
 
         debug!(
             "Persisting event {} at index {}",
-            std::any::type_name::<E>(),
+            std::any::type_name::<A::Event>(),
             next_event_number
         );
 
@@ -1036,15 +1158,41 @@ where
     fn last_event(&self) -> Result<Option<A::Event>, Error> {
         self.events
             .last()?
-            .map(|(_, data)| self.maybe_decrypt(data))
-            .transpose()?
-            .map(|data| {
-                borsh::from_slice(&data).map_err(|e| {
-                    error!("Can't decode event: {}", e);
-                    store_error(StoreOperation::DecodeEvent, e)
-                })
-            })
+            .map(|(_, data)| self.decode_event(data))
             .transpose()
+    }
+
+    /// Splits the version header, decrypts (if configured), and migrates
+    /// one stored event to the current shape.
+    ///
+    /// Order matters: the `[MAGIC | version]` header is stored outside the
+    /// ciphertext so decoding routes without the data key.
+    fn decode_event(&self, data: Vec<u8>) -> Result<A::Event, Error> {
+        let (version, payload) = decode_versioned(&data);
+        let payload = self.maybe_decrypt(payload.to_vec())?;
+        A::upcast_event(version, &payload).map_err(|source| {
+            error!(version, "Can't decode event");
+            store_error_with_source(
+                StoreOperation::DecodeEvent,
+                format!("cannot decode event version {version}"),
+                source,
+            )
+        })
+    }
+
+    /// Splits the version header, decrypts, and migrates one stored
+    /// snapshot (plus its event counter) to the current shape.
+    fn decode_snapshot(&self, data: Vec<u8>) -> Result<(A::State, u64), Error> {
+        let (version, payload) = decode_versioned(&data);
+        let payload = self.maybe_decrypt(payload.to_vec())?;
+        A::upcast_state(version, &payload).map_err(|source| {
+            error!(version, "Can't decode snapshot");
+            store_error_with_source(
+                StoreOperation::DecodeState,
+                format!("cannot decode snapshot version {version}"),
+                source,
+            )
+        })
     }
 
     fn get_state(&self) -> Result<Option<StateSnapshot<A::State>>, Error> {
@@ -1056,13 +1204,7 @@ where
             Err(e) => return Err(e),
         };
 
-        let bytes = self.maybe_decrypt(data)?;
-
-        let (state, counter): (A::State, u64) = borsh::from_slice(&bytes)
-            .map_err(|e| {
-                error!("Can't decode state: {}", e);
-                store_error(StoreOperation::DecodeState, e)
-            })?;
+        let (state, counter) = self.decode_snapshot(data)?;
 
         Ok(Some(StateSnapshot {
             state: Arc::new(state),
@@ -1105,14 +1247,7 @@ where
             let (_, data) = item
                 .map_err(|e| store_error(StoreOperation::GetEventsRange, e))?;
 
-            let data = self.maybe_decrypt(data)?;
-
-            let event: A::Event = borsh::from_slice(&data).map_err(|e| {
-                error!("Can't decode event: {}", e);
-                store_error(StoreOperation::DecodeEvent, e)
-            })?;
-
-            events.push(event);
+            events.push(self.decode_event(data)?);
         }
 
         if events.len() != expected {
@@ -1132,6 +1267,20 @@ where
     }
 
     fn query_events(&self, from: u64, to: u64) -> Result<Vec<A::Event>, Error> {
+        // Bound user-facing range reads: materializing an unbounded range
+        // would OOM on large logs. Page with `from`/`to` windows instead.
+        // Internal replay (`apply_events`) pages by itself and is exempt.
+        const MAX_QUERY_RANGE: u64 = 10_000;
+        if to.saturating_sub(from).saturating_add(1) > MAX_QUERY_RANGE {
+            return Err(store_error(
+                StoreOperation::GetEventsRange,
+                format!(
+                    "event range [{from}..={to}] exceeds the single-read \
+                     limit ({MAX_QUERY_RANGE}); page with smaller windows"
+                ),
+            ));
+        }
+
         // O(1)-ish emptiness probe: `last()` seeks the end instead of
         // cloning the whole collection like `iter(false)` does.
         let empty_events = self.events.last()?.is_none();
@@ -1392,7 +1541,6 @@ where
         #[cfg(feature = "prometheus")]
         self.record_command_metrics(
             start,
-            "snapshot",
             "snapshot",
             &result.as_ref().map(|_| ()),
         );
@@ -1722,7 +1870,6 @@ where
                 self.record_command_metrics(
                     start,
                     "persist_full",
-                    "persist_full",
                     &combined.as_ref().map(|_| ()),
                 );
 
@@ -1746,7 +1893,6 @@ where
                 self.record_command_metrics(
                     start,
                     "persist_light",
-                    "persist_light",
                     &result.as_ref().map(|_| ()),
                 );
                 result.map_err(|e| {
@@ -1763,7 +1909,6 @@ where
                 self.record_command_metrics(
                     start,
                     "snapshot",
-                    "snapshot",
                     &result.as_ref().map(|_| ()),
                 );
                 result.map_err(|e| {
@@ -1779,7 +1924,6 @@ where
                 #[cfg(feature = "prometheus")]
                 self.record_command_metrics(
                     start,
-                    "recover",
                     "recover",
                     &result.as_ref().map(|_| ()),
                 );
@@ -1799,7 +1943,6 @@ where
                 self.record_command_metrics(
                     start,
                     "get_events_range",
-                    "get_events_range",
                     &result.as_ref().map(|_| ()),
                 );
                 let events = result.map_err(|e| {
@@ -1817,7 +1960,6 @@ where
                 #[cfg(feature = "prometheus")]
                 self.record_command_metrics(
                     start,
-                    "last_event",
                     "last_event",
                     &result.as_ref().map(|_| ()),
                 );
@@ -1837,7 +1979,6 @@ where
                 #[cfg(feature = "prometheus")]
                 self.record_command_metrics(
                     start,
-                    "purge",
                     "purge",
                     &result.as_ref().map(|_| ()),
                 );
@@ -1860,7 +2001,6 @@ where
                 #[cfg(feature = "prometheus")]
                 self.record_command_metrics(
                     start,
-                    "get_latest_events",
                     "get_latest_events",
                     &result.as_ref().map(|_| ()),
                 );
@@ -3154,6 +3294,333 @@ mod tests {
         assert_eq!(recovered.unwrap().value, total as i32);
     }
 
+    // ------------------------------------------------------------------
+    // Event/schema versioning: v2 actors reading v1 (and legacy) records.
+    // ------------------------------------------------------------------
+
+    #[derive(
+        Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+    )]
+    struct V2Event {
+        delta: i32,
+        tag: u8,
+    }
+
+    impl Event for V2Event {}
+
+    #[derive(Debug)]
+    struct V2Actor {
+        state: Arc<CounterState>,
+    }
+
+    #[async_trait]
+    impl Actor for V2Actor {
+        type Message = CounterMessage;
+        type Response = CounterResponse;
+        type Event = V2Event;
+        type SinkEvent = Self::Event;
+        type ChildError = ActorError;
+        type ChildFault = ActorError;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("V2Actor", id = %id)
+        }
+    }
+
+    #[async_trait]
+    impl Handler<V2Actor> for V2Actor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: CounterMessage,
+            _ctx: &mut ActorContext<V2Actor>,
+        ) -> Result<CounterResponse, ActorError> {
+            Ok(CounterResponse::Value(0))
+        }
+    }
+
+    #[async_trait]
+    impl PersistentActor for V2Actor {
+        type Persistence = crate::store::FullPersistence;
+        type InitParams = ();
+        type State = CounterState;
+
+        const EVENT_VERSION: u32 = 2;
+
+        fn upcast_event(
+            version: u32,
+            bytes: &[u8],
+        ) -> Result<Self::Event, ActorError> {
+            // v1 shape was a bare `i32` delta.
+            if version == 1 {
+                let delta: i32 = borsh::from_slice(bytes).map_err(|e| {
+                    ActorError::InvalidConfiguration {
+                        component: "persistent event".to_owned(),
+                        reason: format!("cannot decode v1 event: {e}"),
+                    }
+                })?;
+                return Ok(V2Event { delta, tag: 0 });
+            }
+            if version != Self::EVENT_VERSION {
+                return Err(ActorError::InvalidConfiguration {
+                    component: "persistent event".to_owned(),
+                    reason: format!(
+                        "unsupported event version {version} (current {})",
+                        Self::EVENT_VERSION
+                    ),
+                });
+            }
+            borsh::from_slice(bytes).map_err(|e| {
+                ActorError::InvalidConfiguration {
+                    component: "persistent event".to_owned(),
+                    reason: format!(
+                        "cannot decode event version {version}: {e}"
+                    ),
+                }
+            })
+        }
+
+        fn create_initial(_: ()) -> Self {
+            Self {
+                state: Arc::new(CounterState::default()),
+            }
+        }
+
+        fn apply(
+            state: Arc<CounterState>,
+            event: &V2Event,
+        ) -> Result<Arc<CounterState>, ActorError> {
+            let mut state = Arc::clone(&state);
+            Arc::make_mut(&mut state).value += event.delta;
+            Ok(state)
+        }
+
+        fn state(&self) -> Arc<CounterState> {
+            Arc::clone(&self.state)
+        }
+
+        fn set_state(&mut self, state: Arc<CounterState>) {
+            self.state = state;
+        }
+    }
+
+    #[test]
+    fn test_v2_actor_replays_v1_and_legacy_events() {
+        let manager = MemoryManager::default();
+        // v1-format record (with header) and legacy record (raw borsh,
+        // treated as v1): both must migrate through `upcast_event`.
+        let mut events =
+            manager.create_collection("store_events", "test").unwrap();
+        let v1: Vec<u8> = {
+            let mut out = Vec::new();
+            out.extend_from_slice(b"AVE\x00");
+            out.extend_from_slice(&1u32.to_le_bytes());
+            out.extend_from_slice(&borsh::to_vec(&5i32).unwrap());
+            out
+        };
+        Collection::put(&mut events, &format!("{:020}", 0), &v1).unwrap();
+        Collection::put(
+            &mut events,
+            &format!("{:020}", 1),
+            &borsh::to_vec(&3i32).unwrap(),
+        )
+        .unwrap();
+
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store =
+            Store::<V2Actor>::test_new("store", "test", manager, None, initial)
+                .unwrap();
+
+        let recovered = store.recover().unwrap().expect("state expected");
+        assert_eq!(recovered.value, 8);
+        // New writes use the v2 envelope.
+        store.persist(&V2Event { delta: 1, tag: 9 }).unwrap();
+        let (_, raw) = store.events.last().unwrap().expect("event expected");
+        assert_eq!(&raw[..4], b"AVE\x00");
+        assert_eq!(&raw[4..8], &2u32.to_le_bytes());
+    }
+
+    #[test]
+    fn test_upcast_rejects_unknown_version() {
+        assert!(
+            V2Actor::upcast_event(99, b"junk").is_err(),
+            "unknown event versions must fail loudly, not decode garbage"
+        );
+        assert!(
+            V2Actor::upcast_event(2, b"shor").is_err(),
+            "truncated v2 payloads must fail"
+        );
+    }
+
+    #[test]
+    fn test_v2_state_recovers_legacy_v1_snapshot() {
+        let manager = MemoryManager::default();
+        let mut states = manager.create_state("store_states", "test").unwrap();
+        // Legacy (unversioned) v1 snapshot bytes.
+        State::put(
+            &mut states,
+            &borsh::to_vec(&(CounterState { value: 7 }, 4u64)).unwrap(),
+        )
+        .unwrap();
+
+        let initial = Arc::new(V2State::default());
+        let mut store = Store::<V2StateActor>::test_new(
+            "store", "test", manager, None, initial,
+        )
+        .unwrap();
+
+        let snapshot = store.get_state().unwrap().expect("snapshot expected");
+        assert_eq!(snapshot.state.value, 7);
+        assert_eq!(snapshot.state.epoch, 0);
+        assert_eq!(snapshot.counter, 4);
+
+        // New snapshots round-trip through the v2 envelope.
+        store.snapshot(&V2State { value: 9, epoch: 1 }).unwrap();
+        let snapshot = store.get_state().unwrap().expect("snapshot expected");
+        assert_eq!(snapshot.state.value, 9);
+        assert_eq!(snapshot.state.epoch, 1);
+    }
+
+    #[test]
+    fn test_legacy_metadata_is_read() {
+        let manager = MemoryManager::default();
+        let mut metadata =
+            manager.create_state("store_metadata", "test").unwrap();
+        // Legacy (unversioned) metadata bytes.
+        State::put(
+            &mut metadata,
+            &borsh::to_vec(&StoreMetadata {
+                next_event_index: 2,
+                state_counter: 2,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let initial = Arc::new(CounterState { value: 0 });
+        let store = Store::<CounterActor>::test_new(
+            "store", "test", manager, None, initial,
+        )
+        .unwrap();
+        assert_eq!(store.event_counter, 2);
+        assert_eq!(store.state_counter, 2);
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        Default,
+        Serialize,
+        Deserialize,
+        BorshSerialize,
+        BorshDeserialize,
+    )]
+    struct V2State {
+        value: i32,
+        epoch: u8,
+    }
+
+    #[derive(Debug)]
+    struct V2StateActor {
+        state: Arc<V2State>,
+    }
+
+    #[async_trait]
+    impl Actor for V2StateActor {
+        type Message = CounterMessage;
+        type Response = CounterResponse;
+        type Event = CounterEvent;
+        type SinkEvent = Self::Event;
+        type ChildError = ActorError;
+        type ChildFault = ActorError;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("V2StateActor", id = %id)
+        }
+    }
+
+    #[async_trait]
+    impl Handler<V2StateActor> for V2StateActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: CounterMessage,
+            _ctx: &mut ActorContext<V2StateActor>,
+        ) -> Result<CounterResponse, ActorError> {
+            Ok(CounterResponse::Value(0))
+        }
+    }
+
+    #[async_trait]
+    impl PersistentActor for V2StateActor {
+        type Persistence = crate::store::FullPersistence;
+        type InitParams = ();
+        type State = V2State;
+
+        const STATE_VERSION: u32 = 2;
+
+        fn upcast_state(
+            version: u32,
+            bytes: &[u8],
+        ) -> Result<(Self::State, u64), ActorError> {
+            // v1 shape was `(CounterState, counter)`; only the state part
+            // changed (gained `epoch`). This decodes because borsh lays
+            // out the single-field v1 struct exactly like a bare `i32`.
+            if version == 1 {
+                let (value, counter): (i32, u64) = borsh::from_slice(bytes)
+                    .map_err(|e| ActorError::InvalidConfiguration {
+                        component: "persistent state".to_owned(),
+                        reason: format!("cannot decode v1 state: {e}"),
+                    })?;
+                return Ok((V2State { value, epoch: 0 }, counter));
+            }
+            if version != Self::STATE_VERSION {
+                return Err(ActorError::InvalidConfiguration {
+                    component: "persistent state".to_owned(),
+                    reason: format!(
+                        "unsupported state version {version} (current {})",
+                        Self::STATE_VERSION
+                    ),
+                });
+            }
+            borsh::from_slice(bytes).map_err(|e| {
+                ActorError::InvalidConfiguration {
+                    component: "persistent state".to_owned(),
+                    reason: format!(
+                        "cannot decode state version {version}: {e}"
+                    ),
+                }
+            })
+        }
+
+        fn create_initial(_: ()) -> Self {
+            Self {
+                state: Arc::new(V2State::default()),
+            }
+        }
+
+        fn apply(
+            state: Arc<V2State>,
+            _event: &CounterEvent,
+        ) -> Result<Arc<V2State>, ActorError> {
+            Ok(state)
+        }
+
+        fn state(&self) -> Arc<V2State> {
+            Arc::clone(&self.state)
+        }
+
+        fn set_state(&mut self, state: Arc<V2State>) {
+            self.state = state;
+        }
+    }
+
     #[test]
     fn test_full_persistence_snapshot_captures_pending_events() {
         let initial = Arc::new(CounterState { value: 0 });
@@ -3177,6 +3644,33 @@ mod tests {
         assert_eq!(snapshot.state.value, 3);
         assert_eq!(snapshot.counter, 2);
         assert_eq!(store.pending_events_since_snapshot(), 0);
+    }
+
+    #[test]
+    fn test_query_events_rejects_oversized_range() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<FullCounterActor>::test_new(
+            "store",
+            "test",
+            MemoryManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        store.persist(&CounterEvent(1)).unwrap();
+        store.persist(&CounterEvent(2)).unwrap();
+
+        // Normal windows still work.
+        assert_eq!(store.query_events(0, 1).unwrap().len(), 2);
+
+        // Oversized ranges fail with guidance instead of materializing
+        // the log: callers must page with `from`/`to` windows.
+        let result = store.query_events(0, 1_000_000);
+        assert!(
+            matches!(result, Err(Error::Store { .. })),
+            "oversized range must be rejected, got {result:?}"
+        );
     }
 
     #[test]

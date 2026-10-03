@@ -6,7 +6,10 @@
 use ave_actors_store::{
     Error, StoreOperation,
     config::{MachineSpec, resolve_spec},
-    database::{BatchOp, BatchWrite, Collection, DbManager, State},
+    database::{
+        BatchOp, BatchWrite, Collection, DbManager, Durability, State,
+        validate_key_prefix,
+    },
 };
 
 use rusqlite::{
@@ -93,7 +96,7 @@ pub struct SqliteManager {
 /// stalled.
 struct SqlitePool {
     path: PathBuf,
-    durability: bool,
+    durability: Durability,
     tuning: SqliteTuning,
     max_size: usize,
     /// Idle connections retained on checkin; extras are closed (`total`
@@ -354,9 +357,10 @@ impl SqliteManager {
     ///   `RocksDbManager::new` (which opens `path` itself as the database
     ///   directory), the SQLite file is created as `path/database.db`.
     ///   The database file will be named "database.db" within this directory.
-    /// * `durability` - when `true`, every write is fsynced
-    ///   (`synchronous=FULL`); when `false`, the OS may delay durability
-    ///   (`synchronous=NORMAL`, faster, small window of loss on power cut).
+    /// * `durability` - [`Durability::Sync`] fsyncs every write
+    ///   (`synchronous=FULL`); [`Durability::Relaxed`] lets the OS delay
+    ///   durability (`synchronous=NORMAL`, faster, small window of loss on
+    ///   power cut).
     ///
     /// # Returns
     ///
@@ -370,7 +374,7 @@ impl SqliteManager {
     ///
     pub fn new(
         path: &Path,
-        durability: bool,
+        durability: Durability,
         spec: Option<MachineSpec>,
     ) -> Result<Self, Error> {
         info!("Creating SQLite database manager");
@@ -454,6 +458,7 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
         prefix: &str,
     ) -> Result<SqliteCollection, Error> {
         Self::validate_identifier(identifier)?;
+        validate_key_prefix(prefix)?;
         let stmt = format!(
             "CREATE TABLE IF NOT EXISTS {} (prefix TEXT NOT NULL, value \
             BLOB NOT NULL, PRIMARY KEY (prefix))",
@@ -487,6 +492,7 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
         prefix: &str,
     ) -> Result<SqliteCollection, Error> {
         Self::validate_identifier(identifier)?;
+        validate_key_prefix(prefix)?;
         let stmt = format!(
             "CREATE TABLE IF NOT EXISTS {} (prefix TEXT NOT NULL, sn TEXT NOT NULL, value \
             BLOB NOT NULL, PRIMARY KEY (prefix, sn))",
@@ -1392,7 +1398,7 @@ sqlite_store_error(StoreOperation::Delete, e)
 
 fn open_with_tuning<P: AsRef<Path>>(
     path: P,
-    durability: bool,
+    durability: Durability,
     tuning: SqliteTuning,
 ) -> Result<Connection, Error> {
     let path = path.as_ref();
@@ -1477,10 +1483,14 @@ fn is_transient_lock(e: &SqliteError) -> bool {
 
 fn apply_pragmas(
     conn: &Connection,
-    durability: bool,
+    durability: Durability,
     tuning: SqliteTuning,
 ) -> Result<(), SqliteError> {
-    let sync_mode = if durability { "FULL" } else { "NORMAL" };
+    let sync_mode = if durability.is_sync() {
+        "FULL"
+    } else {
+        "NORMAL"
+    };
 
     conn.execute_batch(
         format!(
@@ -1570,7 +1580,8 @@ mod tests {
     impl Default for SqliteManager {
         fn default() -> Self {
             let path = PathBuf::from(create_temp_dir());
-            Self::new(&path, false, None).expect("Cannot create the database")
+            Self::new(&path, Durability::Relaxed, None)
+                .expect("Cannot create the database")
         }
     }
 
@@ -1588,7 +1599,7 @@ mod tests {
     fn test_open_with_tuning_bad_path() {
         let result = open_with_tuning(
             "/dev/null/invalid_sqlite_path",
-            false,
+            Durability::Relaxed,
             tuning_for_ram(1024),
         );
         assert!(result.is_err());
@@ -1598,7 +1609,7 @@ mod tests {
     fn test_pool_checkout_open_failure() {
         let pool = Arc::new(SqlitePool {
             path: PathBuf::from("/dev/null/invalid_sqlite_path"),
-            durability: false,
+            durability: Durability::Relaxed,
             tuning: tuning_for_ram(1024),
             max_size: 1,
             idle_keep: 1,
@@ -1617,12 +1628,16 @@ mod tests {
     #[test]
     fn test_operations_with_broken_pool() {
         let valid_path = PathBuf::from(create_temp_dir()).join("database.db");
-        let admin_conn =
-            open_with_tuning(&valid_path, false, tuning_for_ram(1024)).unwrap();
+        let admin_conn = open_with_tuning(
+            &valid_path,
+            Durability::Relaxed,
+            tuning_for_ram(1024),
+        )
+        .unwrap();
 
         let pool = Arc::new(SqlitePool {
             path: PathBuf::from("/dev/null/invalid_sqlite_path"),
-            durability: false,
+            durability: Durability::Relaxed,
             tuning: tuning_for_ram(1024),
             max_size: 1,
             idle_keep: 1,
@@ -1675,7 +1690,7 @@ mod tests {
         // Use a read-only system path where directory creation will fail.
         let result = SqliteManager::new(
             &PathBuf::from("/sys/invalid_sqlite_dir"),
-            false,
+            Durability::Relaxed,
             None,
         );
         assert!(result.is_err());
@@ -1689,7 +1704,7 @@ mod tests {
         // Make database.db a directory so the connection open fails.
         fs::create_dir(db_path.join("database.db")).unwrap();
 
-        let result = SqliteManager::new(&db_path, false, None);
+        let result = SqliteManager::new(&db_path, Durability::Relaxed, None);
         assert!(result.is_err());
     }
 
@@ -1703,7 +1718,11 @@ mod tests {
         perms.set_readonly(true);
         fs::set_permissions(&db_path, perms).unwrap();
 
-        let result = open_with_tuning(&db_path, false, tuning_for_ram(1024));
+        let result = open_with_tuning(
+            &db_path,
+            Durability::Relaxed,
+            tuning_for_ram(1024),
+        );
         assert!(result.is_err());
     }
 
@@ -1713,7 +1732,8 @@ mod tests {
         let db_path = temp_dir.path().join("readonly_admin");
         // Create a valid database file first.
         {
-            let _ = SqliteManager::new(&db_path, false, None).unwrap();
+            let _ = SqliteManager::new(&db_path, Durability::Relaxed, None)
+                .unwrap();
         }
 
         let db_file = db_path.join("database.db");
@@ -1722,7 +1742,7 @@ mod tests {
 
         let pool = Arc::new(SqlitePool {
             path: db_file,
-            durability: false,
+            durability: Durability::Relaxed,
             tuning: tuning_for_ram(1024),
             max_size: 1,
             idle_keep: 1,
@@ -1752,7 +1772,11 @@ mod tests {
         let db_path = temp_dir.path().join("corrupt.db");
         fs::write(&db_path, b"THIS IS NOT A SQLITE DB").unwrap();
 
-        let result = open_with_tuning(&db_path, false, tuning_for_ram(1024));
+        let result = open_with_tuning(
+            &db_path,
+            Durability::Relaxed,
+            tuning_for_ram(1024),
+        );
         assert!(result.is_err());
     }
 
@@ -1765,7 +1789,7 @@ mod tests {
             let db_path = PathBuf::from(create_temp_dir()).join("database.db");
             Arc::new(SqlitePool {
                 path: db_path,
-                durability: false,
+                durability: Durability::Relaxed,
                 tuning: tuning_for_ram(1024),
                 max_size: 1,
                 idle_keep: 1,
@@ -1825,7 +1849,7 @@ mod tests {
         let db_path = PathBuf::from(create_temp_dir()).join("database.db");
         let pool = Arc::new(SqlitePool {
             path: db_path,
-            durability: false,
+            durability: Durability::Relaxed,
             tuning: tuning_for_ram(1024),
             max_size: 1,
             idle_keep: 1,
@@ -1859,7 +1883,7 @@ mod tests {
         let db_path = PathBuf::from(create_temp_dir()).join("database.db");
         let pool = Arc::new(SqlitePool {
             path: db_path,
-            durability: false,
+            durability: Durability::Relaxed,
             tuning: tuning_for_ram(1024),
             max_size: 4,
             idle_keep: 1,
@@ -1888,9 +1912,12 @@ mod tests {
             cpu_cores: 8,
         };
         let temp = create_temp_dir();
-        let manager =
-            SqliteManager::new(&PathBuf::from(temp), false, Some(spec))
-                .unwrap();
+        let manager = SqliteManager::new(
+            &PathBuf::from(temp),
+            Durability::Relaxed,
+            Some(spec),
+        )
+        .unwrap();
         let state = manager.pool.state.lock().unwrap();
         assert_eq!(state.total, 0);
         drop(state);
@@ -2132,6 +2159,45 @@ mod sqlite_code_tests {
         ) {
             Error::Store { code, .. } => assert_eq!(code, None),
             other => panic!("expected Store error, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod prefix_validation_tests {
+    use super::*;
+
+    #[test]
+    fn test_dotted_prefix_rejected() {
+        let manager = SqliteManager::default();
+        assert!(manager.create_collection("c", "a.b").is_err());
+        assert!(manager.create_state("s", "a.b").is_err());
+        assert!(manager.create_collection("c", "").is_err());
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+    use ave_actors_store::database::Durability;
+
+    #[test]
+    fn test_durability_maps_to_synchronous_mode() {
+        for (durability, expected) in
+            [(Durability::Sync, 2i64), (Durability::Relaxed, 1i64)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let conn = open_with_tuning(
+                dir.path().join("database.db"),
+                durability,
+                tuning_for_ram(1024),
+            )
+            .unwrap();
+            // PRAGMA synchronous reports 2=FULL, 1=NORMAL.
+            let mode: i64 = conn
+                .query_row("PRAGMA synchronous;", (), |row| row.get(0))
+                .unwrap();
+            assert_eq!(mode, expected, "{durability:?} maps correctly");
         }
     }
 }

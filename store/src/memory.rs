@@ -30,6 +30,7 @@ impl MemoryManager {
         name: &str,
         prefix: &str,
     ) -> Result<MemoryStore, Error> {
+        crate::database::validate_key_prefix(prefix)?;
         let mut data_lock = self.data.write().map_err(|e| Error::Store {
             source: None,
             code: None,
@@ -434,6 +435,13 @@ mod tests {
     use crate::test_store_trait;
     test_store_trait! {
         unit_test_memory_manager:crate::memory::MemoryManager:MemoryStore
+    }
+
+    #[test]
+    fn test_dotted_prefix_rejected() {
+        let manager = MemoryManager::default();
+        assert!(manager.create_collection("c", "a.b").is_err());
+        assert!(manager.create_state("s", "a.b").is_err());
     }
 
     #[test]

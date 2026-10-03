@@ -27,16 +27,16 @@ ave-actors-store = "0.6.0"
 use ave_actors_rocksdb::RocksDbManager;
 use ave_actors_store::{
     config::{MachineProfile, MachineSpec},
-    database::{Collection, DbManager, State},
+    database::{Collection, DbManager, Durability, State},
 };
 
 fn main() -> Result<(), ave_actors_store::Error> {
     let path = std::env::temp_dir().join("ave-actors-rocksdb-docs");
     let manager = RocksDbManager::new(
         &path,
-        true,
+        Durability::Relaxed,
         Some(MachineSpec::Profile(MachineProfile::Medium)),
-    )?;
+    )?;;
 
     let mut events = manager.create_collection("events", "actor-1")?;
     Collection::put(&mut events, "00000000000000000001", b"event-1")?;

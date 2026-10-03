@@ -4,7 +4,7 @@ use ave_actors_rocksdb::RocksDbManager;
 use ave_actors_store::{
     Error,
     config::MachineSpec,
-    database::{Collection, DbManager, State},
+    database::{Collection, DbManager, Durability, State},
 };
 use std::os::unix::fs::PermissionsExt;
 use tempfile::tempdir;
@@ -13,7 +13,8 @@ use tempfile::tempdir;
 fn test_rocksdb_manager_edge_cases() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test");
-    let manager = RocksDbManager::new(&db_path, false, None).unwrap();
+    let manager =
+        RocksDbManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     // Test collection operations
     let mut collection = manager.create_collection("test", "prefix").unwrap();
@@ -45,7 +46,8 @@ fn test_rocksdb_manager_edge_cases() {
 fn test_rocksdb_state_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("state_test");
-    let manager = RocksDbManager::new(&db_path, false, None).unwrap();
+    let manager =
+        RocksDbManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     let mut state = manager.create_state("state", "prefix").unwrap();
 
@@ -74,7 +76,8 @@ fn test_rocksdb_state_operations() {
 fn test_rocksdb_iteration() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("iteration");
-    let manager = RocksDbManager::new(&db_path, false, None).unwrap();
+    let manager =
+        RocksDbManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     let mut collection = manager.create_collection("iter", "prefix").unwrap();
 
@@ -116,7 +119,8 @@ fn test_rocksdb_iteration() {
 fn test_rocksdb_purge() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("purge_test");
-    let manager = RocksDbManager::new(&db_path, false, None).unwrap();
+    let manager =
+        RocksDbManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     let mut collection = manager.create_collection("purge", "prefix").unwrap();
 
@@ -150,7 +154,8 @@ fn test_rocksdb_reopen_existing_cfs() {
     let db_path = temp_dir.path().join("reopen");
 
     {
-        let manager = RocksDbManager::new(&db_path, false, None).unwrap();
+        let manager =
+            RocksDbManager::new(&db_path, Durability::Relaxed, None).unwrap();
         let mut collection =
             manager.create_collection("events", "actor1").unwrap();
         Collection::put(&mut collection, "1", b"data1").unwrap();
@@ -159,7 +164,8 @@ fn test_rocksdb_reopen_existing_cfs() {
     }
 
     {
-        let manager = RocksDbManager::new(&db_path, false, None).unwrap();
+        let manager =
+            RocksDbManager::new(&db_path, Durability::Relaxed, None).unwrap();
         let collection = manager.create_collection("events", "actor1").unwrap();
         assert_eq!(Collection::get(&collection, "1").unwrap(), b"data1");
         let state = manager.create_state("snapshots", "actor1").unwrap();
@@ -171,7 +177,8 @@ fn test_rocksdb_reopen_existing_cfs() {
 fn test_rocksdb_strong_durability() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("durability");
-    let manager = RocksDbManager::new(&db_path, true, None).unwrap();
+    let manager =
+        RocksDbManager::new(&db_path, Durability::Sync, None).unwrap();
 
     let mut collection = manager.create_collection("c", "p").unwrap();
     Collection::put(&mut collection, "k", b"v").unwrap();
@@ -188,7 +195,8 @@ fn test_rocksdb_strong_durability() {
 fn test_rocksdb_collection_get_not_found() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("get_not_found");
-    let manager = RocksDbManager::new(&db_path, false, None).unwrap();
+    let manager =
+        RocksDbManager::new(&db_path, Durability::Relaxed, None).unwrap();
     let collection = manager.create_collection("c", "p").unwrap();
     assert!(matches!(
         Collection::get(&collection, "missing"),
@@ -200,7 +208,8 @@ fn test_rocksdb_collection_get_not_found() {
 fn test_rocksdb_state_purge() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("state_purge");
-    let manager = RocksDbManager::new(&db_path, false, None).unwrap();
+    let manager =
+        RocksDbManager::new(&db_path, Durability::Relaxed, None).unwrap();
     let mut state = manager.create_state("s", "p").unwrap();
 
     State::put(&mut state, b"data").unwrap();
@@ -217,7 +226,8 @@ fn test_rocksdb_state_purge() {
 fn test_rocksdb_collection_last_empty() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("last_empty");
-    let manager = RocksDbManager::new(&db_path, false, None).unwrap();
+    let manager =
+        RocksDbManager::new(&db_path, Durability::Relaxed, None).unwrap();
     let collection = manager.create_collection("c", "p").unwrap();
     assert_eq!(Collection::last(&collection).unwrap(), None);
 }
@@ -226,7 +236,8 @@ fn test_rocksdb_collection_last_empty() {
 fn test_rocksdb_iter_range_and_del_range() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("range");
-    let manager = RocksDbManager::new(&db_path, false, None).unwrap();
+    let manager =
+        RocksDbManager::new(&db_path, Durability::Relaxed, None).unwrap();
     let mut collection = manager.create_collection("c", "p").unwrap();
 
     Collection::put(&mut collection, "a", b"1").unwrap();
@@ -283,7 +294,8 @@ fn test_rocksdb_iter_range_and_del_range() {
 fn test_rocksdb_iterator_prefix_boundary() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("boundary");
-    let manager = RocksDbManager::new(&db_path, false, None).unwrap();
+    let manager =
+        RocksDbManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     let mut coll1 = manager.create_collection("c", "abc").unwrap();
     Collection::put(&mut coll1, "a", b"1").unwrap();
@@ -328,7 +340,8 @@ fn test_rocksdb_iterator_prefix_boundary() {
 fn test_rocksdb_range_iterator_boundary() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("range_boundary");
-    let manager = RocksDbManager::new(&db_path, false, None).unwrap();
+    let manager =
+        RocksDbManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     let mut coll = manager.create_collection("c", "p").unwrap();
     Collection::put(&mut coll, "a", b"1").unwrap();
@@ -378,7 +391,9 @@ fn test_rocksdb_machine_specs() {
             ram_mb: ram,
             cpu_cores: cores,
         };
-        let manager = RocksDbManager::new(&db_path, false, Some(spec)).unwrap();
+        let manager =
+            RocksDbManager::new(&db_path, Durability::Relaxed, Some(spec))
+                .unwrap();
         let mut coll = manager.create_collection("c", "p").unwrap();
         Collection::put(&mut coll, "k", b"v").unwrap();
     }
@@ -395,7 +410,7 @@ fn test_rocksdb_new_dir_creation_fails() {
     std::fs::set_permissions(&parent, perms).unwrap();
 
     let db_path = parent.join("db");
-    let result = RocksDbManager::new(&db_path, false, None);
+    let result = RocksDbManager::new(&db_path, Durability::Relaxed, None);
     assert!(result.is_err());
 
     // Restore permissions so tempdir cleanup works.
@@ -408,6 +423,6 @@ fn test_rocksdb_new_dir_creation_fails() {
 fn test_rocksdb_new_open_fails() {
     let temp_file = tempfile::NamedTempFile::new().unwrap();
     let path = temp_file.path().to_path_buf();
-    let result = RocksDbManager::new(&path, false, None);
+    let result = RocksDbManager::new(&path, Durability::Relaxed, None);
     assert!(result.is_err());
 }
