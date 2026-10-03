@@ -425,23 +425,19 @@ mod tests {
     fn test_state_del_not_found() {
         let manager = MemoryManager::default();
         let mut state = manager.create_state("test", "test").unwrap();
-        assert_eq!(
+        assert!(matches!(
             State::del(&mut state),
-            Err(Error::EntryNotFound {
-                key: "test".to_owned()
-            })
-        );
+            Err(Error::EntryNotFound { key }) if key == "test"
+        ));
     }
 
     #[test]
     fn test_collection_del_not_found() {
         let manager = MemoryManager::default();
         let mut collection = manager.create_collection("test", "test").unwrap();
-        assert_eq!(
+        assert!(matches!(
             Collection::del(&mut collection, "missing"),
-            Err(Error::EntryNotFound {
-                key: "test.missing".to_owned()
-            })
-        );
+            Err(Error::EntryNotFound { key }) if key == "test.missing"
+        ));
     }
 }

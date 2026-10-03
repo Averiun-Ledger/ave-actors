@@ -35,12 +35,10 @@ fn test_rocksdb_manager_edge_cases() {
     assert!(result.is_err());
 
     let result = Collection::del(&mut collection, "non-existent");
-    assert_eq!(
+    assert!(matches!(
         result,
-        Err(Error::EntryNotFound {
-            key: "prefix.non-existent".to_owned(),
-        })
-    );
+        Err(Error::EntryNotFound { key }) if key == "prefix.non-existent"
+    ));
 }
 
 #[test]
@@ -66,12 +64,10 @@ fn test_rocksdb_state_operations() {
     assert!(result.is_err());
 
     let result = State::del(&mut state);
-    assert_eq!(
+    assert!(matches!(
         result,
-        Err(Error::EntryNotFound {
-            key: "prefix".to_owned(),
-        })
-    );
+        Err(Error::EntryNotFound { key }) if key == "prefix"
+    ));
 }
 
 #[test]
@@ -194,12 +190,10 @@ fn test_rocksdb_collection_get_not_found() {
     let db_path = temp_dir.path().join("get_not_found");
     let manager = RocksDbManager::new(&db_path, false, None).unwrap();
     let collection = manager.create_collection("c", "p").unwrap();
-    assert_eq!(
+    assert!(matches!(
         Collection::get(&collection, "missing"),
-        Err(Error::EntryNotFound {
-            key: "p.missing".to_owned(),
-        })
-    );
+        Err(Error::EntryNotFound { key }) if key == "p.missing"
+    ));
 }
 
 #[test]

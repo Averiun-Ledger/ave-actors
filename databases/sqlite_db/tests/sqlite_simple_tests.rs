@@ -34,12 +34,10 @@ fn test_sqlite_manager_edge_cases() {
     assert!(result.is_err());
 
     let result = Collection::del(&mut collection, "non-existent");
-    assert_eq!(
+    assert!(matches!(
         result,
-        Err(Error::EntryNotFound {
-            key: "prefix.non-existent".to_owned(),
-        })
-    );
+        Err(Error::EntryNotFound { key }) if key == "prefix.non-existent"
+    ));
 }
 
 #[test]
@@ -52,12 +50,10 @@ fn test_sqlite_state_operations() {
 
     // Test get empty state
     let result = State::get(&state);
-    assert_eq!(
+    assert!(matches!(
         result,
-        Err(Error::EntryNotFound {
-            key: "prefix".to_owned(),
-        })
-    );
+        Err(Error::EntryNotFound { key }) if key == "prefix"
+    ));
 
     // Test put/get
     State::put(&mut state, b"state_data").unwrap();
@@ -67,20 +63,16 @@ fn test_sqlite_state_operations() {
     // Test delete
     State::del(&mut state).unwrap();
     let result = State::get(&state);
-    assert_eq!(
+    assert!(matches!(
         result,
-        Err(Error::EntryNotFound {
-            key: "prefix".to_owned(),
-        })
-    );
+        Err(Error::EntryNotFound { key }) if key == "prefix"
+    ));
 
     let result = State::del(&mut state);
-    assert_eq!(
+    assert!(matches!(
         result,
-        Err(Error::EntryNotFound {
-            key: "prefix".to_owned(),
-        })
-    );
+        Err(Error::EntryNotFound { key }) if key == "prefix"
+    ));
 }
 
 #[test]
@@ -159,12 +151,10 @@ fn test_sqlite_collection_get_reports_requested_key() {
     let collection = manager.create_collection("test", "prefix").unwrap();
     let result = Collection::get(&collection, "missing");
 
-    assert_eq!(
+    assert!(matches!(
         result,
-        Err(Error::EntryNotFound {
-            key: "prefix.missing".to_owned(),
-        })
-    );
+        Err(Error::EntryNotFound { key }) if key == "prefix.missing"
+    ));
 }
 
 #[test]

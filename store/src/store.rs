@@ -422,7 +422,31 @@ struct StateSnapshot<S> {
     counter: u64,
 }
 
+/// Maximum length of an explicit store name or prefix.
+///
+/// The derived default prefix is already bounded (`MAX_DERIVED_PREFIX_LEN`);
+/// explicit values get the same ceiling so backend identifiers (SQLite table
+/// names, RocksDB column families) cannot grow without bound.
+const MAX_EXPLICIT_NAME_LEN: usize = 200;
+
 fn validate_store_name(name: &str) -> Result<(), Error> {
+    if name.is_empty() {
+        return Err(Error::InvalidConfiguration {
+            component: "store name".to_owned(),
+            reason: "store name must not be empty".to_owned(),
+        });
+    }
+
+    if name.len() > MAX_EXPLICIT_NAME_LEN {
+        return Err(Error::InvalidConfiguration {
+            component: "store name".to_owned(),
+            reason: format!(
+                "store name exceeds the maximum length {}",
+                MAX_EXPLICIT_NAME_LEN
+            ),
+        });
+    }
+
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return Err(Error::InvalidConfiguration {
@@ -451,6 +475,16 @@ fn validate_store_prefix(prefix: &str) -> Result<(), Error> {
         return Err(Error::InvalidConfiguration {
             component: "store prefix".to_owned(),
             reason: "store prefix must not be empty".to_owned(),
+        });
+    }
+
+    if prefix.len() > MAX_EXPLICIT_NAME_LEN {
+        return Err(Error::InvalidConfiguration {
+            component: "store prefix".to_owned(),
+            reason: format!(
+                "store prefix exceeds the maximum length {}",
+                MAX_EXPLICIT_NAME_LEN
+            ),
         });
     }
 
@@ -842,7 +876,9 @@ where
     where
         E: Event + BorshSerialize + BorshDeserialize,
     {
-        debug!("Persisting event: {:?}", event);
+        // Never log the event payload: domain events may carry PII or
+        // secrets, which must not land in `RUST_LOG=debug` output.
+        debug!(event_type = std::any::type_name::<E>(), "Persisting event");
 
         self.check_fence(StoreOperation::Persist)?;
 
@@ -1691,7 +1727,10 @@ where
                 #[cfg(feature = "prometheus")]
                 self.record_pending_events();
 
-                debug!("Persisted full event: {:?}", event);
+                debug!(
+                    event_type = std::any::type_name::<A::Event>(),
+                    "Persisted full event"
+                );
                 Ok(StoreResponse::Persisted)
             }
             StoreCommand::PersistLight(state) => {
@@ -1780,7 +1819,10 @@ where
                 let event = result.map_err(|e| {
                     actor_store_error(StoreOperation::LastEvent, e)
                 })?;
-                debug!("Last event: {:?}", event);
+                debug!(
+                    event_type = std::any::type_name::<A::Event>(),
+                    "Last event fetched"
+                );
                 Ok(StoreResponse::LastEvent(event))
             }
             StoreCommand::Purge => {
@@ -1842,6 +1884,23 @@ mod tests {
     use test_log::test;
     use tokio_util::sync::CancellationToken;
     use tracing::info_span;
+
+    #[test]
+    fn test_store_name_and_prefix_reject_overlong_values() {
+        let long_name = "a".repeat(201);
+        assert!(matches!(
+            validate_store_name(&long_name),
+            Err(Error::InvalidConfiguration { .. })
+        ));
+        assert!(validate_store_name(&"a".repeat(200)).is_ok());
+
+        let long_prefix = "b".repeat(201);
+        assert!(matches!(
+            validate_store_prefix(&long_prefix),
+            Err(Error::InvalidConfiguration { .. })
+        ));
+        assert!(validate_store_prefix(&"b".repeat(200)).is_ok());
+    }
 
     #[derive(
         Debug,
@@ -2536,9 +2595,8 @@ mod tests {
             .persist_light_state(&CounterState { value: 5 })
             .unwrap();
 
-        assert_eq!(
-            store.events.iter(false).unwrap().next(),
-            None,
+        assert!(
+            store.events.iter(false).unwrap().next().is_none(),
             "LightPersistence must not store events"
         );
 

@@ -316,7 +316,19 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
     /// Marks a timer as cancelled. The entry will be discarded when it reaches
     /// the top of the heap.
     pub(crate) fn cancel(&self, key: TimerKey) {
-        self.lock_cancelled().insert(key);
+        // Heap before cancelled: every other site takes them in this order.
+        let heap = self.lock_heap();
+        let mut cancelled = self.lock_cancelled();
+        cancelled.insert(key);
+        // Keys for already-fired timers never reach the top again, so
+        // without this the set would grow without bound on churn.
+        if cancelled.len() > 1024 && cancelled.len() > heap.len() * 2 {
+            let live: HashSet<TimerKey> =
+                heap.iter().map(|entry| entry.key).collect();
+            cancelled.retain(|key| live.contains(key));
+        }
+        drop(heap);
+        drop(cancelled);
         self.notify.notify_one();
     }
 
@@ -452,5 +464,68 @@ async fn fire_expired_timers<A: Actor + Handler<A>>(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ActorSystem;
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Clone)]
+    struct TimerTestActor;
+
+    impl crate::NotPersistentActor for TimerTestActor {}
+
+    #[async_trait::async_trait]
+    impl crate::actor::Actor for TimerTestActor {
+        type Message = ();
+        type Response = ();
+        type Event = ();
+        type SinkEvent = ();
+        type ChildError = crate::Error;
+        type ChildFault = crate::Error;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            tracing::info_span!("TimerTestActor", id = %id)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::actor::Handler<Self> for TimerTestActor {
+        async fn handle_message(
+            &mut self,
+            _sender: crate::ActorPath,
+            _msg: (),
+            _ctx: &mut crate::ActorContext<Self>,
+        ) -> Result<(), crate::Error> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_set_stays_bounded_without_heap_entries() {
+        let (system, _runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let path = crate::ActorPath::from("/user/timers");
+        let scheduler =
+            TimerScheduler::<TimerTestActor>::new(system, path, 100000);
+
+        // Cancel keys that were never scheduled: without sweeping, all
+        // 5000 would accumulate forever; the sweep bounds the set.
+        for id in 0..5000u64 {
+            scheduler.cancel(TimerKey::new(id));
+        }
+
+        assert!(
+            scheduler.lock_cancelled().len() <= 1024,
+            "stale cancelled keys must be swept"
+        );
     }
 }

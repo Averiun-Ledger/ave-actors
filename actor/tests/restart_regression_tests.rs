@@ -1431,3 +1431,65 @@ async fn test_pre_start_panic_cleans_up_children() {
 
     system.stop_system();
 }
+
+#[derive(Clone)]
+struct PanicStopActor;
+
+impl NotPersistentActor for PanicStopActor {}
+
+#[async_trait]
+impl Actor for PanicStopActor {
+    type Message = StartMessage;
+    type Response = StartResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("PanicStopActor", id = %id)
+    }
+
+    async fn pre_stop(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        panic!("intentional pre_stop panic");
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for PanicStopActor {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: StartMessage,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<StartResponse, Error> {
+        Ok(StartResponse::Pong)
+    }
+}
+
+#[test(tokio::test)]
+async fn test_pre_stop_panic_does_not_hang_shutdown() {
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    let actor_ref = system
+        .create_root_actor("panic-stop", PanicStopActor)
+        .await
+        .unwrap();
+
+    // A panicking pre_stop must not kill the shutdown path: the stop
+    // still completes.
+    tokio::time::timeout(Duration::from_secs(5), actor_ref.ask_stop())
+        .await
+        .expect("shutdown must survive a pre_stop panic")
+        .expect("ask_stop must succeed");
+
+    system.stop_system();
+}

@@ -6,7 +6,11 @@ use crate::ActorPath;
 use thiserror::Error;
 
 /// Error type for the actor system.
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
+///
+/// Equality is intentionally not implemented: variants carry free-text
+/// reasons, so structural equality would be fragile. Match on variants
+/// with `matches!` instead.
+#[derive(Clone, Debug, Error)]
 pub enum Error {
     // ===== Actor Lifecycle Errors =====
     /// Actor already exists at the specified path.

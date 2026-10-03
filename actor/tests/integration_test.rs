@@ -117,12 +117,11 @@ impl Handler<Self> for TestActor {
         error: Error,
         ctx: &mut ActorContext<Self>,
     ) {
-        assert_eq!(
+        assert!(matches!(
             error,
-            Error::Functional {
-                description: "Value is too high".to_owned()
-            }
-        );
+            Error::Functional { ref description }
+                if description == "Value is too high"
+        ));
         ctx.publish_all(TestEvent(0));
     }
 
@@ -132,12 +131,11 @@ impl Handler<Self> for TestActor {
         error: Error,
         ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
-        assert_eq!(
+        assert!(matches!(
             error,
-            Error::Functional {
-                description: "Value produces a fault".to_owned()
-            }
-        );
+            Error::Functional { ref description }
+                if description == "Value produces a fault"
+        ));
         ctx.publish_all(TestEvent(100));
         ChildAction::Stop
     }

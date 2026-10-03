@@ -412,3 +412,104 @@ async fn detailed_metrics_add_path_series() -> Result<(), Error> {
     );
     Ok(())
 }
+
+#[derive(Clone)]
+struct DetailedDropActor {
+    started: std::sync::Arc<Notify>,
+    release: std::sync::Arc<Notify>,
+}
+
+impl NotPersistentActor for DetailedDropActor {}
+
+#[async_trait]
+impl Actor for DetailedDropActor {
+    type Message = DropMsg;
+    type Response = ();
+    type Event = ();
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn mailbox_capacity() -> usize {
+        1
+    }
+
+    fn mailbox_overflow_strategy() -> OverflowStrategy {
+        OverflowStrategy::DropNewest
+    }
+
+    fn detailed_metrics() -> bool {
+        true
+    }
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("DetailedDropActor", id = %id)
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for DetailedDropActor {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: DropMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        if matches!(msg, DropMsg::Block) {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
+#[test(tokio::test)]
+async fn mailbox_detail_metric_is_emitted_when_opted_in() -> Result<(), Error> {
+    let mut registry = Registry::default();
+    let (system, mut runner) = ActorSystem::create_with_registry(
+        CancellationToken::new(),
+        CancellationToken::new(),
+        &mut registry,
+    );
+    let runner_handle = tokio::spawn(async move { runner.run().await });
+
+    let started = std::sync::Arc::new(Notify::new());
+    let release = std::sync::Arc::new(Notify::new());
+    let actor = system
+        .create_root_actor::<DetailedDropActor, _>(
+            "detailed-dropper",
+            DetailedDropActor {
+                started: started.clone(),
+                release: release.clone(),
+            },
+        )
+        .await?;
+
+    actor.tell(DropMsg::Block).await?;
+    started.notified().await;
+    for _ in 0..50 {
+        let _ = actor.tell(DropMsg::Process).await;
+    }
+    release.notify_one();
+
+    system.stop_system();
+    join_runner(runner_handle).await?;
+
+    let body = encode_registry(&registry);
+    assert!(
+        body.contains("ave_actors_actor_mailbox_dropped_total"),
+        "expected aggregate drops: {body}"
+    );
+    assert!(
+        body.contains("ave_actors_actor_mailbox_dropped_detail_total"),
+        "expected opt-in detail drops: {body}"
+    );
+    assert!(
+        body.contains("/user/detailed-dropper"),
+        "expected dropper path in detail series: {body}"
+    );
+    Ok(())
+}

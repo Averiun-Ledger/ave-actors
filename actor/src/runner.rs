@@ -1368,14 +1368,14 @@ mod tests {
         // already closed when this returns.
         actor_ref.ask_stop().await.unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             actor_ref.tell(DrainMsg::Normal).await,
             Err(Error::ActorStopped)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             actor_ref.ask(DrainMsg::Normal).await,
             Err(Error::ActorStopped)
-        );
+        ));
     }
 
     /// During shutdown drain: critical messages are processed, non-critical ask
@@ -1432,7 +1432,10 @@ mod tests {
         let normal_result = normal_join.await.unwrap();
         let critical_result = critical_join.await.unwrap();
 
-        assert_eq!(normal_result, Err(Error::ActorStopped));
+        assert!(
+            matches!(normal_result, Err(Error::ActorStopped)),
+            "normal message should be rejected: {normal_result:?}"
+        );
         assert!(
             critical_result.is_ok(),
             "critical message should be processed: {critical_result:?}"
@@ -1486,7 +1489,10 @@ mod tests {
         // mailbox_drain_timeout = 50ms, SlowCritical handler sleeps 300ms
         // -> timeout fires
         let result = slow_join.await.unwrap();
-        assert_eq!(result, Err(Error::ActorStopped));
+        assert!(
+            matches!(result, Err(Error::ActorStopped)),
+            "expected ActorStopped, got {result:?}"
+        );
     }
 
     // Actor that always fails pre_start with Retry strategy (1 retry).

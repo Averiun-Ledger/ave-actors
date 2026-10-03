@@ -92,7 +92,11 @@ impl fmt::Display for StoreOperation {
 }
 
 /// Error type for the store system.
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
+///
+/// Equality is intentionally not implemented: variants carry free-text
+/// reasons, so structural equality would be fragile. Match on variants
+/// with `matches!` instead.
+#[derive(Clone, Debug, Error)]
 pub enum Error {
     /// The store could not be created or initialized.
     ///

@@ -303,10 +303,10 @@ async fn test_stress_concurrent_stop_requests() {
 
     let path = ActorPath::from("/user/stop-stress");
     assert!(system.get_actor::<StressActor>(&path).await.is_err());
-    assert_eq!(
+    assert!(matches!(
         actor_ref.ask(StressMessage::Ping).await,
         Err(Error::ActorStopped)
-    );
+    ));
 
     system.stop_system();
     let shutdown = tokio::time::timeout(Duration::from_secs(5), runner_handle)
@@ -363,8 +363,10 @@ async fn test_stress_concurrent_fail_restarts_and_recovers() {
     let path = ActorPath::from("/user/fail-stress/stress_child");
     loop {
         if system.get_actor::<StressActor>(&path).await.is_ok()
-            && child_ref.ask(StressMessage::Ping).await
-                == Ok(StressResponse::Ack)
+            && matches!(
+                child_ref.ask(StressMessage::Ping).await,
+                Ok(StressResponse::Ack)
+            )
         {
             break;
         }

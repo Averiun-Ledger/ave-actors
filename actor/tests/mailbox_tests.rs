@@ -339,11 +339,11 @@ async fn test_fail_returns_mailbox_full() -> Result<(), Error> {
 
     // The next tell must fail immediately with MailboxFull.
     let result = actor_ref.tell(BoundMsg::Process).await;
-    assert_eq!(result, Err(Error::MailboxFull));
+    assert!(matches!(result, Err(Error::MailboxFull)));
 
     // ask should also fail with MailboxFull instead of blocking.
     let ask_result = actor_ref.ask(BoundMsg::GetCount).await;
-    assert_eq!(ask_result, Err(Error::MailboxFull));
+    assert!(matches!(ask_result, Err(Error::MailboxFull)));
 
     release.notify_one();
 

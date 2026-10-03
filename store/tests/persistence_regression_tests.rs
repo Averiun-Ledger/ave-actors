@@ -539,12 +539,10 @@ fn test_get_by_range_reports_requested_missing_key() {
     collection.put("b", b"2").unwrap();
 
     let result = collection.get_by_range(Some("missing"), 1);
-    assert_eq!(
+    assert!(matches!(
         result,
-        Err(StoreError::EntryNotFound {
-            key: "missing".to_owned(),
-        })
-    );
+        Err(StoreError::EntryNotFound { key }) if key == "missing"
+    ));
 }
 
 #[test]

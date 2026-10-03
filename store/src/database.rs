@@ -329,12 +329,10 @@ macro_rules! test_store_trait {
                     manager.create_collection("test", "test").unwrap();
                 Collection::put(&mut store, "key", b"value").unwrap();
                 Collection::del(&mut store, "key").unwrap();
-                assert_eq!(
+                assert!(matches!(
                     Collection::get(&store, "key"),
-                    Err(Error::EntryNotFound {
-                        key: "test.key".to_owned()
-                    })
-                );
+                    Err(Error::EntryNotFound { key }) if key == "test.key"
+                ));
                 assert!(manager.stop().is_ok())
             }
 
@@ -345,12 +343,10 @@ macro_rules! test_store_trait {
                     manager.create_state("test", "test").unwrap();
                 State::put(&mut store, b"value").unwrap();
                 State::del(&mut store).unwrap();
-                assert_eq!(
+                assert!(matches!(
                     State::get(&store),
-                    Err(Error::EntryNotFound {
-                        key: "test".to_owned()
-                    })
-                );
+                    Err(Error::EntryNotFound { key }) if key == "test"
+                ));
                 assert!(manager.stop().is_ok())
             }
 
@@ -494,22 +490,15 @@ macro_rules! test_store_trait {
                 Collection::put(&mut store, "key2", b"value2").unwrap();
                 Collection::put(&mut store, "key3", b"value3").unwrap();
                 Collection::del_range(&mut store, "key1", "key2").unwrap();
-                assert_eq!(
+                assert!(matches!(
                     Collection::get(&store, "key1"),
-                    Err(Error::EntryNotFound {
-                        key: "test.key1".to_owned()
-                    })
-                );
-                assert_eq!(
+                    Err(Error::EntryNotFound { key }) if key == "test.key1"
+                ));
+                assert!(matches!(
                     Collection::get(&store, "key2"),
-                    Err(Error::EntryNotFound {
-                        key: "test.key2".to_owned()
-                    })
-                );
-                assert_eq!(
-                    Collection::get(&store, "key3"),
-                    Ok(b"value3".to_vec())
-                );
+                    Err(Error::EntryNotFound { key }) if key == "test.key2"
+                ));
+                assert_eq!(Collection::get(&store, "key3").unwrap(), b"value3".to_vec());
                 assert!(manager.stop().is_ok())
             }
 
@@ -521,37 +510,22 @@ macro_rules! test_store_trait {
                 Collection::put(&mut store, "key1", b"value1").unwrap();
                 Collection::put(&mut store, "key2", b"value2").unwrap();
                 Collection::put(&mut store, "key3", b"value3").unwrap();
-                assert_eq!(
-                    Collection::get(&store, "key1"),
-                    Ok(b"value1".to_vec())
-                );
-                assert_eq!(
-                    Collection::get(&store, "key2"),
-                    Ok(b"value2".to_vec())
-                );
-                assert_eq!(
-                    Collection::get(&store, "key3"),
-                    Ok(b"value3".to_vec())
-                );
+                assert_eq!(Collection::get(&store, "key1").unwrap(), b"value1".to_vec());
+                assert_eq!(Collection::get(&store, "key2").unwrap(), b"value2".to_vec());
+                assert_eq!(Collection::get(&store, "key3").unwrap(), b"value3".to_vec());
                 Collection::purge(&mut store).unwrap();
-                assert_eq!(
+                assert!(matches!(
                     Collection::get(&store, "key1"),
-                    Err(Error::EntryNotFound {
-                        key: "test.key1".to_owned()
-                    })
-                );
-                assert_eq!(
+                    Err(Error::EntryNotFound { key }) if key == "test.key1"
+                ));
+                assert!(matches!(
                     Collection::get(&store, "key2"),
-                    Err(Error::EntryNotFound {
-                        key: "test.key2".to_owned()
-                    })
-                );
-                assert_eq!(
+                    Err(Error::EntryNotFound { key }) if key == "test.key2"
+                ));
+                assert!(matches!(
                     Collection::get(&store, "key3"),
-                    Err(Error::EntryNotFound {
-                        key: "test.key3".to_owned()
-                    })
-                );
+                    Err(Error::EntryNotFound { key }) if key == "test.key3"
+                ));
                 assert!(manager.stop().is_ok())
             }
 
@@ -561,24 +535,20 @@ macro_rules! test_store_trait {
                 let mut store: $type2 =
                     manager.create_state("test", "test").unwrap();
                 State::put(&mut store, b"value1").unwrap();
-                assert_eq!(State::get(&store), Ok(b"value1".to_vec()));
+                assert_eq!(State::get(&store).unwrap(), b"value1".to_vec());
                 State::purge(&mut store).unwrap();
-                assert_eq!(
+                assert!(matches!(
                     State::get(&store),
-                    Err(Error::EntryNotFound {
-                        key: "test".to_owned()
-                    })
-                );
+                    Err(Error::EntryNotFound { key }) if key == "test"
+                ));
 
                 State::put(&mut store, b"value2").unwrap();
-                assert_eq!(State::get(&store), Ok(b"value2".to_vec()));
+                assert_eq!(State::get(&store).unwrap(), b"value2".to_vec());
                 State::purge(&mut store).unwrap();
-                assert_eq!(
+                assert!(matches!(
                     State::get(&store),
-                    Err(Error::EntryNotFound {
-                        key: "test".to_owned()
-                    })
-                );
+                    Err(Error::EntryNotFound { key }) if key == "test"
+                ));
                 assert!(manager.stop().is_ok())
             }
         }
@@ -704,12 +674,10 @@ mod tests {
         let mock = GetByRangeMock {
             items: vec![("a".to_string(), b"1".to_vec())],
         };
-        assert_eq!(
+        assert!(matches!(
             mock.get_by_range(Some("z"), 1),
-            Err(Error::EntryNotFound {
-                key: "z".to_string()
-            })
-        );
+            Err(Error::EntryNotFound { key }) if key == "z"
+        ));
     }
 
     #[test]
