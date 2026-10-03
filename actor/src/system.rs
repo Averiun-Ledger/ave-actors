@@ -3,6 +3,7 @@
 use crate::{
     Actor, ActorPath, ActorRef, Error, Handler,
     runner::{ActorRunner, StopHandle, StopSender, StopSignal},
+    selection::ActorSelection,
 };
 
 use tokio::sync::{RwLock, broadcast, oneshot};
@@ -218,6 +219,11 @@ pub struct SystemRef {
     /// Inverse index: for each target actor path, the list of watchers that
     /// should receive a termination notification.
     watchers: Arc<DashMap<ActorPath, Vec<WatchEntry>>>,
+    /// Global name registry: operator-chosen names (`"pagos"`) pointing at
+    /// live actor paths. Names are unique; re-registering after a restart
+    /// re-points the name. Stale entries are pruned lazily on resolve and
+    /// eagerly when actors are removed.
+    names: Arc<DashMap<String, ActorPath>>,
 
     /// System configuration validated at creation time.
     config: ActorSystemConfig,
@@ -319,6 +325,7 @@ impl SystemRef {
                 stop_senders: Arc::new(DashMap::new()),
                 system_event_sender,
                 watchers,
+                names: Arc::new(DashMap::new()),
                 config,
                 shutting_down,
                 #[cfg(feature = "prometheus")]
@@ -547,6 +554,88 @@ impl SystemRef {
             self.deindex_actor(path);
         }
         self.stop_senders.remove(path);
+        // Eagerly drop names pointing at the terminated actor so a later
+        // re-registration (e.g. after restart) never collides.
+        self.names.retain(|_, registered| registered != path);
+    }
+
+    /// Validates a registry name: same charset as path segments plus a
+    /// 256-character cap, so names stay backend- and log-safe.
+    fn validate_registry_name(name: &str) -> Result<(), Error> {
+        ActorPath::validate_segment(name).map_err(|_| {
+            Error::InvalidConfiguration {
+                component: "actor registry name".to_owned(),
+                reason: format!(
+                    "invalid registry name '{name}': allowed pattern is \
+                     [A-Za-z0-9_-] up to 256 chars"
+                ),
+            }
+        })
+    }
+
+    /// Registers `name` pointing at the actor's path.
+    ///
+    /// Names are process-global and unique: registering an already-taken
+    /// name fails with [`Error::Exists`] instead of hijacking it. Actors
+    /// that restart re-register their name (typically in `pre_start`),
+    /// which is why termination prunes stale entries automatically.
+    pub fn register_name(
+        &self,
+        name: impl Into<String>,
+        path: ActorPath,
+    ) -> Result<(), Error> {
+        let name = name.into();
+        Self::validate_registry_name(&name)?;
+        match self.names.entry(name.clone()) {
+            dashmap::Entry::Occupied(_) => Err(Error::Exists { path }),
+            dashmap::Entry::Vacant(entry) => {
+                entry.insert(path);
+                Ok(())
+            }
+        }
+    }
+
+    /// Removes the registry entry `name`. No-op when absent.
+    pub fn unregister_name(&self, name: &str) {
+        self.names.remove(name);
+    }
+
+    /// Selects the actor registered under `name`.
+    ///
+    /// Resolution is lazy: every send re-resolves through the live
+    /// registry, so restarts that re-register the name stay reachable.
+    pub fn select_name(&self, name: impl Into<String>) -> ActorSelection {
+        ActorSelection::by_name(self.clone(), name.into())
+    }
+
+    /// Selects all actors whose path matches `pattern` (`/user/pagos-*`).
+    ///
+    /// Each `/`-separated segment matches exactly or with `*` wildcards;
+    /// the segment count must agree. Like [`SystemRef::select_name`],
+    /// resolution happens on every send.
+    pub fn select_pattern(&self, pattern: impl Into<String>) -> ActorSelection {
+        ActorSelection::by_pattern(self.clone(), pattern.into())
+    }
+
+    /// Returns the paths of all live actors matching `pattern`.
+    pub(crate) fn matching_paths(&self, pattern: &str) -> Vec<ActorPath> {
+        self.actors
+            .iter()
+            .map(|entry| entry.key().clone())
+            .filter(|path| crate::selection::path_matches(pattern, path))
+            .collect()
+    }
+
+    /// Resolves a registry name to its current path, pruning the entry
+    /// when the actor is gone.
+    pub(crate) fn resolve_name(&self, name: &str) -> Option<ActorPath> {
+        let path = self.names.get(name).map(|entry| entry.clone())?;
+        if self.actors.contains_key(&path) {
+            Some(path)
+        } else {
+            self.names.remove(name);
+            None
+        }
     }
 
     /// Registers a watcher for the actor at `target_path`.

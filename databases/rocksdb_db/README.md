@@ -67,13 +67,13 @@ fn main() -> Result<(), ave_actors_store::Error> {
 
 ```text
 pub fn new(
-    path: &PathBuf,
-    durability: bool,
+    path: &Path,
+    durability: Durability,
     spec: Option<MachineSpec>,
 ) -> Result<RocksDbManager, Error>
 ```
 
-- Receives a database directory, a durability flag, and an optional machine sizing profile.
+- Receives a database directory, a durability level, and an optional machine sizing profile.
 - Creates the directory if needed and opens all existing column families.
 - Returns a configured `RocksDbManager`.
 - Returns `Error::CreateStore` if the directory or database cannot be created.
@@ -133,6 +133,6 @@ fn create_state(&self, name: &str, prefix: &str) -> Result<RocksDbStore, Error>
 - Collection keys are stored as `prefix.key`; state values use the exact `prefix` as their key. (The store's *derived* default prefix itself uses `__` separators, e.g. `user__a__counter`; the `.` here joins that prefix with the event key.)
 - Do not share one column family between prefixes where one is a prefix of another (`a` vs `a.b`): range operations alias them. The store validates prefixes; direct backend users must enforce this.
 - Iterators take no engine snapshot and set no upper bound: concurrent writes during iteration may show duplicates, gaps, or phantom keys. Only iterate quiescent stores (recovery) or tolerate it.
-- `durability = true` enables synchronous writes through RocksDB `WriteOptions::set_sync(true)`.
+- `Durability::Sync` enables synchronous writes through RocksDB `WriteOptions::set_sync(true)`.
 - `RocksDbManager::stop()` flushes the WAL and then flushes each column family memtable. The file lock is freed only after every `RocksDbStore` and iterator is dropped: drop all handles before reopening the same path.
 - Encryption covers values only; `prefix` and event keys stay in plaintext (actor namespaces and volumes are observable metadata).

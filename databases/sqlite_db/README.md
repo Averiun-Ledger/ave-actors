@@ -67,13 +67,13 @@ fn main() -> Result<(), ave_actors_store::Error> {
 
 ```text
 pub fn new(
-    path: &PathBuf,
-    durability: bool,
+    path: &Path,
+    durability: Durability,
     spec: Option<MachineSpec>,
 ) -> Result<SqliteManager, Error>
 ```
 
-- Receives a directory path, a durability flag, and an optional machine sizing profile.
+- Receives a directory path, a durability level, and an optional machine sizing profile.
 - Creates the directory if needed and opens `<path>/database.db`.
 - Returns a configured `SqliteManager`.
 - Returns `Error::CreateStore` if the directory or database cannot be created.

@@ -217,6 +217,46 @@ fn snapshot_every() -> Option<u64> {
 
 ---
 
+## Event and state versioning
+
+Stored records carry a version header (`EVENT_VERSION` / `STATE_VERSION`,
+default 1). When you change an event or state shape, bump the version and
+implement `upcast_event` / `upcast_state` to migrate older records on read:
+
+```rust,ignore
+const EVENT_VERSION: u32 = 2;
+
+fn upcast_event(version: u32, bytes: &[u8]) -> Result<Self::Event, ActorError> {
+    if version == 1 {
+        // v1 shape was a bare `i32` delta.
+        let delta: i32 = borsh::from_slice(bytes).map_err(|e| {
+            ActorError::InvalidConfiguration {
+                component: "persistent event".to_owned(),
+                reason: format!("cannot decode v1 event: {e}"),
+            }
+        })?;
+        return Ok(MyEvent::V2 { delta, tag: 0 });
+    }
+    // ...default handling for the current version
+}
+```
+
+Records written before versioning have no header and read as version 1, so
+upgrading the framework never invalidates existing data by itself. Unknown
+versions fail loudly instead of decoding fiction.
+
+---
+
+## Prefix fencing
+
+Two live `Store` instances must never share one backend prefix: each store
+writes a unique generation on startup and verifies it on every mutating
+write. A displaced (older) store fails fast with a fencing error instead of
+interleaving events or purging somebody else's log. Restarting an actor
+re-adopts the prefix normally, so rolling restarts keep working.
+
+---
+
 ## Encryption
 
 Pass an [`EncryptedKey`] to `start_store` to encrypt all events and snapshots at rest using XChaCha20-Poly1305:

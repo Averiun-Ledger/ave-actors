@@ -71,6 +71,11 @@ let body = setup_registry()?;
 
 No Prometheus server is embedded; the crate only exposes a `Registry` and helpers.
 
+Metrics aggregate by scope and actor type, never by instance: per-path
+series would grow without bound for ephemeral actors. Opt individual actor
+types into per-actor detail series with `Actor::detailed_metrics() -> true`
+(failures, mailbox and sink events, store pending counts).
+
 ## Quick start
 
 ```toml

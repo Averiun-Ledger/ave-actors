@@ -78,6 +78,11 @@ impl ActorPath {
         self.0.len()
     }
 
+    /// Returns the path segments in order.
+    pub(crate) fn segments(&self) -> &[String] {
+        &self.0
+    }
+
     /// Returns this path truncated to `level` segments, or `self` unchanged if `level` is out of range.
     pub fn at_level(&self, level: usize) -> Self {
         if level < 1 || level >= self.level() {

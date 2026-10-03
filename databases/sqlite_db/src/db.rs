@@ -576,6 +576,25 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
     }
 }
 
+/// Test-only switch forcing the next batch `COMMIT` to fail.
+///
+/// Compiled out of production builds (`#[cfg(test)]`): exercises the
+/// commit-failure rollback path deterministically.
+#[cfg(test)]
+static FAIL_COMMIT_FOR_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+fn fail_commit_for_tests() -> bool {
+    FAIL_COMMIT_FOR_TESTS.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Arms the one-shot commit failure above.
+#[cfg(test)]
+fn arm_fail_commit_for_tests() {
+    FAIL_COMMIT_FOR_TESTS.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Atomic multi-write handle over [`SqliteManager`]'s connection pool.
 ///
 /// Holds one pooled connection for the whole batch and wraps every op in a
@@ -669,21 +688,43 @@ impl BatchWrite for SqliteBatchWriter {
         })();
 
         match result {
-            Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
-                error!(error = %e, "Failed to commit batch transaction");
-                // A failed COMMIT may leave the transaction open: roll
-                // back so the connection never returns to the pool dirty
-                // (the next checkout would otherwise inherit uncommitted
-                // writes or hit "cannot start a transaction within a
-                // transaction").
-                if let Err(rollback_err) = conn.execute_batch("ROLLBACK") {
-                    error!(
-                        error = %rollback_err,
-                        "Failed to roll back after commit failure"
-                    );
+            Ok(()) => {
+                #[cfg(test)]
+                if fail_commit_for_tests() {
+                    // Deterministic COMMIT failure: roll back like a real
+                    // commit error would, then surface a genuine engine
+                    // error so the mapping below is also exercised.
+                    // Test-only; absent from production builds.
+                    let _ = conn.execute_batch("ROLLBACK");
+                    let engine_err: rusqlite::Error = conn
+                        .query_row(
+                            "SELECT * FROM __ave_missing_table__",
+                            (),
+                            |_| Ok(()),
+                        )
+                        .unwrap_err();
+                    return Err(sqlite_store_error(
+                        StoreOperation::ExecuteBatch,
+                        engine_err,
+                    ));
                 }
-                sqlite_store_error(StoreOperation::ExecuteBatch, e)
-            }),
+                conn.execute_batch("COMMIT").map_err(|e| {
+                    error!(error = %e, "Failed to commit batch transaction");
+                    // A failed COMMIT may leave the transaction open: roll
+                    // back so the connection never returns to the pool dirty
+                    // (the next checkout would otherwise inherit uncommitted
+                    // writes or hit "cannot start a transaction within a
+                    // transaction").
+                    if let Err(rollback_err) = conn.execute_batch("ROLLBACK") {
+                        error!(
+                            error = %rollback_err,
+                            "Failed to roll back after commit failure"
+                        );
+                    }
+                    sqlite_store_error(StoreOperation::ExecuteBatch, e)
+                })?;
+                Ok(())
+            }
             Err(batch_err) => {
                 if let Err(rollback_err) = conn.execute_batch("ROLLBACK") {
                     error!(
@@ -2210,5 +2251,55 @@ mod durability_tests {
                 .unwrap();
             assert_eq!(mode, expected, "{durability:?} maps correctly");
         }
+    }
+}
+
+#[cfg(test)]
+mod commit_failure_tests {
+    use super::*;
+    use ave_actors_store::database::BatchOp;
+
+    #[test]
+    fn test_commit_failure_rolls_back_and_recycles_cleanly() {
+        let manager = SqliteManager::default();
+        manager.create_collection("cb_events", "p").unwrap();
+        manager.create_state("cb_states", "p").unwrap();
+        let writer = manager.batch_writer().expect("sqlite supports batch");
+
+        arm_fail_commit_for_tests();
+        let result = writer.write_batch(
+            "p",
+            &[
+                BatchOp::PutEvent {
+                    collection: "cb_events",
+                    key: "00000000000000000000",
+                    data: b"event",
+                },
+                BatchOp::PutState {
+                    store: "cb_states",
+                    data: b"snapshot",
+                },
+            ],
+        );
+        assert!(result.is_err(), "armed commit failure must surface");
+
+        // Nothing applied, and the pooled connection was rolled back, so
+        // the very next batch on a (possibly reused) connection works.
+        let events = manager.create_collection("cb_events", "p").unwrap();
+        assert!(
+            Collection::get(&events, "00000000000000000000").is_err(),
+            "rolled-back event must not be visible"
+        );
+        writer
+            .write_batch(
+                "p",
+                &[BatchOp::PutState {
+                    store: "cb_states",
+                    data: b"snapshot",
+                }],
+            )
+            .expect("pool connection must be clean after rollback");
+        let states = manager.create_state("cb_states", "p").unwrap();
+        assert_eq!(State::get(&states).unwrap(), b"snapshot".to_vec());
     }
 }

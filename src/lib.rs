@@ -16,13 +16,14 @@
 //! skipped (0 tests, green) when their feature is off.
 
 pub use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ActorSystemConfig,
-    ChildAction, CustomIntervalStrategy, EncryptedKey, Error as ActorError,
-    Event, ExponentialBackoffStrategy, Handler, IntervalStrategy, IntoActor,
-    Message, NoIntervalStrategy, NotPersistentActor, OverflowStrategy,
-    ParentRef, Response, RetryActor, RetryMessage, RetryPolicy, RetryStrategy,
-    ShutdownReason, Sink, SinkEntry, Strategy, Subscriber, SupervisionStrategy,
-    SystemEvent, SystemRef, SystemRunner, TimerKey,
+    Actor, ActorContext, ActorPath, ActorRef, ActorSelection, ActorSystem,
+    ActorSystemConfig, ChildAction, CustomIntervalStrategy, EncryptedKey,
+    Error as ActorError, Event, ExponentialBackoffStrategy, Handler,
+    IntervalStrategy, IntoActor, Message, NoIntervalStrategy,
+    NotPersistentActor, OverflowStrategy, ParentRef, Response, RetryActor,
+    RetryMessage, RetryPolicy, RetryStrategy, ShutdownReason, Sink, SinkEntry,
+    Strategy, Subscriber, SupervisionStrategy, SystemEvent, SystemRef,
+    SystemRunner, TimerKey,
 };
 
 #[cfg(any(feature = "rocksdb", feature = "sqlite"))]

@@ -9,6 +9,7 @@ mod parent_ref;
 mod path;
 mod retries;
 mod runner;
+mod selection;
 mod sink;
 mod supervision;
 mod system;
@@ -27,6 +28,7 @@ pub use helpers::encrypted_key::EncryptedKey;
 pub use sink::{RetryPolicy, Sink, SinkEntry, Subscriber};
 
 pub use retries::{RetryActor, RetryMessage};
+pub use selection::ActorSelection;
 pub use supervision::{
     CustomIntervalStrategy, ExponentialBackoffStrategy, IntervalStrategy,
     NoIntervalStrategy, RetryStrategy, Strategy, SupervisionStrategy,
