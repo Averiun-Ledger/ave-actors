@@ -32,6 +32,7 @@ impl MemoryManager {
     ) -> Result<MemoryStore, Error> {
         let mut data_lock = self.data.write().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockManagerData,
             reason: e.to_string(),
         })?;
@@ -118,6 +119,7 @@ impl BatchWrite for MemoryBatchWriter {
         for store in &owned {
             guards.push(store.data.write().map_err(|e| Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::LockData,
                 reason: e.to_string(),
             })?);
@@ -143,6 +145,7 @@ impl BatchWrite for MemoryBatchWriter {
                         index.get(collection).copied().ok_or_else(|| {
                             Error::Store {
                                 source: None,
+                                code: None,
                                 operation: StoreOperation::LockData,
                                 reason:
                                     "batch store missing for collection op \
@@ -157,6 +160,7 @@ impl BatchWrite for MemoryBatchWriter {
                     let pos = index.get(store).copied().ok_or_else(|| {
                         Error::Store {
                             source: None,
+                            code: None,
                             operation: StoreOperation::LockData,
                             reason: "batch store missing for state op \
                                      (internal invariant broken)"
@@ -197,6 +201,7 @@ impl State for MemoryStore {
     fn get(&self) -> Result<Vec<u8>, Error> {
         let lock = self.data.read().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -216,6 +221,7 @@ impl State for MemoryStore {
             .write()
             .map_err(|e| Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::LockData,
                 reason: e.to_string(),
             })?
@@ -227,6 +233,7 @@ impl State for MemoryStore {
     fn del(&mut self) -> Result<(), Error> {
         let mut lock = self.data.write().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -243,6 +250,7 @@ impl State for MemoryStore {
             .write()
             .map_err(|e| Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::LockData,
                 reason: e.to_string(),
             })?
@@ -255,6 +263,7 @@ impl Collection for MemoryStore {
     fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
         let lock = self.data.read().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -277,6 +286,7 @@ impl Collection for MemoryStore {
         let key = format!("{}.{}", self.prefix, key);
         let lock = self.data.read().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -293,6 +303,7 @@ impl Collection for MemoryStore {
             .write()
             .map_err(|e| Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::LockData,
                 reason: e.to_string(),
             })?
@@ -305,6 +316,7 @@ impl Collection for MemoryStore {
         let key = format!("{}.{}", self.prefix, key);
         let mut lock = self.data.write().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -317,6 +329,7 @@ impl Collection for MemoryStore {
     fn purge(&mut self) -> Result<(), Error> {
         let mut lock = self.data.write().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -343,6 +356,7 @@ impl Collection for MemoryStore {
     > {
         let lock = self.data.read().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -382,6 +396,7 @@ impl Collection for MemoryStore {
     > {
         let lock = self.data.read().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;

@@ -45,6 +45,7 @@ impl State for FailingStateStore {
             operation: StoreOperation::Snapshot,
             reason: "forced snapshot failure".to_owned(),
             source: None,
+            code: None,
         })
     }
 
@@ -93,6 +94,7 @@ impl Collection for RangeCollection {
                 operation: StoreOperation::LastEvent,
                 reason: "forced last failure".to_owned(),
                 source: None,
+                code: None,
             });
         }
         Ok(self
@@ -145,6 +147,7 @@ impl Collection for RangeCollection {
                 operation: StoreOperation::GetEventsRange,
                 reason: "forced iter failure".to_owned(),
                 source: None,
+                code: None,
             });
         }
 

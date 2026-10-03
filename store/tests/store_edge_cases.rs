@@ -330,6 +330,7 @@ impl Collection for FailingCollection {
                 operation: StoreOperation::GetEventsRange,
                 reason: "Intentional failure".to_string(),
                 source: None,
+                code: None,
             })
         } else {
             Err(StoreError::EntryNotFound {
@@ -344,6 +345,7 @@ impl Collection for FailingCollection {
                 operation: StoreOperation::Insert,
                 reason: "Intentional failure".to_string(),
                 source: None,
+                code: None,
             })
         } else {
             self.data.insert(key.to_string(), data.to_vec());
@@ -357,6 +359,7 @@ impl Collection for FailingCollection {
                 operation: StoreOperation::Delete,
                 reason: "Intentional failure".to_string(),
                 source: None,
+                code: None,
             })
         } else {
             Ok(())
@@ -369,6 +372,7 @@ impl Collection for FailingCollection {
                 operation: StoreOperation::Purge,
                 reason: "Intentional failure".to_string(),
                 source: None,
+                code: None,
             })
         } else {
             self.data.clear();
@@ -406,6 +410,7 @@ impl State for FailingCollection {
                 operation: StoreOperation::Snapshot,
                 reason: "Intentional failure".to_string(),
                 source: None,
+                code: None,
             })
         } else {
             self.data.insert("state".to_string(), data.to_vec());
@@ -419,6 +424,7 @@ impl State for FailingCollection {
                 operation: StoreOperation::Delete,
                 reason: "Intentional failure".to_string(),
                 source: None,
+                code: None,
             })
         } else {
             self.data.remove("state");
@@ -432,6 +438,7 @@ impl State for FailingCollection {
                 operation: StoreOperation::Purge,
                 reason: "Intentional failure".to_string(),
                 source: None,
+                code: None,
             })
         } else {
             self.data.clear();
@@ -451,6 +458,7 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
                 operation: StoreOperation::CreateCollection,
                 reason: "Failed to create collection".to_string(),
                 source: None,
+                code: None,
             })
         } else {
             Ok(FailingCollection {
@@ -475,6 +483,7 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
                 operation: StoreOperation::CreateState,
                 reason: "Failed to create state".to_string(),
                 source: None,
+                code: None,
             })
         } else {
             Ok(FailingCollection {

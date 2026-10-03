@@ -120,6 +120,9 @@ pub struct ActorRunner<A: Actor> {
     /// Cached root scope used as a Prometheus label.
     #[cfg(feature = "prometheus")]
     scope: Arc<str>,
+    /// Pre-created per-message metric handles (hot path without lookups).
+    #[cfg(feature = "prometheus")]
+    message_metrics: Option<crate::metrics::MessageMetricHandles>,
 }
 
 impl<A> ActorRunner<A>
@@ -214,6 +217,14 @@ where
             actor_type: Arc::clone(&actor_type),
             #[cfg(feature = "prometheus")]
             scope: Arc::clone(&scope),
+            #[cfg(feature = "prometheus")]
+            message_metrics: metrics.as_ref().map(|m| {
+                crate::metrics::MessageMetricHandles::new(
+                    m,
+                    &scope,
+                    &actor_type,
+                )
+            }),
         };
 
         Ok((runner, actor_ref, stop_sender))
@@ -661,8 +672,8 @@ where
                         let _ = result;
                         #[cfg(feature = "prometheus")]
                         {
-                            if let (Some(m), Some(start)) =
-                                (&self.metrics, start)
+                            if let (Some(handles), Some(start)) =
+                                (&self.message_metrics, start)
                             {
                                 let queued_at = envelope.queued_at();
                                 let wait_seconds = start
@@ -670,31 +681,14 @@ where
                                     .as_secs_f64();
                                 let duration =
                                     start.elapsed().as_secs_f64();
-                                let result_label = if result.is_ok() {
-                                    "ok"
-                                } else {
-                                    "err"
-                                };
-                                m.inc_messages_processed(
-                                    Arc::clone(&self.scope),
-                                    Arc::clone(&self.actor_type),
-                                    kind,
-                                    result_label,
-                                );
-                                m.observe_message_duration(
-                                    Arc::clone(&self.scope),
-                                    Arc::clone(&self.actor_type),
-                                    kind,
-                                    critical,
-                                    duration,
-                                );
-                                m.observe_message_wait(
-                                    Arc::clone(&self.scope),
-                                    Arc::clone(&self.actor_type),
-                                    kind,
-                                    critical,
-                                    wait_seconds,
-                                );
+                                let ok = result.is_ok();
+                                handles.processed(kind, ok).inc();
+                                handles
+                                    .duration(kind, critical)
+                                    .observe(duration);
+                                handles
+                                    .wait(kind, critical)
+                                    .observe(wait_seconds);
                             }
                         }
                     } else {
@@ -815,34 +809,18 @@ where
                 Ok(Ok(_result)) => {
                     #[cfg(feature = "prometheus")]
                     {
-                        if let (Some(m), Some(start)) = (&self.metrics, start) {
+                        if let (Some(handles), Some(start)) =
+                            (&self.message_metrics, start)
+                        {
                             let queued_at = msg.queued_at();
                             let wait_seconds = start
                                 .saturating_duration_since(queued_at)
                                 .as_secs_f64();
                             let duration = start.elapsed().as_secs_f64();
-                            let result_label =
-                                if _result.is_ok() { "ok" } else { "err" };
-                            m.inc_messages_processed(
-                                Arc::clone(&self.scope),
-                                Arc::clone(&self.actor_type),
-                                kind,
-                                result_label,
-                            );
-                            m.observe_message_duration(
-                                Arc::clone(&self.scope),
-                                Arc::clone(&self.actor_type),
-                                kind,
-                                true,
-                                duration,
-                            );
-                            m.observe_message_wait(
-                                Arc::clone(&self.scope),
-                                Arc::clone(&self.actor_type),
-                                kind,
-                                true,
-                                wait_seconds,
-                            );
+                            let ok = _result.is_ok();
+                            handles.processed(kind, ok).inc();
+                            handles.duration(kind, true).observe(duration);
+                            handles.wait(kind, true).observe(wait_seconds);
                         }
                     }
                 }

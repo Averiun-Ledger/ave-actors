@@ -489,6 +489,106 @@ impl ActorMetrics {
     }
 }
 
+/// Pre-created per-message metric handles for one actor.
+///
+/// `Family::get_or_create` costs a hash + lock per message; pre-creating
+/// the 12 combinations once (2 kinds × 2 results × durations/waits by
+/// criticality) reduces the hot path to array indexing. Owned by the
+/// runner, which processes messages sequentially.
+#[cfg(feature = "prometheus")]
+pub(crate) struct MessageMetricHandles {
+    processed: [[Counter; 2]; 2],
+    duration: [[Histogram; 2]; 2],
+    wait: [[Histogram; 2]; 2],
+}
+
+#[cfg(feature = "prometheus")]
+impl MessageMetricHandles {
+    /// Index rows: `kind` is always `"tell"` or `"ask"` (set by the
+    /// runner), anything else counts as `ask`.
+    const fn kind_index(kind: &'static str) -> usize {
+        if kind.as_bytes()[0] == b't' { 0 } else { 1 }
+    }
+
+    pub(crate) fn new(
+        metrics: &ActorMetrics,
+        scope: &Arc<str>,
+        actor_type: &Arc<str>,
+    ) -> Self {
+        let counter = |result: &'static str, kind: &'static str| {
+            metrics
+                .actor_messages_processed_total
+                .get_or_create(&MessageLabels {
+                    scope: Arc::clone(scope),
+                    actor_type: Arc::clone(actor_type),
+                    kind,
+                    result,
+                })
+                .clone()
+        };
+        let histogram = |kind: &'static str, critical: bool| {
+            let labels = MessageDurationLabels {
+                scope: Arc::clone(scope),
+                actor_type: Arc::clone(actor_type),
+                kind,
+                critical: if critical { "true" } else { "false" },
+            };
+            (
+                metrics
+                    .actor_message_duration_seconds
+                    .get_or_create(&labels)
+                    .clone(),
+                metrics
+                    .actor_message_wait_seconds
+                    .get_or_create(&labels)
+                    .clone(),
+            )
+        };
+        let kinds = ["tell", "ask"];
+        let processed = [
+            [counter("ok", kinds[0]), counter("err", kinds[0])],
+            [counter("ok", kinds[1]), counter("err", kinds[1])],
+        ];
+        let mut duration = std::array::from_fn(|_| {
+            [Histogram::new([1.0]), Histogram::new([1.0])]
+        });
+        let mut wait = duration.clone();
+        for (ki, kind) in kinds.iter().enumerate() {
+            for (ci, critical) in [false, true].iter().enumerate() {
+                let (d, w) = histogram(kind, *critical);
+                duration[ki][ci] = d;
+                wait[ki][ci] = w;
+            }
+        }
+        Self {
+            processed,
+            duration,
+            wait,
+        }
+    }
+
+    pub(crate) fn processed(&self, kind: &'static str, ok: bool) -> &Counter {
+        let result = if ok { 0 } else { 1 };
+        &self.processed[Self::kind_index(kind)][result]
+    }
+
+    pub(crate) fn duration(
+        &self,
+        kind: &'static str,
+        critical: bool,
+    ) -> &Histogram {
+        &self.duration[Self::kind_index(kind)][critical as usize]
+    }
+
+    pub(crate) fn wait(
+        &self,
+        kind: &'static str,
+        critical: bool,
+    ) -> &Histogram {
+        &self.wait[Self::kind_index(kind)][critical as usize]
+    }
+}
+
 #[cfg(feature = "prometheus")]
 impl Default for ActorMetrics {
     fn default() -> Self {

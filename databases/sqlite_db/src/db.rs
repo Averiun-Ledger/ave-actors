@@ -37,6 +37,20 @@ const POOL_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Share of host RAM budgeting all pooled connection page caches together.
 const POOL_RAM_BUDGET_PERCENT: u64 = 6;
 
+/// Builds a store error from a rusqlite failure, preserving the SQLite
+/// extended result code so callers can distinguish transient lock
+/// contention (retry) from corruption or misuse (abort) without parsing
+/// `reason`.
+fn sqlite_store_error(operation: StoreOperation, error: SqliteError) -> Error {
+    let code = error.sqlite_extended_error_code();
+    Error::Store {
+        source: None,
+        operation,
+        reason: format!("{}", error),
+        code,
+    }
+}
+
 /// SQLite database manager for persistent actor storage.
 /// Manages SQLite database connections and provides factory methods
 /// for creating collections (event storage) and state storage (snapshots).
@@ -147,6 +161,7 @@ impl SqlitePool {
         let deadline = Instant::now() + self.checkout_timeout;
         let mut state = self.state.lock().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockManagerData,
             reason: format!("connection pool mutex poisoned: {}", e),
         })?;
@@ -166,6 +181,7 @@ impl SqlitePool {
                 );
                 return Err(Error::Store {
                     source: None,
+                    code: None,
                     operation: StoreOperation::LockManagerData,
                     reason: format!(
                         "SQLite connection pool exhausted: {} total, {} \
@@ -179,6 +195,7 @@ impl SqlitePool {
                 .wait_timeout(state, remaining)
                 .map_err(|e| Error::Store {
                     source: None,
+                    code: None,
                     operation: StoreOperation::LockManagerData,
                     reason: format!("connection pool condvar poisoned: {}", e),
                 })?;
@@ -205,6 +222,7 @@ impl SqlitePool {
                     let mut state =
                         self.state.lock().map_err(|poison| Error::Store {
                             source: None,
+                            code: None,
                             operation: StoreOperation::LockManagerData,
                             reason: format!(
                                 "connection pool mutex poisoned: {}",
@@ -233,6 +251,7 @@ impl SqlitePool {
     fn checkin(&self, conn: Connection) -> Result<(), Error> {
         let mut state = self.state.lock().map_err(|poison| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockManagerData,
             reason: format!("connection pool mutex poisoned: {}", poison),
         })?;
@@ -257,6 +276,7 @@ impl SqlitePool {
         let deadline = Instant::now() + timeout;
         let mut state = self.state.lock().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockManagerData,
             reason: format!("connection pool mutex poisoned: {}", e),
         })?;
@@ -274,6 +294,7 @@ impl SqlitePool {
                 );
                 return Err(Error::Store {
                     source: None,
+                    code: None,
                     operation: StoreOperation::LockManagerData,
                     reason: format!(
                         "SQLite pool drain timed out after {:?} with {} of \
@@ -289,6 +310,7 @@ impl SqlitePool {
                 .wait_timeout(state, remaining)
                 .map_err(|e| Error::Store {
                     source: None,
+                    code: None,
                     operation: StoreOperation::LockManagerData,
                     reason: format!("connection pool condvar poisoned: {}", e),
                 })?;
@@ -443,6 +465,7 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
                 error!(error = %e, "Failed to acquire connection lock for state creation");
                 Error::Store {
                 source: None,
+                code: None,
                     operation: StoreOperation::LockConnection,
                     reason: format!("{}", e),
                 }
@@ -475,6 +498,7 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
                 error!(error = %e, "Failed to acquire connection lock for collection creation");
                 Error::Store {
                 source: None,
+                code: None,
                     operation: StoreOperation::LockConnection,
                     reason: format!("{}", e),
                 }
@@ -510,17 +534,14 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
             error!(error = %e, "Failed to acquire connection lock on stop");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::LockConnection,
                 reason: format!("{}", e),
             }
         })?;
         conn.execute_batch("PRAGMA optimize;").map_err(|e| {
             error!(error = %e, "Failed to optimize on stop");
-            Error::Store {
-                source: None,
-                operation: StoreOperation::WalCheckpoint,
-                reason: format!("{}", e),
-            }
+            sqlite_store_error(StoreOperation::WalCheckpoint, e)
         })?;
         // Verify the checkpoint instead of assuming it: with another
         // writer holding the WAL (or leftover pool connections), SQLite
@@ -531,11 +552,7 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
             })
             .map_err(|e| {
                 error!(error = %e, "Failed to checkpoint WAL on stop");
-                Error::Store {
-                    source: None,
-                    operation: StoreOperation::WalCheckpoint,
-                    reason: format!("{}", e),
-                }
+                sqlite_store_error(StoreOperation::WalCheckpoint, e)
             })?;
         drop(conn);
         if busy != 0 {
@@ -585,6 +602,7 @@ impl BatchWrite for SqliteBatchWriter {
             error!(error = %e, "Failed to check out connection for batch");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
@@ -596,11 +614,7 @@ impl BatchWrite for SqliteBatchWriter {
 
         conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| {
             error!(error = %e, "Failed to begin batch transaction");
-            Error::Store {
-                source: None,
-                operation: StoreOperation::ExecuteBatch,
-                reason: format!("{}", e),
-            }
+            sqlite_store_error(StoreOperation::ExecuteBatch, e)
         })?;
 
         let result = (|| -> Result<(), Error> {
@@ -623,11 +637,7 @@ impl BatchWrite for SqliteBatchWriter {
                                     error = %e,
                                     "Failed to put event in batch"
                                 );
-                                Error::Store {
-                                    source: None,
-                                    operation: StoreOperation::Insert,
-                                    reason: format!("{}", e),
-                                }
+                                sqlite_store_error(StoreOperation::Insert, e)
                             })?;
                     }
                     BatchOp::PutState { store, data } => {
@@ -643,11 +653,7 @@ impl BatchWrite for SqliteBatchWriter {
                                     error = %e,
                                     "Failed to put state in batch"
                                 );
-                                Error::Store {
-                                    source: None,
-                                    operation: StoreOperation::Insert,
-                                    reason: format!("{}", e),
-                                }
+                                sqlite_store_error(StoreOperation::Insert, e)
                             },
                         )?;
                     }
@@ -670,11 +676,7 @@ impl BatchWrite for SqliteBatchWriter {
                         "Failed to roll back after commit failure"
                     );
                 }
-                Error::Store {
-                    source: None,
-                    operation: StoreOperation::ExecuteBatch,
-                    reason: format!("{}", e),
-                }
+                sqlite_store_error(StoreOperation::ExecuteBatch, e)
             }),
             Err(batch_err) => {
                 if let Err(rollback_err) = conn.execute_batch("ROLLBACK") {
@@ -815,6 +817,7 @@ impl SqliteChunkedIterator {
             error!(table = %self.table, error = %e, "Failed to check out connection for chunk fetch");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::LockConnection,
                 reason: format!("{}", e),
             }
@@ -931,6 +934,7 @@ impl SqliteRangeChunkedIterator {
             error!(table = %self.table, error = %e, "Failed to check out connection for range chunk fetch");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::LockConnection,
                 reason: format!("{}", e),
             }
@@ -1018,6 +1022,7 @@ impl State for SqliteCollection {
             error!(error = %e, "Failed to check out connection for state get");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
@@ -1041,6 +1046,7 @@ impl State for SqliteCollection {
             error!(error = %e, "Failed to check out connection for state put");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
@@ -1049,20 +1055,12 @@ impl State for SqliteCollection {
         conn.prepare_cached(&stmt)
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to prepare state put");
-                Error::Store {
-                    source: None,
-                    operation: StoreOperation::Insert,
-                    reason: format!("{}", e),
-                }
+sqlite_store_error(StoreOperation::Insert, e)
             })?
             .execute(params![self.prefix, data])
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to put state");
-                Error::Store {
-                    source: None,
-                    operation: StoreOperation::Insert,
-                    reason: format!("{}", e),
-                }
+sqlite_store_error(StoreOperation::Insert, e)
             })?;
         Ok(())
     }
@@ -1073,6 +1071,7 @@ impl State for SqliteCollection {
             error!(error = %e, "Failed to check out connection for state delete");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
@@ -1082,11 +1081,7 @@ impl State for SqliteCollection {
             .execute(&stmt, params![self.prefix,])
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to delete state");
-                Error::Store {
-                source: None,
-                    operation: StoreOperation::Delete,
-                    reason: format!("{}", e),
-                }
+sqlite_store_error(StoreOperation::Delete, e)
             })?;
 
         if affected_rows == 0 {
@@ -1103,6 +1098,7 @@ impl State for SqliteCollection {
             error!(error = %e, "Failed to check out connection for state purge");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
@@ -1110,11 +1106,7 @@ impl State for SqliteCollection {
 
         conn.execute(&stmt, params![self.prefix]).map_err(|e| {
             error!(table = %self.table, error = %e, "Failed to purge state");
-            Error::Store {
-                source: None,
-                operation: StoreOperation::Purge,
-                reason: format!("{}", e),
-            }
+            sqlite_store_error(StoreOperation::Purge, e)
         })?;
         debug!(table = %self.table, "State purged");
         Ok(())
@@ -1136,6 +1128,7 @@ impl Collection for SqliteCollection {
             error!(error = %e, "Failed to check out connection for collection get");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
@@ -1159,6 +1152,7 @@ impl Collection for SqliteCollection {
             error!(error = %e, "Failed to check out connection for collection put");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
@@ -1167,20 +1161,12 @@ impl Collection for SqliteCollection {
         conn.prepare_cached(&stmt)
             .map_err(|e| {
                 error!(table = %self.table, key = key, error = %e, "Failed to prepare collection put");
-                Error::Store {
-                source: None,
-                    operation: StoreOperation::Insert,
-                    reason: format!("{}", e),
-                }
+sqlite_store_error(StoreOperation::Insert, e)
             })?
             .execute(params![self.prefix, key, data])
             .map_err(|e| {
                 error!(table = %self.table, key = key, error = %e, "Failed to put collection entry");
-                Error::Store {
-                source: None,
-                    operation: StoreOperation::Insert,
-                    reason: format!("{}", e),
-                }
+sqlite_store_error(StoreOperation::Insert, e)
             })?;
         Ok(())
     }
@@ -1192,6 +1178,7 @@ impl Collection for SqliteCollection {
             error!(error = %e, "Failed to check out connection for collection delete");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
@@ -1201,20 +1188,12 @@ impl Collection for SqliteCollection {
             .prepare_cached(&stmt)
             .map_err(|e| {
                 error!(table = %self.table, key = key, error = %e, "Failed to prepare collection delete");
-                Error::Store {
-                source: None,
-                    operation: StoreOperation::Delete,
-                    reason: format!("{}", e),
-                }
+sqlite_store_error(StoreOperation::Delete, e)
             })?
             .execute(params![self.prefix, key])
             .map_err(|e| {
                 error!(table = %self.table, key = key, error = %e, "Failed to delete collection entry");
-                Error::Store {
-                source: None,
-                    operation: StoreOperation::Delete,
-                    reason: format!("{}", e),
-                }
+sqlite_store_error(StoreOperation::Delete, e)
             })?;
 
         if affected_rows == 0 {
@@ -1231,6 +1210,7 @@ impl Collection for SqliteCollection {
             error!(error = %e, "Failed to check out connection for collection purge");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
@@ -1239,11 +1219,7 @@ impl Collection for SqliteCollection {
         conn.execute(&stmt, params![self.prefix])
             .map_err(|e| {
                 error!(table = %self.table, error = %e, "Failed to purge collection");
-                Error::Store {
-                source: None,
-                    operation: StoreOperation::Purge,
-                    reason: format!("{}", e),
-                }
+sqlite_store_error(StoreOperation::Purge, e)
             })?;
         debug!(table = %self.table, "Collection purged");
         Ok(())
@@ -1261,6 +1237,7 @@ impl Collection for SqliteCollection {
             error!(error = %e, "Failed to check out connection for collection last");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
@@ -1268,22 +1245,16 @@ impl Collection for SqliteCollection {
 
         let mut stmt = conn.prepare_cached(&query).map_err(|e| {
             error!(table = %self.table, error = %e, "Failed to prepare last query");
-            Error::Store {
-                source: None,
-                operation: StoreOperation::GetLatestEvents,
-                reason: format!("{}", e),
-            }
+sqlite_store_error(StoreOperation::GetLatestEvents, e)
         })?;
         match stmt.query_row(params![self.prefix], |row| {
             Ok((row.get(0)?, row.get(1)?))
         }) {
             Ok(entry) => Ok(Some(entry)),
             Err(SqliteError::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(Error::Store {
-                source: None,
-                operation: StoreOperation::GetLatestEvents,
-                reason: format!("{}", e),
-            }),
+            Err(e) => {
+                Err(sqlite_store_error(StoreOperation::GetLatestEvents, e))
+            }
         }
     }
 
@@ -1329,6 +1300,7 @@ impl Collection for SqliteCollection {
             error!(error = %e, "Failed to check out connection for collection range");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
@@ -1347,11 +1319,7 @@ impl Collection for SqliteCollection {
                 .optional()
                 .map_err(|e| {
                     error!(table = %self.table, error = %e, "Failed to locate range start");
-                    Error::Store {
-                        source: None,
-                        operation: StoreOperation::GetEventsRange,
-                        reason: format!("{}", e),
-                    }
+sqlite_store_error(StoreOperation::GetEventsRange, e)
                 })?;
             if exists.is_none() {
                 return Err(Error::EntryNotFound {
@@ -1376,11 +1344,7 @@ impl Collection for SqliteCollection {
         );
         let mut stmt = conn.prepare_cached(&query).map_err(|e| {
             error!(table = %self.table, error = %e, "Failed to prepare range query");
-            Error::Store {
-                source: None,
-                operation: StoreOperation::GetEventsRange,
-                reason: format!("{}", e),
-            }
+sqlite_store_error(StoreOperation::GetEventsRange, e)
         })?;
         match from_key {
             // `params!` temporaries live to the end of each arm, so the
@@ -1394,11 +1358,7 @@ impl Collection for SqliteCollection {
         }
         .map_err(|e| {
             error!(table = %self.table, error = %e, "Failed to fetch range");
-            Error::Store {
-                source: None,
-                operation: StoreOperation::GetEventsRange,
-                reason: format!("{}", e),
-            }
+            sqlite_store_error(StoreOperation::GetEventsRange, e)
         })
     }
 
@@ -1411,6 +1371,7 @@ impl Collection for SqliteCollection {
             error!(error = %e, "Failed to check out connection for collection del_range");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
@@ -1419,11 +1380,7 @@ impl Collection for SqliteCollection {
         conn.execute(&stmt, params![self.prefix, start, end])
             .map_err(|e| {
                 error!(table = %self.table, start = %start, end = %end, error = %e, "Failed to delete collection range");
-                Error::Store {
-                source: None,
-                    operation: StoreOperation::Delete,
-                    reason: format!("{}", e),
-                }
+sqlite_store_error(StoreOperation::Delete, e)
             })?;
         Ok(())
     }
@@ -1446,6 +1403,7 @@ fn open_with_tuning<P: AsRef<Path>>(
         error!(path = %path.display(), error = %e, "Failed to open SQLite database");
         Error::Store {
                 source: None,
+                code: None,
             operation: StoreOperation::OpenConnection,
             reason: format!("{}", e),
         }
@@ -1460,6 +1418,7 @@ fn open_with_tuning<P: AsRef<Path>>(
             error!(error = %e, "Failed to set SQLite busy timeout");
             Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::OpenConnection,
                 reason: format!("{}", e),
             }
@@ -1485,11 +1444,10 @@ fn open_with_tuning<P: AsRef<Path>>(
             }
             Err(e) => {
                 error!(error = %e, "Failed to execute SQLite PRAGMA statements");
-                return Err(Error::Store {
-                    source: None,
-                    operation: StoreOperation::ExecuteBatch,
-                    reason: format!("{}", e),
-                });
+                return Err(sqlite_store_error(
+                    StoreOperation::ExecuteBatch,
+                    e,
+                ));
             }
         }
     }
@@ -2140,5 +2098,40 @@ mod shutdown_tests {
             .join()
             .expect("stop thread panicked")
             .expect("stop must tolerate a busy checkpoint");
+    }
+}
+
+#[cfg(test)]
+mod sqlite_code_tests {
+    use super::*;
+    use rusqlite::ffi::{Error as FfiError, ErrorCode};
+
+    #[test]
+    fn test_sqlite_error_preserves_extended_code() {
+        let busy = SqliteError::SqliteFailure(
+            FfiError {
+                code: ErrorCode::DatabaseBusy,
+                extended_code: 5,
+            },
+            None,
+        );
+        match sqlite_store_error(StoreOperation::Insert, busy) {
+            Error::Store {
+                code, operation, ..
+            } => {
+                assert_eq!(code, Some(5));
+                assert_eq!(operation, StoreOperation::Insert);
+            }
+            other => panic!("expected Store error, got {other:?}"),
+        }
+
+        // Non-engine errors carry no code.
+        match sqlite_store_error(
+            StoreOperation::Insert,
+            SqliteError::QueryReturnedNoRows,
+        ) {
+            Error::Store { code, .. } => assert_eq!(code, None),
+            other => panic!("expected Store error, got {other:?}"),
+        }
     }
 }

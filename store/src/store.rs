@@ -38,6 +38,7 @@ fn store_error(operation: StoreOperation, reason: impl ToString) -> Error {
         operation,
         reason: reason.to_string(),
         source: None,
+        code: None,
     }
 }
 
@@ -50,6 +51,7 @@ fn store_error_with_source(
         operation,
         reason: reason.to_string(),
         source: Some(source),
+        code: None,
     }
 }
 
@@ -1437,6 +1439,7 @@ where
                     key.len()
                 ),
                 source: None,
+                code: None,
             });
         }
 
@@ -1480,6 +1483,7 @@ where
                     ciphertext.len()
                 ),
                 source: None,
+                code: None,
             });
         }
 
@@ -2468,6 +2472,7 @@ mod tests {
                 operation: StoreOperation::ExecuteBatch,
                 reason: "injected batch failure".to_owned(),
                 source: None,
+                code: None,
             })
         }
     }
@@ -2530,6 +2535,98 @@ mod tests {
             .unwrap()
             .expect("owner event must be present");
         assert_eq!(response.0, format!("{:020}", 0));
+    }
+
+    // ------------------------------------------------------------------
+    // Mock collection whose writes fail carrying a backend code, used to
+    // verify the code survives propagation through `persist`.
+    // ------------------------------------------------------------------
+
+    struct CodedFailCollection;
+
+    impl Collection for CodedFailCollection {
+        fn name(&self) -> &str {
+            "coded"
+        }
+
+        fn get(&self, key: &str) -> Result<Vec<u8>, Error> {
+            Err(Error::EntryNotFound {
+                key: key.to_owned(),
+            })
+        }
+
+        fn put(&mut self, _key: &str, _data: &[u8]) -> Result<(), Error> {
+            Err(Error::Store {
+                operation: StoreOperation::Insert,
+                reason: "injected coded failure".to_owned(),
+                source: None,
+                code: Some(5),
+            })
+        }
+
+        fn del(&mut self, key: &str) -> Result<(), Error> {
+            Err(Error::EntryNotFound {
+                key: key.to_owned(),
+            })
+        }
+
+        fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
+            Ok(None)
+        }
+
+        fn iter<'a>(
+            &'a self,
+            _reverse: bool,
+        ) -> Result<crate::database::CollectionIter<'a>, Error> {
+            Ok(Box::new(std::iter::empty()))
+        }
+
+        fn purge(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default, Clone)]
+    struct CodedFailManager {
+        inner: MemoryManager,
+    }
+
+    impl DbManager<CodedFailCollection, MemoryStore> for CodedFailManager {
+        fn create_collection(
+            &self,
+            _name: &str,
+            _prefix: &str,
+        ) -> Result<CodedFailCollection, Error> {
+            Ok(CodedFailCollection)
+        }
+
+        fn create_state(
+            &self,
+            name: &str,
+            prefix: &str,
+        ) -> Result<MemoryStore, Error> {
+            self.inner.create_state(name, prefix)
+        }
+    }
+
+    #[test]
+    fn test_persist_preserves_backend_error_code() {
+        let initial = Arc::new(CounterState { value: 0 });
+        let mut store = Store::<CounterActor>::test_new(
+            "store",
+            "test",
+            CodedFailManager::default(),
+            None,
+            initial,
+        )
+        .unwrap();
+
+        match store.persist(&CounterEvent(1)) {
+            Err(Error::Store { code, .. }) => {
+                assert_eq!(code, Some(5), "backend code must propagate")
+            }
+            other => panic!("expected coded failure, got {other:?}"),
+        }
     }
 
     #[test(tokio::test)]
@@ -2791,6 +2888,7 @@ mod tests {
                 operation: StoreOperation::Snapshot,
                 reason: "injected snapshot failure".to_owned(),
                 source: None,
+                code: None,
             })
         }
 
@@ -2883,6 +2981,7 @@ mod tests {
                     operation: StoreOperation::Snapshot,
                     reason: "injected metadata failure".to_owned(),
                     source: None,
+                    code: None,
                 });
             }
             State::put(&mut self.inner, data)

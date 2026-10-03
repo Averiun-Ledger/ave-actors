@@ -121,11 +121,17 @@ pub enum Error {
     /// `reason` contains the underlying error message.
     /// `source` optionally holds the original [`ActorError`] when the failure
     /// originated in actor logic (e.g. during recovery replay).
+    /// `code` carries an optional backend-specific numeric code (e.g. the
+    /// SQLite result code) so callers can distinguish transient failures
+    /// (retry) from corruption (abort) without parsing `reason`. It is `None`
+    /// when the backend provides no code or when the error originates above
+    /// the backend layer.
     #[error("store operation failed: {operation} - {reason}")]
     Store {
         operation: StoreOperation,
         reason: String,
         source: Option<ActorError>,
+        code: Option<i32>,
     },
 
     /// Invalid store or database configuration supplied by the user.

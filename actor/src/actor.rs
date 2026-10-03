@@ -848,6 +848,11 @@ pub trait Event:
 }
 
 /// Defines the type of value an actor receives as a message.
+///
+/// Messages are cloned once per delivery (the envelope retains ownership
+/// so a panicking handler cannot lose pending `ask` responses). Keep
+/// message types small and cheap to clone; wrap large payloads in
+/// [`Arc`](std::sync::Arc).
 pub trait Message: Clone + Send + Sync + 'static {
     /// Returns `true` if this message must be processed before the actor stops; defaults to `false`.
     fn is_critical(&self) -> bool {
