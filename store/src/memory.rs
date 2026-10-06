@@ -116,61 +116,70 @@ impl BatchWrite for MemoryBatchWriter {
         for (name, store_prefix) in &stores {
             owned.push(self.manager.get_or_create_store(name, store_prefix)?);
         }
-        let mut guards = Vec::with_capacity(owned.len());
-        for store in &owned {
-            guards.push(store.data.write().map_err(|e| Error::Store {
-                source: None,
-                code: None,
-                operation: StoreOperation::LockData,
-                reason: e.to_string(),
-            })?);
-        }
+        // Owned handles keep the inner maps alive while locked; lock in
+        // deterministic order so concurrent batches cannot deadlock.
+        // Scoped so the guards drop as soon as the batch is applied.
+        {
+            let mut guards = Vec::with_capacity(owned.len());
+            for store in &owned {
+                guards.push(store.data.write().map_err(|e| Error::Store {
+                    source: None,
+                    code: None,
+                    operation: StoreOperation::LockData,
+                    reason: e.to_string(),
+                })?);
+            }
 
-        // Apply with all locks held; no persistent failure mode remains.
-        // Index by store name once instead of scanning per op. The map is
-        // built from the same ops, so a miss is an internal invariant
-        // break: report it instead of panicking.
-        let index: std::collections::HashMap<&str, usize> = stores
-            .iter()
-            .enumerate()
-            .map(|(pos, (name, _))| (name.as_str(), pos))
-            .collect();
-        for op in ops {
-            match op {
-                BatchOp::PutEvent {
-                    collection,
-                    key,
-                    data,
-                } => {
-                    let pos =
-                        index.get(collection).copied().ok_or_else(|| {
-                            Error::Store {
+            // Apply with all locks held; no persistent failure mode remains.
+            // Index by store name once instead of scanning per op. The map is
+            // built from the same ops, so a miss is an internal invariant
+            // break: report it instead of panicking.
+            let index: std::collections::HashMap<&str, usize> = stores
+                .iter()
+                .enumerate()
+                .map(|(pos, (name, _))| (name.as_str(), pos))
+                .collect();
+            for op in ops {
+                match op {
+                    BatchOp::PutEvent {
+                        collection,
+                        key,
+                        data,
+                    } => {
+                        let pos = index.get(collection).copied().ok_or_else(
+                            || Error::Store {
                                 source: None,
                                 code: None,
                                 operation: StoreOperation::LockData,
                                 reason:
                                     "batch store missing for collection op \
-                                     (internal invariant broken)"
+                                         (internal invariant broken)"
                                         .to_owned(),
-                            }
-                        })?;
-                    guards[pos]
-                        .insert(format!("{prefix}.{key}"), (*data).to_vec());
-                }
-                BatchOp::PutState { store, data } => {
-                    let pos = index.get(store).copied().ok_or_else(|| {
-                        Error::Store {
-                            source: None,
-                            code: None,
-                            operation: StoreOperation::LockData,
-                            reason: "batch store missing for state op \
-                                     (internal invariant broken)"
-                                .to_owned(),
-                        }
-                    })?;
-                    guards[pos].insert(prefix.to_owned(), (*data).to_vec());
+                            },
+                        )?;
+                        guards[pos].insert(
+                            format!("{prefix}.{key}"),
+                            (*data).to_vec(),
+                        );
+                    }
+                    BatchOp::PutState { store, data } => {
+                        let pos =
+                            index.get(store).copied().ok_or_else(|| {
+                                Error::Store {
+                                    source: None,
+                                    code: None,
+                                    operation: StoreOperation::LockData,
+                                    reason: "batch store missing for state op \
+                                         (internal invariant broken)"
+                                        .to_owned(),
+                                }
+                            })?;
+                        guards[pos].insert(prefix.to_owned(), (*data).to_vec());
+                    }
                 }
             }
+            // Release all store locks before reporting success.
+            drop(guards);
         }
         Ok(())
     }

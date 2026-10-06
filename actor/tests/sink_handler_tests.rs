@@ -153,7 +153,7 @@ async fn test_sink_basic_functionality() {
     let subscriber_clone = subscriber.clone();
 
     // Register sink on the actor
-    let mut sink = actor_ref
+    let sink = actor_ref
         .register_sink("test_sink", None)
         .expect("valid sink");
     sink.add("sub1", subscriber);
@@ -210,7 +210,7 @@ async fn test_sink_with_failing_subscriber() {
     let subscriber = CollectingSubscriber::new_failing();
 
     // Register sink with failing subscriber
-    let mut sink = actor_ref
+    let sink = actor_ref
         .register_sink("failing_sink", None)
         .expect("valid sink");
     sink.add("sub1", subscriber);

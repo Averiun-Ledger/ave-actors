@@ -978,7 +978,7 @@ impl Collection for RocksDbStore {
     }
 }
 
-pub(crate) struct RocksDbIterator<'a> {
+pub struct RocksDbIterator<'a> {
     prefix_dot: Vec<u8>,
     iter: DBIteratorWithThreadMode<'a, DB>,
 }
@@ -1064,7 +1064,7 @@ impl Iterator for RocksDbIterator<'_> {
     }
 }
 
-pub(crate) struct RocksDbRangeIterator<'a> {
+pub struct RocksDbRangeIterator<'a> {
     start_key: Vec<u8>,
     end_key: Vec<u8>,
     prefix_dot: Vec<u8>,

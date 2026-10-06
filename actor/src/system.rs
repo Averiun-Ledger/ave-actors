@@ -586,7 +586,7 @@ impl SystemRef {
     ) -> Result<(), Error> {
         let name = name.into();
         Self::validate_registry_name(&name)?;
-        match self.names.entry(name.clone()) {
+        match self.names.entry(name) {
             dashmap::Entry::Occupied(_) => Err(Error::Exists { path }),
             dashmap::Entry::Vacant(entry) => {
                 entry.insert(path);

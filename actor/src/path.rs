@@ -14,7 +14,7 @@ const MAX_PATH_DEPTH: usize = 255;
 const MAX_SEGMENT_LENGTH: usize = 256;
 
 /// Returns `true` if `c` is allowed inside an `ActorPath` segment.
-fn is_valid_segment_char(c: char) -> bool {
+const fn is_valid_segment_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 

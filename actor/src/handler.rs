@@ -42,15 +42,34 @@ pub enum Envelope<A: Actor + Handler<A>> {
 }
 
 impl<A: Actor + Handler<A>> Envelope<A> {
+    #[cfg(not(feature = "prometheus"))]
+    pub const fn tell(message: A::Message, sender: ActorPath) -> Self {
+        Self::Tell { message, sender }
+    }
+
+    #[cfg(feature = "prometheus")]
     pub fn tell(message: A::Message, sender: ActorPath) -> Self {
         Self::Tell {
             message,
             sender,
-            #[cfg(feature = "prometheus")]
             queued_at: Instant::now(),
         }
     }
 
+    #[cfg(not(feature = "prometheus"))]
+    pub const fn ask(
+        message: A::Message,
+        sender: ActorPath,
+        rsvp: oneshot::Sender<Result<A::Response, Error>>,
+    ) -> Self {
+        Self::Ask {
+            message,
+            sender,
+            rsvp: Some(rsvp),
+        }
+    }
+
+    #[cfg(feature = "prometheus")]
     pub fn ask(
         message: A::Message,
         sender: ActorPath,
@@ -60,13 +79,12 @@ impl<A: Actor + Handler<A>> Envelope<A> {
             message,
             sender,
             rsvp: Some(rsvp),
-            #[cfg(feature = "prometheus")]
             queued_at: Instant::now(),
         }
     }
 
     #[cfg(feature = "prometheus")]
-    pub fn queued_at(&self) -> Instant {
+    pub const fn queued_at(&self) -> Instant {
         match self {
             Self::Tell { queued_at, .. } | Self::Ask { queued_at, .. } => {
                 *queued_at
@@ -148,7 +166,7 @@ impl<A: Actor + Handler<A>> Envelope<A> {
 /// panicking message ends the whole actor task with pending asks hanging
 /// and watchers unnotified. Implemented over [`std::future::poll_fn`] so
 /// no extra dependency or nightly feature is needed.
-pub(crate) async fn catch_panic<F, T>(
+pub async fn catch_panic<F, T>(
     future: F,
 ) -> Result<T, Box<dyn std::any::Any + Send>>
 where
@@ -213,7 +231,7 @@ impl<A> HandleHelper<A>
 where
     A: Actor + Handler<A>,
 {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         sender: MailboxSender<A>,
         strategy: OverflowStrategy,
         #[cfg(feature = "prometheus")] path: ActorPath,

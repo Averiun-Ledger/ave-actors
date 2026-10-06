@@ -92,7 +92,7 @@ async fn test_custom_sink_event() {
         notifications: notifications.clone(),
     };
 
-    let mut sink = actor_ref
+    let sink = actor_ref
         .register_sink("notifications", None)
         .expect("valid sink");
     sink.add("sub1", subscriber);

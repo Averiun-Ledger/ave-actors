@@ -567,12 +567,16 @@ impl MessageMetricHandles {
         }
     }
 
-    pub(crate) fn processed(&self, kind: &'static str, ok: bool) -> &Counter {
+    pub(crate) const fn processed(
+        &self,
+        kind: &'static str,
+        ok: bool,
+    ) -> &Counter {
         let result = if ok { 0 } else { 1 };
         &self.processed[Self::kind_index(kind)][result]
     }
 
-    pub(crate) fn duration(
+    pub(crate) const fn duration(
         &self,
         kind: &'static str,
         critical: bool,
@@ -580,7 +584,7 @@ impl MessageMetricHandles {
         &self.duration[Self::kind_index(kind)][critical as usize]
     }
 
-    pub(crate) fn wait(
+    pub(crate) const fn wait(
         &self,
         kind: &'static str,
         critical: bool,

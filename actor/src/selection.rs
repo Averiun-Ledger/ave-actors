@@ -16,7 +16,7 @@ fn segment_matches(pattern: &str, value: &str) -> bool {
     if !pattern.contains('*') {
         return pattern == value;
     }
-    let mut parts = pattern.split('*').peekable();
+    let mut parts = pattern.split('*');
     let mut rest = value;
     if !pattern.starts_with('*') {
         let first = parts.next().unwrap_or("");
@@ -39,15 +39,12 @@ fn segment_matches(pattern: &str, value: &str) -> bool {
             None => return false,
         }
     }
-    match last {
-        None => true,
-        Some(suffix) => rest.ends_with(suffix),
-    }
+    last.is_none_or(|suffix| rest.ends_with(suffix))
 }
 
 /// Matches an actor path against a `/`-separated pattern with the same
 /// segment count, where each segment follows [`segment_matches`].
-pub(crate) fn path_matches(pattern: &str, path: &ActorPath) -> bool {
+pub fn path_matches(pattern: &str, path: &ActorPath) -> bool {
     let pattern_segments: Vec<&str> =
         pattern.split('/').filter(|s| !s.is_empty()).collect();
     let value_segments = path.segments();
@@ -78,14 +75,14 @@ enum SelectionTarget {
 }
 
 impl ActorSelection {
-    pub(crate) fn by_name(system: SystemRef, name: String) -> Self {
+    pub(crate) const fn by_name(system: SystemRef, name: String) -> Self {
         Self {
             system,
             target: SelectionTarget::Name(name),
         }
     }
 
-    pub(crate) fn by_pattern(system: SystemRef, pattern: String) -> Self {
+    pub(crate) const fn by_pattern(system: SystemRef, pattern: String) -> Self {
         Self {
             system,
             target: SelectionTarget::Pattern(pattern),

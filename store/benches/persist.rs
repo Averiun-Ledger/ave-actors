@@ -253,14 +253,16 @@ fn bench_recover_5k(c: &mut Criterion) {
         .block_on(system.create_root_actor("store", store))
         .expect("root");
     rt.block_on(fill_full(&store_ref, 5_000));
-    let mut group = c.benchmark_group("recover_5k_events");
-    group.sample_size(20);
-    group.bench_function("full_memory", |b| {
-        b.to_async(&rt).iter(|| async {
-            store_ref.ask(StoreCommand::Recover).await.expect("recover");
+    {
+        let mut group = c.benchmark_group("recover_5k_events");
+        group.sample_size(20);
+        group.bench_function("full_memory", |b| {
+            b.to_async(&rt).iter(|| async {
+                store_ref.ask(StoreCommand::Recover).await.expect("recover");
+            });
         });
-    });
-    group.finish();
+        group.finish();
+    }
     system.stop_system();
 }
 
@@ -293,24 +295,26 @@ fn bench_recover_replay_5k(c: &mut Criterion) {
                 .expect("persist");
         }
     });
-    let mut group = c.benchmark_group("recover_replay_5k_events");
-    group.sample_size(20);
-    // Correctness gate: replay must actually apply all 5k events.
-    let check = rt
-        .block_on(store_ref.ask(StoreCommand::Recover))
-        .expect("recover");
-    match check {
-        StoreResponse::State(Some(state)) => {
-            assert_eq!(state.value, 5_000, "replay must apply every event");
+    {
+        let mut group = c.benchmark_group("recover_replay_5k_events");
+        group.sample_size(20);
+        // Correctness gate: replay must actually apply all 5k events.
+        let check = rt
+            .block_on(store_ref.ask(StoreCommand::Recover))
+            .expect("recover");
+        match check {
+            StoreResponse::State(Some(state)) => {
+                assert_eq!(state.value, 5_000, "replay must apply every event");
+            }
+            other => panic!("expected full replay, got {other:?}"),
         }
-        other => panic!("expected full replay, got {other:?}"),
-    }
-    group.bench_function("full_memory_no_snapshot", |b| {
-        b.to_async(&rt).iter(|| async {
-            store_ref.ask(StoreCommand::Recover).await.expect("recover");
+        group.bench_function("full_memory_no_snapshot", |b| {
+            b.to_async(&rt).iter(|| async {
+                store_ref.ask(StoreCommand::Recover).await.expect("recover");
+            });
         });
-    });
-    group.finish();
+        group.finish();
+    }
     system.stop_system();
 }
 
@@ -329,17 +333,19 @@ fn bench_get_events_range_5k(c: &mut Criterion) {
         .block_on(system.create_root_actor("store", store))
         .expect("root");
     rt.block_on(fill_full(&store_ref, 5_000));
-    let mut group = c.benchmark_group("get_events_range_5k");
-    group.sample_size(20);
-    group.bench_function("full_memory", |b| {
-        b.to_async(&rt).iter(|| async {
-            store_ref
-                .ask(StoreCommand::GetEvents { from: 0, to: 4_999 })
-                .await
-                .expect("range");
+    {
+        let mut group = c.benchmark_group("get_events_range_5k");
+        group.sample_size(20);
+        group.bench_function("full_memory", |b| {
+            b.to_async(&rt).iter(|| async {
+                store_ref
+                    .ask(StoreCommand::GetEvents { from: 0, to: 4_999 })
+                    .await
+                    .expect("range");
+            });
         });
-    });
-    group.finish();
+        group.finish();
+    }
     system.stop_system();
 }
 
@@ -412,12 +418,12 @@ impl Actor for ProbeChild {
 }
 
 #[async_trait]
-impl Handler<ProbeChild> for ProbeChild {
+impl Handler<Self> for ProbeChild {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: ProbeMsg,
-        _ctx: &mut ActorContext<ProbeChild>,
+        _ctx: &mut ActorContext<Self>,
     ) -> Result<ProbeResp, ActorError> {
         Ok(ProbeResp)
     }
@@ -454,12 +460,12 @@ impl Actor for ProbeParent {
 }
 
 #[async_trait]
-impl Handler<ProbeParent> for ProbeParent {
+impl Handler<Self> for ProbeParent {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
         _msg: ProbeMsg,
-        ctx: &mut ActorContext<ProbeParent>,
+        ctx: &mut ActorContext<Self>,
     ) -> Result<ProbeResp, ActorError> {
         let _ = ctx.get_child::<ProbeChild>("probe-child").await?;
         Ok(ProbeResp)
@@ -540,23 +546,25 @@ fn bench_persist_full_sqlite(c: &mut Criterion) {
     let store_ref = rt
         .block_on(system.create_root_actor("store", store))
         .expect("root");
-    let mut group = c.benchmark_group("persist_full_sqlite");
-    group.sample_size(20);
-    group.bench_function("relaxed_10_per_iter", |b| {
-        b.to_async(&rt).iter(|| async {
-            for _ in 0..10 {
-                store_ref
-                    .ask(StoreCommand::PersistFull {
-                        event: Arc::new(BenchPersistEvent { delta: 1 }),
-                        state: Arc::new(BenchState::default()),
-                        snapshot_every: None,
-                    })
-                    .await
-                    .expect("persist");
-            }
+    {
+        let mut group = c.benchmark_group("persist_full_sqlite");
+        group.sample_size(20);
+        group.bench_function("relaxed_10_per_iter", |b| {
+            b.to_async(&rt).iter(|| async {
+                for _ in 0..10 {
+                    store_ref
+                        .ask(StoreCommand::PersistFull {
+                            event: Arc::new(BenchPersistEvent { delta: 1 }),
+                            state: Arc::new(BenchState::default()),
+                            snapshot_every: None,
+                        })
+                        .await
+                        .expect("persist");
+                }
+            });
         });
-    });
-    group.finish();
+        group.finish();
+    }
     system.stop_system();
 }
 

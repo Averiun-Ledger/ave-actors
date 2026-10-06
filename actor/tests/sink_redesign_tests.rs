@@ -173,7 +173,7 @@ async fn test_external_sink_registration() {
         .unwrap();
 
     let subscriber = CollectingSubscriber::new();
-    let mut sink = actor_ref
+    let sink = actor_ref
         .register_sink("ext_sink", None)
         .expect("valid sink");
     sink.add("sub1", subscriber.clone());
@@ -257,7 +257,7 @@ async fn test_sink_survives_restart() {
         .unwrap();
 
     let subscriber = CollectingSubscriber::new();
-    let mut sink = actor_ref
+    let sink = actor_ref
         .register_sink("survivor", None)
         .expect("valid sink");
     sink.add("sub1", subscriber.clone());
@@ -307,7 +307,7 @@ async fn test_parallel_dispatch() {
         .await
         .unwrap();
 
-    let mut sink = actor_ref
+    let sink = actor_ref
         .register_sink("parallel_sink", None)
         .expect("valid sink");
     sink.add("slow1", SlowSubscriber { delay_ms: 200 });
@@ -385,11 +385,11 @@ async fn test_publish_filtered() {
     let audit_sub = CollectingSubscriber::new();
     let metrics_sub = CollectingSubscriber::new();
 
-    let mut audit_sink =
+    let audit_sink =
         actor_ref.register_sink("audit", None).expect("valid sink");
     audit_sink.add("sub1", audit_sub.clone());
 
-    let mut metrics_sink = actor_ref
+    let metrics_sink = actor_ref
         .register_sink("metrics", None)
         .expect("valid sink");
     metrics_sink.add("sub1", metrics_sub.clone());
@@ -486,7 +486,7 @@ async fn test_sink_entry_filter() {
     let all_sub = CollectingSubscriber::new();
     let high_sub = CollectingSubscriber::new();
 
-    let mut sink = actor_ref
+    let sink = actor_ref
         .register_sink("filter_sink", None)
         .expect("valid sink");
     sink.add("all", all_sub.clone());
@@ -533,7 +533,7 @@ async fn test_remove_sink() {
         .unwrap();
 
     let subscriber = CollectingSubscriber::new();
-    let mut sink = actor_ref.register_sink("tmp", None).expect("valid sink");
+    let sink = actor_ref.register_sink("tmp", None).expect("valid sink");
     sink.add("sub1", subscriber.clone());
 
     actor_ref.tell(TestMsg::Emit(1)).await.unwrap();
@@ -571,7 +571,7 @@ async fn test_retry_policy_delivers_after_failures() {
         .unwrap();
 
     let subscriber = FailingThenOkSubscriber::new(2);
-    let mut sink = actor_ref
+    let sink = actor_ref
         .register_sink("retry_sink", None)
         .expect("valid sink");
     sink.add_entry(
@@ -661,12 +661,10 @@ async fn test_actor_routes_to_named_sink() {
     let sink_a_sub = CollectingSubscriber::new();
     let sink_b_sub = CollectingSubscriber::new();
 
-    let mut sink_a =
-        actor_ref.register_sink("sink_a", None).expect("valid sink");
+    let sink_a = actor_ref.register_sink("sink_a", None).expect("valid sink");
     sink_a.add("sub", sink_a_sub.clone());
 
-    let mut sink_b =
-        actor_ref.register_sink("sink_b", None).expect("valid sink");
+    let sink_b = actor_ref.register_sink("sink_b", None).expect("valid sink");
     sink_b.add("sub", sink_b_sub.clone());
 
     actor_ref
@@ -725,7 +723,7 @@ async fn test_one_subscriber_fails_others_ok() {
     let ok_sub_b = CollectingSubscriber::new();
     let failing_sub = CollectingSubscriber::new();
 
-    let mut sink = actor_ref
+    let sink = actor_ref
         .register_sink("fanout_sink", None)
         .expect("valid sink");
     sink.add("ok_a", ok_sub_a.clone());
@@ -765,7 +763,7 @@ async fn test_register_sink_with_buffer_delivers_events() {
         .unwrap();
 
     let subscriber = CollectingSubscriber::new();
-    let mut sink = actor_ref
+    let sink = actor_ref
         .register_sink_with_buffer("buffered_sink", None, 8)
         .expect("valid sink");
     sink.add("sub1", subscriber.clone());
@@ -816,7 +814,7 @@ async fn test_panicking_filter_does_not_kill_sink() {
         .unwrap();
 
     let ok_sub = CollectingSubscriber::new();
-    let mut sink = actor_ref
+    let sink = actor_ref
         .register_sink("panic_sink", None)
         .expect("valid sink");
     sink.add("ok", ok_sub.clone());
@@ -871,7 +869,7 @@ async fn test_slow_subscriber_does_not_block_fast_subscriber() {
 
     let fast_sub = CollectingSubscriber::new();
     let release = Arc::new(tokio::sync::Notify::new());
-    let mut sink = actor_ref
+    let sink = actor_ref
         .register_sink("holb_sink", None)
         .expect("valid sink");
     sink.add(
@@ -944,7 +942,7 @@ async fn test_retry_preserves_per_subscriber_order() {
         events: Arc::new(Mutex::new(Vec::new())),
         fails_left: Arc::new(AtomicU32::new(2)),
     };
-    let mut sink = actor_ref
+    let sink = actor_ref
         .register_sink("order_sink", None)
         .expect("valid sink");
     sink.add_entry(

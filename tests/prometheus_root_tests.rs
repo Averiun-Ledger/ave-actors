@@ -18,12 +18,12 @@ mod tests {
     impl NotPersistentActor for Dummy {}
 
     #[async_trait]
-    impl Handler<Dummy> for Dummy {
+    impl Handler<Self> for Dummy {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             _msg: (),
-            _ctx: &mut ActorContext<Dummy>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<(), ActorError> {
             Ok(())
         }

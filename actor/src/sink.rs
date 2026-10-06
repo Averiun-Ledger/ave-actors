@@ -242,13 +242,13 @@ impl<E: Event> SinkInner<E> {
     }
 
     #[cfg(not(feature = "prometheus"))]
-    fn inc_dropped_full(&self) {}
+    const fn inc_dropped_full(&self) {}
 
     #[cfg(not(feature = "prometheus"))]
-    fn inc_dropped_closed(&self) {}
+    const fn inc_dropped_closed(&self) {}
 
     #[cfg(not(feature = "prometheus"))]
-    fn inc_delivery_failure(&self) {}
+    const fn inc_delivery_failure(&self) {}
 }
 
 /// Spawns the delivery pump for one subscriber.
@@ -511,6 +511,8 @@ impl<E: Event> Sink<E> {
             _path.as_ref().map(|p| Arc::from(p.to_string()));
 
         #[cfg(feature = "prometheus")]
+        let sink_name = name;
+        #[cfg(feature = "prometheus")]
         let (
             dropped_full_counter,
             dropped_closed_counter,
@@ -519,7 +521,6 @@ impl<E: Event> Sink<E> {
             dropped_closed_detail,
             delivery_failure_detail,
         ) = if let (Some(m), Some(scope)) = (metrics.as_ref(), scope) {
-            let sink_name = name.clone();
             let dropped_full = m
                 .sink_events_dropped_total
                 .get_or_create(&SinkDropLabels {
@@ -681,6 +682,9 @@ impl<E: Event> Sink<E> {
             });
 
             SinkInner {
+                #[cfg(feature = "prometheus")]
+                name: sink_name,
+                #[cfg(not(feature = "prometheus"))]
                 name,
                 #[cfg(feature = "prometheus")]
                 dropped_full_counter,
@@ -748,7 +752,7 @@ impl<E: Event> Sink<E> {
     }
 
     /// Spawns the delivery pump for `entry` and registers both.
-    fn push_entry(&mut self, entry: SinkEntry<E>) {
+    fn push_entry(&self, entry: SinkEntry<E>) {
         let (sender, receiver) =
             tokio::sync::mpsc::channel::<Arc<E>>(self.inner.buffer_capacity);
         let handle =
@@ -765,16 +769,12 @@ impl<E: Event> Sink<E> {
     }
 
     /// Add a subscriber entry to this sink.
-    pub fn add(
-        &mut self,
-        id: impl Into<String>,
-        subscriber: impl Subscriber<E>,
-    ) {
+    pub fn add(&self, id: impl Into<String>, subscriber: impl Subscriber<E>) {
         self.push_entry(SinkEntry::new(id, subscriber));
     }
 
     /// Add a pre-built [`SinkEntry`] to this sink.
-    pub fn add_entry(&mut self, entry: SinkEntry<E>) {
+    pub fn add_entry(&self, entry: SinkEntry<E>) {
         self.push_entry(entry);
     }
 
@@ -790,6 +790,7 @@ impl<E: Event> Sink<E> {
             .unwrap_or_else(|e| e.into_inner());
         let pos = entries.iter().position(|s| s.entry.id == id)?;
         let active = entries.remove(pos);
+        drop(entries);
         active.handle.abort();
         Some(active.entry)
     }
@@ -1023,8 +1024,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_concurrency_limit() {
-        let mut sink =
-            test_sink_new("test", Some(2)).expect("valid concurrency");
+        let sink = test_sink_new("test", Some(2)).expect("valid concurrency");
         let done = Arc::new(AtomicUsize::new(0));
         for i in 0..5 {
             sink.add(
@@ -1052,8 +1052,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_hot_reload_max_concurrent() {
-        let mut sink =
-            test_sink_new("test", Some(1)).expect("valid concurrency");
+        let sink = test_sink_new("test", Some(1)).expect("valid concurrency");
         let done = Arc::new(AtomicUsize::new(0));
         for i in 0..5 {
             sink.add(
@@ -1102,7 +1101,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_no_event_loss() {
-        let mut sink = test_sink_new("test", None).expect("valid concurrency");
+        let sink = test_sink_new("test", None).expect("valid concurrency");
         let count = Arc::new(AtomicUsize::new(0));
         sink.add(
             "counter",
@@ -1389,7 +1388,7 @@ mod prometheus_tests {
     #[tokio::test]
     async fn test_sink_delivery_failures_metric() {
         let metrics = Arc::new(ActorMetrics::new());
-        let mut sink = Sink::new_with_metrics(
+        let sink = Sink::new_with_metrics(
             "fail",
             None,
             ActorPath::from("/user/test"),
@@ -1430,7 +1429,7 @@ mod prometheus_tests {
         use crate::metrics::SinkDetailLabels;
 
         let metrics = Arc::new(ActorMetrics::new());
-        let mut sink = Sink::new_with_metrics(
+        let sink = Sink::new_with_metrics(
             "detail",
             None,
             ActorPath::from("/user/test"),

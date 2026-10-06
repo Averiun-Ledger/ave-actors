@@ -409,14 +409,16 @@ where
             });
         }
 
-        let default_prefix;
-        let prefix = match prefix {
-            Some(prefix) => prefix,
-            None => {
+        // `String::new` never allocates; the real value is assigned
+        // inside the closure on the `None` path only.
+        let mut default_prefix = String::new();
+        let prefix = prefix.map_or_else(
+            || {
                 default_prefix = default_store_prefix(ctx.path());
                 default_prefix.as_str()
-            }
-        };
+            },
+            |prefix| prefix,
+        );
 
         #[cfg(feature = "prometheus")]
         let store = {
@@ -817,7 +819,7 @@ where
     {
         #[cfg(feature = "prometheus")]
         {
-            Store::new(
+            Self::new(
                 name,
                 prefix,
                 manager,
@@ -829,7 +831,7 @@ where
         }
         #[cfg(not(feature = "prometheus"))]
         {
-            Store::new(name, prefix, manager, key_box, initial_state)
+            Self::new(name, prefix, manager, key_box, initial_state)
         }
     }
 
@@ -1369,7 +1371,7 @@ where
     /// `snapshot_every=None`) bounds peak memory to one window of
     /// decrypted events.
     fn apply_events(
-        &mut self,
+        &self,
         from: u64,
         to: u64,
         state: Arc<A::State>,
@@ -3325,12 +3327,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<V2Actor> for V2Actor {
+    impl Handler<Self> for V2Actor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             _msg: CounterMessage,
-            _ctx: &mut ActorContext<V2Actor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<CounterResponse, ActorError> {
             Ok(CounterResponse::Value(0))
         }
@@ -3540,12 +3542,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<V2StateActor> for V2StateActor {
+    impl Handler<Self> for V2StateActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
             _msg: CounterMessage,
-            _ctx: &mut ActorContext<V2StateActor>,
+            _ctx: &mut ActorContext<Self>,
         ) -> Result<CounterResponse, ActorError> {
             Ok(CounterResponse::Value(0))
         }

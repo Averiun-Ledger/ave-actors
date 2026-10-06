@@ -59,7 +59,7 @@ pub struct ActorContext<A: Actor + Handler<A>> {
 
 /// Parameters needed to build an `ActorContext`. Grouped into a struct to keep
 /// the constructor signature readable.
-pub(crate) struct ActorContextParams<A: Actor + Handler<A>> {
+pub struct ActorContextParams<A: Actor + Handler<A>> {
     pub stop: StopSender,
     pub path: ActorPath,
     pub system: SystemRef,
@@ -600,7 +600,7 @@ pub const MIN_MAILBOX_CAPACITY: usize = 1;
 pub const MAX_MAILBOX_CAPACITY: usize = 1_000_000;
 
 /// Validates that `capacity` is within the allowed mailbox capacity range.
-pub(crate) fn validate_mailbox_capacity(capacity: usize) -> Result<(), Error> {
+pub fn validate_mailbox_capacity(capacity: usize) -> Result<(), Error> {
     if capacity < MIN_MAILBOX_CAPACITY {
         return Err(Error::InvalidConfiguration {
             component: "actor mailbox".to_owned(),
@@ -627,10 +627,7 @@ pub const MIN_TIMEOUT: Duration = Duration::from_millis(1);
 pub const MAX_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Validates that `timeout` is within the allowed timeout range.
-pub(crate) fn validate_timeout(
-    name: &str,
-    timeout: Duration,
-) -> Result<(), Error> {
+pub fn validate_timeout(name: &str, timeout: Duration) -> Result<(), Error> {
     if timeout < MIN_TIMEOUT {
         return Err(Error::InvalidConfiguration {
             component: name.to_owned(),
@@ -651,7 +648,7 @@ pub(crate) fn validate_timeout(
 }
 
 /// Validates an optional timeout, treating `None` as valid.
-pub(crate) fn validate_optional_timeout(
+pub fn validate_optional_timeout(
     name: &str,
     timeout: Option<Duration>,
 ) -> Result<(), Error> {
@@ -668,7 +665,7 @@ pub const MIN_MAX_TIMERS: usize = 1;
 pub const MAX_MAX_TIMERS: usize = 100_000;
 
 /// Validates that `max_timers` is within the allowed range.
-pub(crate) fn validate_max_timers(max_timers: usize) -> Result<(), Error> {
+pub fn validate_max_timers(max_timers: usize) -> Result<(), Error> {
     if max_timers < MIN_MAX_TIMERS {
         return Err(Error::InvalidConfiguration {
             component: "actor timers".to_owned(),
@@ -954,7 +951,7 @@ where
     /// [`SystemRef::create_root_actor`](crate::SystemRef::create_root_actor)
     /// or [`ActorContext::create_child`](crate::ActorContext::create_child).
     #[cfg(not(feature = "prometheus"))]
-    pub(crate) fn new(
+    pub(crate) const fn new(
         path: Arc<ActorPath>,
         sender: HandleHelper<A>,
         stop_sender: StopSender,
@@ -973,7 +970,7 @@ where
     /// This is the internal constructor used by the actor runtime when the
     /// `prometheus` feature is enabled.
     #[cfg(feature = "prometheus")]
-    pub(crate) fn new_with_metrics(
+    pub(crate) const fn new_with_metrics(
         path: Arc<ActorPath>,
         sender: HandleHelper<A>,
         stop_sender: StopSender,
@@ -1276,7 +1273,7 @@ mod test {
         let actor_ref = system.create_root_actor("test", actor).await.unwrap();
 
         let subscriber = TestSubscriber::new();
-        let mut sink = actor_ref
+        let sink = actor_ref
             .register_sink("test_sink", None)
             .expect("valid sink");
         sink.add("sub1", subscriber.clone());

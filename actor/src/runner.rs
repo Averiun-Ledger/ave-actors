@@ -28,7 +28,7 @@ use tokio::{
 use tracing::{debug, error, warn};
 
 #[cfg(feature = "prometheus")]
-pub(crate) fn actor_type_name<A: Actor>() -> Arc<str> {
+pub fn actor_type_name<A: Actor>() -> Arc<str> {
     let full = std::any::type_name::<A>();
     let short = full
         .rsplit("::")
@@ -41,7 +41,7 @@ pub(crate) fn actor_type_name<A: Actor>() -> Arc<str> {
 }
 
 #[cfg(feature = "prometheus")]
-fn strategy_label(strategy: &SupervisionStrategy) -> &'static str {
+const fn strategy_label(strategy: &SupervisionStrategy) -> &'static str {
     match strategy {
         SupervisionStrategy::Stop => "Stop",
         SupervisionStrategy::Retry(strategy) => match strategy {
@@ -199,7 +199,7 @@ where
             sinks.clone(),
         );
         let runner: Self = Self {
-            path: path.clone(),
+            path,
             actor,
             lifecycle: ActorLifecycle::Created,
             supervision_strategy: A::supervision_strategy(),

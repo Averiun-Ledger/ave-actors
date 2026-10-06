@@ -1513,7 +1513,7 @@ fn open_with_tuning<P: AsRef<Path>>(
 
 /// Returns `true` for transient SQLite lock-contention errors worth
 /// retrying during setup.
-fn is_transient_lock(e: &SqliteError) -> bool {
+const fn is_transient_lock(e: &SqliteError) -> bool {
     use rusqlite::ffi::ErrorCode;
     matches!(
         e,

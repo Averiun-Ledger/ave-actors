@@ -88,7 +88,7 @@ impl Message for ChainMsg {}
 
 #[derive(Debug, Clone)]
 struct ChainActor {
-    next: Option<ActorRef<ChainActor>>,
+    next: Option<ActorRef<Self>>,
     terminal: Arc<AtomicU64>,
 }
 
@@ -274,8 +274,7 @@ fn emitter(
             .create_root_actor("emitter", EmitterActor)
             .await
             .expect("create emitter");
-        let mut sink =
-            actor.register_sink("bench", None).expect("register sink");
+        let sink = actor.register_sink("bench", None).expect("register sink");
         let mut counters = Vec::with_capacity(subscribers);
         for i in 0..subscribers {
             let count = Arc::new(AtomicU64::new(0));
