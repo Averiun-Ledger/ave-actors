@@ -2,18 +2,14 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler,
-    Message, Response, Subscriber,
+    Actor, ActorContext, ActorPath, Error, Event, Handler, Message, Response,
+    Subscriber, TestProbe, TestSystem,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use test_log::test;
-use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
-
-mod helpers;
 
 // Test structures for sink and handler testing
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +19,7 @@ pub struct SinkTestEvent {
 }
 
 impl Event for SinkTestEvent {}
+impl Message for SinkTestEvent {}
 
 #[derive(Debug, Clone)]
 pub struct TestActor {
@@ -86,55 +83,17 @@ impl Handler<Self> for TestActor {
     }
 }
 
-// Test subscriber that collects events
+// Failing subscriber for the error-isolation test (not a pure
+// collector, so it stays hand-rolled).
 #[derive(Clone)]
-pub struct CollectingSubscriber {
-    pub events: Arc<Mutex<Vec<Arc<SinkTestEvent>>>>,
-    pub should_fail: bool,
-}
-
-impl Default for CollectingSubscriber {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CollectingSubscriber {
-    pub fn new() -> Self {
-        Self {
-            events: Arc::new(Mutex::new(Vec::new())),
-            should_fail: false,
-        }
-    }
-
-    pub fn new_failing() -> Self {
-        Self {
-            events: Arc::new(Mutex::new(Vec::new())),
-            should_fail: true,
-        }
-    }
-
-    pub async fn get_events(&self) -> Vec<SinkTestEvent> {
-        self.events
-            .lock()
-            .await
-            .iter()
-            .map(|e| (**e).clone())
-            .collect()
-    }
-}
+pub struct FailingSubscriber;
 
 #[async_trait]
-impl Subscriber<SinkTestEvent> for CollectingSubscriber {
-    async fn notify(&self, event: Arc<SinkTestEvent>) -> Result<(), Error> {
-        if self.should_fail {
-            // Simulate subscriber failure
-            return Err(Error::Functional {
-                description: "Subscriber intentionally failed".to_owned(),
-            });
-        }
-        self.events.lock().await.push(event);
-        Ok(())
+impl Subscriber<SinkTestEvent> for FailingSubscriber {
+    async fn notify(&self, _event: Arc<SinkTestEvent>) -> Result<(), Error> {
+        Err(Error::Functional {
+            description: "Subscriber intentionally failed".to_owned(),
+        })
     }
 }
 
@@ -142,21 +101,19 @@ impl Subscriber<SinkTestEvent> for CollectingSubscriber {
 
 #[test(tokio::test)]
 async fn test_sink_basic_functionality() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = TestActor { counter: 0 };
     let actor_ref = system.create_root_actor("sink_test", actor).await.unwrap();
 
-    let subscriber = CollectingSubscriber::new();
-    let subscriber_clone = subscriber.clone();
+    let probe = TestProbe::<SinkTestEvent>::new();
 
     // Register sink on the actor
     let sink = actor_ref
         .register_sink("test_sink", None)
         .expect("valid sink");
-    sink.add("sub1", subscriber);
+    sink.add("sub1", probe.clone());
 
     // Emit some events (sink registration needs no warm-up sleep: sends queue
     // in the sink buffer regardless).
@@ -173,19 +130,9 @@ async fn test_sink_basic_functionality() {
         .await
         .unwrap();
 
-    // Poll for all three events instead of a fixed sleep.
-    helpers::assert_eventually(
-        "sink collects all three events",
-        Duration::from_secs(2),
-        || async {
-            let events = subscriber_clone.get_events().await;
-            if events.len() == 3 { Some(()) } else { None }
-        },
-    )
-    .await;
+    let events = probe.expect_count(3, Duration::from_secs(2)).await.unwrap();
 
     // Verify events were collected
-    let events = subscriber_clone.get_events().await;
     assert_eq!(events.len(), 3);
     assert_eq!(events[0].id, 1);
     assert_eq!(events[0].data, "test1");
@@ -193,13 +140,14 @@ async fn test_sink_basic_functionality() {
     assert_eq!(events[1].data, "test2");
     assert_eq!(events[2].id, 3);
     assert_eq!(events[2].data, "test3");
+
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_sink_with_failing_subscriber() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = TestActor { counter: 0 };
     let actor_ref = system
@@ -207,15 +155,14 @@ async fn test_sink_with_failing_subscriber() {
         .await
         .unwrap();
 
-    let subscriber = CollectingSubscriber::new_failing();
-
     // Register sink with failing subscriber
     let sink = actor_ref
         .register_sink("failing_sink", None)
         .expect("valid sink");
-    sink.add("sub1", subscriber);
+    sink.add("sub1", FailingSubscriber);
 
-    // Emit event - this should not crash the system even though subscriber fails
+    // Emit event - this should not crash the system even though
+    // subscriber fails
     actor_ref
         .tell(TestMessage::Emit(1, "test".to_string()))
         .await
@@ -225,6 +172,8 @@ async fn test_sink_with_failing_subscriber() {
     // is needed before asserting the actor is still alive.
     let response = actor_ref.ask(TestMessage::GetCounter).await.unwrap();
     assert_eq!(response.value, 1);
+
+    harness.shutdown().await;
 }
 
 // Tests for Handler functionality and error scenarios
@@ -285,9 +234,8 @@ impl Handler<Self> for FailingHandlerActor {
 
 #[test(tokio::test)]
 async fn test_handler_error_scenarios() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = FailingHandlerActor {
         fail_on_message: true,
@@ -309,6 +257,8 @@ async fn test_handler_error_scenarios() {
         }
         _ => panic!("Expected functional error"),
     }
+
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
@@ -364,9 +314,8 @@ async fn test_message_serialization_edge_cases() {
         }
     }
 
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = ComplexHandlerActor;
     let actor_ref = system
@@ -386,6 +335,8 @@ async fn test_message_serialization_edge_cases() {
 
     let result = actor_ref.ask(complex_msg).await.unwrap();
     assert_eq!(result.value, 1);
+
+    harness.shutdown().await;
 }
 
 // Test mailbox behavior and message ordering
@@ -437,9 +388,8 @@ async fn test_message_ordering_and_mailbox() {
         }
     }
 
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = OrderingActor {
         received_order: Vec::new(),
@@ -463,6 +413,8 @@ async fn test_message_ordering_and_mailbox() {
     // Verify final count
     let result = actor_ref.ask(OrderedMessage { sequence: 0 }).await.unwrap();
     assert_eq!(result.value, 6); // 5 tells + 1 ask
+
+    harness.shutdown().await;
 }
 
 // Test for handler with context operations
@@ -533,9 +485,8 @@ async fn test_handler_context_operations() {
         }
     }
 
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = ContextActor {
         path_checked: false,
@@ -557,4 +508,6 @@ async fn test_handler_context_operations() {
     // Verify both operations completed
     let result = actor_ref.ask(ContextMessage::GetState).await.unwrap();
     assert_eq!(result.value, 2); // Both flags should be true
+
+    harness.shutdown().await;
 }

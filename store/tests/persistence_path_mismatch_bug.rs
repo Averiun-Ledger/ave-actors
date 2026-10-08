@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
-    Handler, Message, Response,
+    Actor, ActorContext, ActorPath, Error as ActorError, Event, Handler,
+    Message, Response, TestSystem,
 };
 use ave_actors_store::memory::MemoryManager;
 use ave_actors_store::store::PersistentActor;
@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use test_log::test;
 use tokio::sync::Mutex as TokioMutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 static SHARED: OnceLock<Arc<TokioMutex<MemoryManager>>> = OnceLock::new();
@@ -121,9 +120,8 @@ impl PersistentActor for PathActor {
 
 #[test(tokio::test)]
 async fn test_path_mismatch_scenario() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("my_path_actor", PathActor::initial(()))
@@ -146,13 +144,13 @@ async fn test_path_mismatch_scenario() {
         resp.0, 42,
         "Should recover value when using same actor name"
     );
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_explicit_prefix_usage() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
     struct PrefixActorState {
@@ -260,4 +258,5 @@ async fn test_explicit_prefix_usage() {
     let resp = actor_ref2.ask(PathMsg(0)).await.unwrap();
 
     assert_eq!(resp.0, 99, "Should recover with same explicit prefix");
+    harness.shutdown().await;
 }

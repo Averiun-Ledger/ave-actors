@@ -5,12 +5,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error, Handler, Message,
-    NotPersistentActor, OverflowStrategy, Response,
+    Actor, ActorContext, ActorPath, Error, Handler, Message,
+    NotPersistentActor, OverflowStrategy, Response, TestSystem,
 };
 use test_log::test;
 use tokio::sync::{Mutex, Notify};
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(Debug, Clone)]
@@ -202,9 +201,8 @@ impl Handler<Self> for FailActor {
 
 #[test(tokio::test)]
 async fn test_backpressure_blocks_when_full() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
@@ -251,29 +249,14 @@ async fn test_backpressure_blocks_when_full() -> Result<(), Error> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    system.stop_system();
-    join_runner(runner_handle).await
-}
-
-async fn join_runner(
-    handle: tokio::task::JoinHandle<ave_actors_actor::ShutdownReason>,
-) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(2), handle)
-        .await
-        .map_err(|_| Error::Functional {
-            description: "runner timed out".to_owned(),
-        })?
-        .map_err(|_| Error::Functional {
-            description: "runner panicked".to_owned(),
-        })?;
+    harness.shutdown().await;
     Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_drop_newest_discards_when_full() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
@@ -311,15 +294,14 @@ async fn test_drop_newest_discards_when_full() -> Result<(), Error> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_fail_returns_mailbox_full() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
@@ -347,8 +329,8 @@ async fn test_fail_returns_mailbox_full() -> Result<(), Error> {
 
     release.notify_one();
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 // ============================================================================
@@ -465,9 +447,8 @@ impl Handler<Self> for TooLargeCapacityActor {
 
 #[test(tokio::test)]
 async fn test_mailbox_capacity_zero_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let result = system
         .create_root_actor::<ZeroCapacityActor, _>(
@@ -482,15 +463,14 @@ async fn test_mailbox_capacity_zero_is_rejected() -> Result<(), Error> {
         result
     );
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_mailbox_capacity_above_max_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let result = system
         .create_root_actor::<TooLargeCapacityActor, _>(
@@ -505,15 +485,14 @@ async fn test_mailbox_capacity_above_max_is_rejected() -> Result<(), Error> {
         result
     );
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_mailbox_capacity_one_is_accepted() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = system
         .create_root_actor::<CapacityActor, _>("valid_capacity", CapacityActor)
@@ -522,8 +501,8 @@ async fn test_mailbox_capacity_one_is_accepted() -> Result<(), Error> {
     let response = actor.ask(BoundMsg::GetCount).await?;
     assert_eq!(response.0, 0);
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
@@ -565,9 +544,8 @@ async fn test_mailbox_capacity_at_max_is_accepted() -> Result<(), Error> {
         }
     }
 
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = system
         .create_root_actor::<MaxCapacityActor, _>(
@@ -579,6 +557,6 @@ async fn test_mailbox_capacity_at_max_is_accepted() -> Result<(), Error> {
     let response = actor.ask(BoundMsg::GetCount).await?;
     assert_eq!(response.0, 0);
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }

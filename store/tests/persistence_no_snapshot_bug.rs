@@ -14,13 +14,12 @@ use ave_actors_store::{
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler,
-    Message, Response,
+    Actor, ActorContext, Error as ActorError, Event, Handler, Message,
+    Response, TestSystem,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use test_log::test;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(
@@ -116,9 +115,8 @@ impl PersistentActor for TestActor {
 
 #[test(tokio::test)]
 async fn test_persistence_recovery_without_snapshot() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let memory_manager = MemoryManager::default();
 
@@ -180,13 +178,13 @@ async fn test_persistence_recovery_without_snapshot() {
         }
         _ => panic!("Unexpected response type"),
     }
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_recover_without_snapshot_replays_all_events() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let memory_manager = MemoryManager::default();
 
@@ -253,4 +251,5 @@ async fn test_recover_without_snapshot_replays_all_events() {
     if let StoreResponse::NextEventNumber(count) = result {
         assert_eq!(count, 2);
     }
+    harness.shutdown().await;
 }

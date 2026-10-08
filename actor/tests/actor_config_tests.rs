@@ -2,12 +2,11 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error, Handler, Message,
-    NotPersistentActor, Response,
+    Actor, ActorContext, ActorPath, Error, Handler, Message,
+    NotPersistentActor, Response, TestSystem,
 };
 use std::time::Duration;
 use test_log::test;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(Clone)]
@@ -17,20 +16,6 @@ impl Message for Msg {}
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct EmptyResponse;
 impl Response for EmptyResponse {}
-
-async fn join_runner(
-    handle: tokio::task::JoinHandle<ave_actors_actor::ShutdownReason>,
-) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(2), handle)
-        .await
-        .map_err(|_| Error::Functional {
-            description: "runner timed out".to_owned(),
-        })?
-        .map_err(|_| Error::Functional {
-            description: "runner panicked".to_owned(),
-        })
-        .map(|_| ())
-}
 
 // ===== Valid actor ==========================================================
 
@@ -70,9 +55,8 @@ impl Handler<Self> for ValidActor {
 
 #[test(tokio::test)]
 async fn test_valid_actor_configuration_is_accepted() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = system
         .create_root_actor::<ValidActor, _>("valid", ValidActor)
@@ -81,8 +65,8 @@ async fn test_valid_actor_configuration_is_accepted() -> Result<(), Error> {
     let response = actor.ask(Msg).await?;
     assert_eq!(response, EmptyResponse);
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 // ===== Invalid timeout actors ===============================================
@@ -207,33 +191,30 @@ macro_rules! assert_invalid_configuration {
 
 #[test(tokio::test)]
 async fn test_zero_mailbox_drain_timeout_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     assert_invalid_configuration!(system, ZeroMailboxDrainActor, "zero_drain");
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_max_mailbox_drain_timeout_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     assert_invalid_configuration!(system, MaxMailboxDrainActor, "max_drain");
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_zero_event_drain_timeout_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     assert_invalid_configuration!(
         system,
@@ -241,15 +222,14 @@ async fn test_zero_event_drain_timeout_is_rejected() -> Result<(), Error> {
         "zero_event_drain"
     );
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_max_event_drain_timeout_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     assert_invalid_configuration!(
         system,
@@ -257,56 +237,52 @@ async fn test_max_event_drain_timeout_is_rejected() -> Result<(), Error> {
         "max_event_drain"
     );
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_zero_startup_timeout_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     assert_invalid_configuration!(system, ZeroStartupActor, "zero_startup");
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_max_startup_timeout_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     assert_invalid_configuration!(system, MaxStartupActor, "max_startup");
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_zero_stop_timeout_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     assert_invalid_configuration!(system, ZeroStopActor, "zero_stop");
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_max_stop_timeout_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     assert_invalid_configuration!(system, MaxStopActor, "max_stop");
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 // ===== max_timers validation =================================================
@@ -358,21 +334,19 @@ define_max_timers_actor!(TooManyTimersActor, 100_001);
 
 #[test(tokio::test)]
 async fn test_zero_max_timers_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     assert_invalid_configuration!(system, ZeroTimersActor, "zero_timers");
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_above_max_timers_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     assert_invalid_configuration!(
         system,
@@ -380,17 +354,16 @@ async fn test_above_max_timers_is_rejected() -> Result<(), Error> {
         "too_many_timers"
     );
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 // ===== ask_timeout validation =================================================
 
 #[test(tokio::test)]
 async fn test_ask_timeout_zero_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = system
         .create_root_actor::<ValidActor, _>("ask_timeout_zero", ValidActor)
@@ -403,15 +376,14 @@ async fn test_ask_timeout_zero_is_rejected() -> Result<(), Error> {
         result
     );
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_ask_timeout_max_is_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = system
         .create_root_actor::<ValidActor, _>("ask_timeout_max", ValidActor)
@@ -424,6 +396,6 @@ async fn test_ask_timeout_max_is_rejected() -> Result<(), Error> {
         result
     );
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }

@@ -8,8 +8,8 @@
 mod helpers;
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
-    Handler, Message, Response,
+    Actor, ActorContext, ActorPath, Error as ActorError, Event, Handler,
+    Message, Response, TestSystem,
 };
 use ave_actors_store::memory::MemoryManager;
 use ave_actors_store::store::PersistentActor;
@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use test_log::test;
 use tokio::sync::Mutex as TokioMutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 static SHARED_MGR: OnceLock<Arc<TokioMutex<MemoryManager>>> = OnceLock::new();
@@ -134,9 +133,8 @@ impl PersistentActor for SingleEventActor {
 
 #[test(tokio::test)]
 async fn test_single_event_no_recovery() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("my_actor", SingleEventActor::initial(()))
@@ -162,15 +160,15 @@ async fn test_single_event_no_recovery() {
         resp.data, "Hello World",
         "Should recover data after graceful stop"
     );
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_debug_event_counter_after_first_event() {
     use ave_actors_store::store::{StoreCommand, StoreResponse};
 
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let memory_manager = MemoryManager::default();
 
@@ -208,4 +206,5 @@ async fn test_debug_event_counter_after_first_event() {
             "event_counter should be 1 after persisting 1 event"
         );
     }
+    harness.shutdown().await;
 }

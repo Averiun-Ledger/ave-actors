@@ -2,15 +2,14 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler,
-    Message, Response,
+    Actor, ActorContext, Error as ActorError, Event, Handler, Message,
+    Response, TestSystem,
 };
 use ave_actors_store::{memory::MemoryManager, store::PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use test_log::test;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
@@ -107,9 +106,8 @@ impl Handler<Self> for NamedStoreActor {
 
 #[test(tokio::test)]
 async fn test_store_name_empty_is_rejected() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = NamedStoreActor::initial(("", None));
     let result = system.create_root_actor("empty_name", actor).await;
@@ -119,13 +117,13 @@ async fn test_store_name_empty_is_rejected() {
         "expected InvalidConfiguration for empty store name, got {:?}",
         result
     );
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_store_name_with_invalid_chars_is_rejected() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = NamedStoreActor::initial(("my store!", None));
     let result = system.create_root_actor("invalid_name", actor).await;
@@ -135,13 +133,13 @@ async fn test_store_name_with_invalid_chars_is_rejected() {
         "expected InvalidConfiguration for invalid store name, got {:?}",
         result
     );
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_store_prefix_empty_is_rejected() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = NamedStoreActor::initial(("valid_store", Some("")));
     let result = system.create_root_actor("empty_prefix", actor).await;
@@ -151,13 +149,13 @@ async fn test_store_prefix_empty_is_rejected() {
         "expected InvalidConfiguration for empty prefix, got {:?}",
         result
     );
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_store_name_and_prefix_valid_succeeds() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = NamedStoreActor::initial(("valid_store", Some("valid_prefix")));
     let result = system.create_root_actor("valid_name", actor).await;
@@ -167,4 +165,5 @@ async fn test_store_name_and_prefix_valid_succeeds() {
         "expected actor creation to succeed for valid name/prefix, got {:?}",
         result
     );
+    harness.shutdown().await;
 }

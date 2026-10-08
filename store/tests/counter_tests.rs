@@ -14,14 +14,13 @@ use ave_actors_store::{
 use test_log::test;
 
 use ave_actors_actor::{
-    Actor, ActorContext, ActorSystem, EncryptedKey, Error as ActorError, Event,
-    Handler, Message, Response,
+    Actor, ActorContext, EncryptedKey, Error as ActorError, Event, Handler,
+    Message, Response, TestSystem,
 };
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(
@@ -132,9 +131,8 @@ impl Handler<Self> for CounterTestActor {
 /// Test that event_counter starts at 0 for a new store
 #[test(tokio::test)]
 async fn test_event_counter_starts_at_zero() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         CounterTestActor,
@@ -155,15 +153,15 @@ async fn test_event_counter_starts_at_zero() {
         }
         _ => panic!("Expected NextEventNumber response"),
     }
+    harness.shutdown().await;
 }
 
 /// Test that event_counter = 1 after persisting first event
 #[test(tokio::test)]
 
 async fn test_event_counter_after_first_event() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         CounterTestActor,
@@ -215,15 +213,15 @@ async fn test_event_counter_after_first_event() {
         }
         _ => panic!("Expected Events response"),
     }
+    harness.shutdown().await;
 }
 
 /// Test event_counter increments correctly for multiple events
 #[test(tokio::test)]
 
 async fn test_event_counter_multiple_events() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         CounterTestActor,
@@ -276,14 +274,14 @@ async fn test_event_counter_multiple_events() {
         }
         _ => panic!("Expected Events response"),
     }
+    harness.shutdown().await;
 }
 
 /// Test GetEvents returns empty for a range that does not overlap persisted events
 #[test(tokio::test)]
 async fn test_get_events_out_of_range_returns_empty() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         CounterTestActor,
@@ -315,14 +313,14 @@ async fn test_get_events_out_of_range_returns_empty() {
         }
         _ => panic!("Expected Events response"),
     }
+    harness.shutdown().await;
 }
 
 /// Test GetEvents clamps partially overlapping ranges instead of failing
 #[test(tokio::test)]
 async fn test_get_events_partial_overlap_returns_existing_suffix() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         CounterTestActor,
@@ -363,15 +361,15 @@ async fn test_get_events_partial_overlap_returns_existing_suffix() {
         }
         _ => panic!("Expected Events response"),
     }
+    harness.shutdown().await;
 }
 
 /// Test state_counter after snapshot
 #[test(tokio::test)]
 
 async fn test_state_counter_after_snapshot() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         CounterTestActor,
@@ -423,15 +421,15 @@ async fn test_state_counter_after_snapshot() {
         }
         _ => panic!("Expected recovered state"),
     }
+    harness.shutdown().await;
 }
 
 /// Test recovery with events after snapshot
 #[test(tokio::test)]
 
 async fn test_recovery_with_events_after_snapshot() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         CounterTestActor,
@@ -499,15 +497,15 @@ async fn test_recovery_with_events_after_snapshot() {
         }
         _ => panic!("Expected recovered state"),
     }
+    harness.shutdown().await;
 }
 
 /// Test that recovery without snapshot works correctly
 #[test(tokio::test)]
 
 async fn test_recovery_without_snapshot() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         CounterTestActor,
@@ -548,15 +546,15 @@ async fn test_recovery_without_snapshot() {
         }
         _ => panic!("Unexpected response type"),
     }
+    harness.shutdown().await;
 }
 
 /// Test edge case: snapshot at event_counter = 0
 #[test(tokio::test)]
 
 async fn test_snapshot_at_zero() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         CounterTestActor,
@@ -593,15 +591,15 @@ async fn test_snapshot_at_zero() {
         }
         _ => panic!("Expected recovered state"),
     }
+    harness.shutdown().await;
 }
 
 /// Test LastEventsFrom with different positions
 #[test(tokio::test)]
 
 async fn test_last_events_from_positions() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         CounterTestActor,
@@ -677,15 +675,15 @@ async fn test_last_events_from_positions() {
         }
         _ => panic!("Expected Events response"),
     }
+    harness.shutdown().await;
 }
 
 /// Test complex scenario: multiple snapshots and recoveries
 #[test(tokio::test)]
 
 async fn test_multiple_snapshots_and_recoveries() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         CounterTestActor,
@@ -777,15 +775,15 @@ async fn test_multiple_snapshots_and_recoveries() {
         }
         _ => panic!("Expected recovered state"),
     }
+    harness.shutdown().await;
 }
 
 /// Test that event_counter works correctly with encryption
 #[test(tokio::test)]
 
 async fn test_event_counter_with_encryption() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let encrypt_key =
         EncryptedKey::new(b"0123456789abcdef0123456789abcdef").unwrap();
@@ -840,4 +838,5 @@ async fn test_event_counter_with_encryption() {
         }
         _ => panic!("Expected Events response"),
     }
+    harness.shutdown().await;
 }

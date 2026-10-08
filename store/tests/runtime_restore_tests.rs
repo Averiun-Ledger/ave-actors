@@ -96,7 +96,7 @@ fn restore_fixed(base: Arc<SplitState>, live: &SplitState) -> Arc<SplitState> {
     Arc::new(out)
 }
 
-fn restore_legacy(
+const fn restore_legacy(
     base: Arc<SplitState>,
     _live: &SplitState,
 ) -> Arc<SplitState> {

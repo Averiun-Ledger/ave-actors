@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
-    Event, Handler, IntervalStrategy, Message, NotPersistentActor, Response,
-    ShutdownReason, Strategy, SupervisionStrategy,
+    Actor, ActorContext, ActorPath, ActorRef, ChildAction, Error, Event,
+    Handler, IntervalStrategy, Message, NotPersistentActor, Response,
+    ShutdownReason, Strategy, SupervisionStrategy, TestSystem,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -12,7 +12,6 @@ use std::sync::{
 use std::time::Duration;
 use test_log::test;
 use tokio::sync::Barrier;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(Default)]
@@ -211,9 +210,8 @@ impl Handler<Self> for StressActor {
 
 #[test(tokio::test)]
 async fn test_stress_concurrent_create_same_root_path() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     const ATTEMPTS: usize = 64;
     let barrier = Arc::new(Barrier::new(ATTEMPTS));
@@ -255,19 +253,13 @@ async fn test_stress_concurrent_create_same_root_path() {
         actor_ref.ask_stop().await.unwrap();
     }
 
-    system.stop_system();
-    let shutdown = tokio::time::timeout(Duration::from_secs(5), runner_handle)
-        .await
-        .expect("runner should finish within timeout")
-        .expect("runner task should not panic");
-    assert_eq!(shutdown, ShutdownReason::Graceful);
+    assert_eq!(harness.shutdown().await, ShutdownReason::Graceful);
 }
 
 #[test(tokio::test)]
 async fn test_stress_concurrent_stop_requests() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let hooks = Arc::new(LifecycleHooks::default());
     let actor_ref = system
@@ -308,19 +300,13 @@ async fn test_stress_concurrent_stop_requests() {
         Err(Error::ActorStopped)
     ));
 
-    system.stop_system();
-    let shutdown = tokio::time::timeout(Duration::from_secs(5), runner_handle)
-        .await
-        .expect("runner should finish within timeout")
-        .expect("runner task should not panic");
-    assert_eq!(shutdown, ShutdownReason::Graceful);
+    assert_eq!(harness.shutdown().await, ShutdownReason::Graceful);
 }
 
 #[test(tokio::test)]
 async fn test_stress_concurrent_fail_restarts_and_recovers() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let hooks = Arc::new(LifecycleHooks::default());
     let _parent_ref = system
@@ -381,10 +367,5 @@ async fn test_stress_concurrent_fail_restarts_and_recovers() {
     assert!(hooks.fail_messages.load(Ordering::SeqCst) > 0);
     assert!(system.get_actor::<StressActor>(&path).await.is_ok());
 
-    system.stop_system();
-    let shutdown = tokio::time::timeout(Duration::from_secs(5), runner_handle)
-        .await
-        .expect("runner should finish within timeout")
-        .expect("runner task should not panic");
-    assert_eq!(shutdown, ShutdownReason::Graceful);
+    assert_eq!(harness.shutdown().await, ShutdownReason::Graceful);
 }

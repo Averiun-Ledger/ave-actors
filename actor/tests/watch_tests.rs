@@ -5,13 +5,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ActorSystemConfig,
-    Error, Handler, IntervalStrategy, Message, NotPersistentActor, Response,
-    ShutdownReason, Strategy, SupervisionStrategy,
+    Actor, ActorContext, ActorPath, ActorRef, ActorSystemConfig, Error,
+    Handler, IntervalStrategy, Message, NotPersistentActor, Response, Strategy,
+    SupervisionStrategy, TestSystem,
 };
 use test_log::test;
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 mod helpers;
@@ -162,25 +161,10 @@ impl Handler<Self> for TargetActor {
     }
 }
 
-async fn join_runner(
-    handle: tokio::task::JoinHandle<ShutdownReason>,
-) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(2), handle)
-        .await
-        .map_err(|_| Error::Functional {
-            description: "runner timed out".to_owned(),
-        })?
-        .map_err(|_| Error::Functional {
-            description: "runner panicked".to_owned(),
-        })?;
-    Ok(())
-}
-
 #[test(tokio::test)]
 async fn test_watch_notifies_when_target_stops() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let watcher = WatchActor {
         notifications: Arc::new(Mutex::new(vec![])),
@@ -212,15 +196,14 @@ async fn test_watch_notifies_when_target_stops() -> Result<(), Error> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_unwatch_prevents_notification() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let watcher = WatchActor {
         notifications: Arc::new(Mutex::new(vec![])),
@@ -247,15 +230,14 @@ async fn test_unwatch_prevents_notification() -> Result<(), Error> {
     let resp = watcher_ref.ask(WatchMsg::GetNotifications).await?;
     assert!(resp.notifications.is_empty());
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_multiple_watchers_receive_notification() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let watcher_a = WatchActor {
         notifications: Arc::new(Mutex::new(vec![])),
@@ -300,15 +282,14 @@ async fn test_multiple_watchers_receive_notification() -> Result<(), Error> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_watch_is_idempotent() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let watcher = WatchActor {
         notifications: Arc::new(Mutex::new(vec![])),
@@ -349,15 +330,14 @@ async fn test_watch_is_idempotent() -> Result<(), Error> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_watch_already_stopped_target_notifies() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let target = TargetActor {
         stopped: Arc::new(Mutex::new(false)),
@@ -390,15 +370,14 @@ async fn test_watch_already_stopped_target_notifies() -> Result<(), Error> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_watcher_termination_does_not_crash() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let watcher = WatchActor {
         notifications: Arc::new(Mutex::new(vec![])),
@@ -420,15 +399,14 @@ async fn test_watcher_termination_does_not_crash() -> Result<(), Error> {
     // delivery before shutdown; absence of a crash is the assertion.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_no_notification_on_target_restart() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let watcher = WatchActor {
         notifications: Arc::new(Mutex::new(vec![])),
@@ -457,8 +435,8 @@ async fn test_no_notification_on_target_restart() -> Result<(), Error> {
     let notifications = watcher_ref.ask(WatchMsg::GetNotifications).await?;
     assert!(notifications.notifications.is_empty());
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
@@ -467,12 +445,8 @@ async fn test_watch_limit_rejected() -> Result<(), Error> {
         max_watchers_per_actor: 1,
         ..ActorSystemConfig::default()
     };
-    let (system, mut runner) = ActorSystem::create_with_config(
-        CancellationToken::new(),
-        CancellationToken::new(),
-        config,
-    )?;
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start_with_config(config)?;
+    let system = harness.system();
 
     let watcher_a = WatchActor {
         notifications: Arc::new(Mutex::new(vec![])),
@@ -501,16 +475,15 @@ async fn test_watch_limit_rejected() -> Result<(), Error> {
         result
     );
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_concurrent_watch_and_stop_delivers_exactly_once()
 -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let watcher = WatchActor {
         notifications: Arc::new(Mutex::new(vec![])),
@@ -556,6 +529,6 @@ async fn test_concurrent_watch_and_stop_delivers_exactly_once()
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }

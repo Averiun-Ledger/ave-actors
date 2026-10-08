@@ -4,14 +4,13 @@ mod helpers;
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSelection, ActorSystem, Error,
-    Handler, Message, NotPersistentActor, Response,
+    Actor, ActorContext, ActorPath, ActorSelection, Error, Handler, Message,
+    NotPersistentActor, Response, TestSystem,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use test_log::test;
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,19 +71,10 @@ impl Handler<Self> for SelActor {
     }
 }
 
-fn system() -> (
-    ave_actors_actor::SystemRef,
-    tokio::task::JoinHandle<ave_actors_actor::ShutdownReason>,
-) {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let handle = tokio::spawn(async move { runner.run().await });
-    (system, handle)
-}
-
 #[test(tokio::test)]
 async fn test_register_resolve_unregister() {
-    let (system, _runner) = system();
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor(
@@ -123,12 +113,13 @@ async fn test_register_resolve_unregister() {
     system.unregister_name("pagos");
     assert!(sel.resolve::<SelActor>().await.is_empty());
 
-    system.stop_system();
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_pattern_broadcast_and_ask() {
-    let (system, _runner) = system();
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     for name in ["w-1", "w-2"] {
         system
@@ -188,12 +179,13 @@ async fn test_pattern_broadcast_and_ask() {
         Err(Error::NotFound { .. })
     ));
 
-    system.stop_system();
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_concurrent_register_name_has_single_winner() {
-    let (system, _runner) = system();
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor(
@@ -221,12 +213,13 @@ async fn test_concurrent_register_name_has_single_winner() {
     }
     assert_eq!(wins, 1, "exactly one concurrent registration must win");
 
-    system.stop_system();
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_dead_names_prune_and_reregister() {
-    let (system, _runner) = system();
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor(
@@ -286,5 +279,5 @@ async fn test_dead_names_prune_and_reregister() {
         SelResp::Hits(1)
     );
 
-    system.stop_system();
+    harness.shutdown().await;
 }

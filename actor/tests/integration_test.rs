@@ -2,15 +2,12 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
-    Event, Handler, Message, Response, Subscriber,
+    Actor, ActorContext, ActorPath, ActorRef, ChildAction, Error, Event,
+    Handler, Message, Response, TestProbe, TestSystem,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::Duration;
 use test_log::test;
-use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 mod helpers;
@@ -50,6 +47,7 @@ pub struct TestEvent(usize);
 
 // Implements event for parent event.
 impl Event for TestEvent {}
+impl Message for TestEvent {}
 
 // Implements actor for parent actor.
 #[async_trait]
@@ -178,6 +176,7 @@ pub struct ChildEvent(usize);
 
 // Implements event for child event.
 impl Event for ChildEvent {}
+impl Message for ChildEvent {}
 
 // Implements actor for child actor.
 #[async_trait]
@@ -235,55 +234,10 @@ impl Handler<Self> for ChildActor {
     }
 }
 
-#[derive(Clone)]
-struct CollectingChildSubscriber {
-    events: Arc<Mutex<Vec<ChildEvent>>>,
-}
-
-impl CollectingChildSubscriber {
-    fn new() -> Self {
-        Self {
-            events: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
-
-#[async_trait]
-impl Subscriber<ChildEvent> for CollectingChildSubscriber {
-    async fn notify(&self, event: Arc<ChildEvent>) -> Result<(), Error> {
-        self.events.lock().await.push((*event).clone());
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct CollectingParentSubscriber {
-    events: Arc<Mutex<Vec<TestEvent>>>,
-}
-
-impl CollectingParentSubscriber {
-    fn new() -> Self {
-        Self {
-            events: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
-
-#[async_trait]
-impl Subscriber<TestEvent> for CollectingParentSubscriber {
-    async fn notify(&self, event: Arc<TestEvent>) -> Result<(), Error> {
-        self.events.lock().await.push((*event).clone());
-        Ok(())
-    }
-}
-
 #[test(tokio::test)]
 async fn test_actor() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move {
-        runner.run().await;
-    });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent = TestActor { state: 0 };
     let parent_ref = system.create_root_actor("parent", parent).await.unwrap();
@@ -306,29 +260,21 @@ async fn test_actor() {
         .await
         .unwrap();
 
-    let child_sub = CollectingChildSubscriber::new();
+    let child_probe = TestProbe::<ChildEvent>::new();
     let sink = child_actor
         .register_sink("child_events", None)
         .expect("valid sink");
-    sink.add("sub1", child_sub.clone());
+    sink.add("sub1", child_probe.clone());
 
     parent_ref.tell(TestCommand::Increment(10)).await.unwrap();
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
     assert_eq!(response, TestResponse::State(10));
 
-    helpers::assert_eventually(
-        "child receives Increment event",
-        Duration::from_secs(2),
-        || async {
-            let events = child_sub.events.lock().await;
-            if events.len() == 1 && events[0].0 == 10 {
-                Some(())
-            } else {
-                None
-            }
-        },
-    )
-    .await;
+    let first = child_probe
+        .expect_msg(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(first.0, 10);
     let response = child_actor.ask(ChildCommand::GetState).await.unwrap();
     assert_eq!(response, ChildResponse::State(10));
 
@@ -336,66 +282,48 @@ async fn test_actor() {
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
     assert_eq!(response, TestResponse::State(8));
 
-    helpers::assert_eventually(
-        "child receives Decrement event",
-        Duration::from_secs(2),
-        || async {
-            let events = child_sub.events.lock().await;
-            if events.len() == 2 && events[1].0 == 8 {
-                Some(())
-            } else {
-                None
-            }
-        },
-    )
-    .await;
+    let second = child_probe
+        .expect_msg(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(second.0, 8);
     let response = child_actor.ask(ChildCommand::GetState).await.unwrap();
     assert_eq!(response, ChildResponse::State(8));
+
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_actor_error() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move {
-        runner.run().await;
-    });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent = TestActor { state: 0 };
     let parent_ref = system.create_root_actor("parent", parent).await.unwrap();
 
-    let parent_sub = CollectingParentSubscriber::new();
+    let parent_probe = TestProbe::<TestEvent>::new();
     let sink = parent_ref
         .register_sink("parent_events", None)
         .expect("valid sink");
-    sink.add("sub1", parent_sub.clone());
+    sink.add("sub1", parent_probe.clone());
 
     parent_ref.tell(TestCommand::Increment(50)).await.unwrap();
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
     assert_eq!(response, TestResponse::State(50));
 
-    helpers::assert_eventually(
-        "parent publishes child-error event",
-        Duration::from_secs(2),
-        || async {
-            let events = parent_sub.events.lock().await;
-            if events.len() == 1 && events[0].0 == 0 {
-                Some(())
-            } else {
-                None
-            }
-        },
-    )
-    .await;
+    let evt = parent_probe
+        .expect_msg(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(evt.0, 0);
+
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_actor_fault() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move {
-        runner.run().await;
-    });
+    let harness = TestSystem::start();
+    let system = harness.system();
     let parent = TestActor { state: 0 };
     let parent_ref = system.create_root_actor("parent", parent).await.unwrap();
     helpers::assert_eventually(
@@ -414,29 +342,21 @@ async fn test_actor_fault() {
         .await;
     assert!(child_ref.is_ok());
 
-    let parent_sub = CollectingParentSubscriber::new();
+    let parent_probe = TestProbe::<TestEvent>::new();
     let sink = parent_ref
         .register_sink("parent_events", None)
         .expect("valid sink");
-    sink.add("sub1", parent_sub.clone());
+    sink.add("sub1", parent_probe.clone());
 
     parent_ref.tell(TestCommand::Increment(110)).await.unwrap();
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
     assert_eq!(response, TestResponse::State(110));
 
-    helpers::assert_eventually(
-        "parent publishes child-fault event",
-        Duration::from_secs(2),
-        || async {
-            let events = parent_sub.events.lock().await;
-            if events.len() == 1 && events[0].0 == 100 {
-                Some(())
-            } else {
-                None
-            }
-        },
-    )
-    .await;
+    let evt = parent_probe
+        .expect_msg(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(evt.0, 100);
 
     helpers::assert_eventually(
         "faulted child is removed",
@@ -458,4 +378,6 @@ async fn test_actor_fault() {
         .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
         .await;
     assert!(child_ref.is_err());
+
+    harness.shutdown().await;
 }

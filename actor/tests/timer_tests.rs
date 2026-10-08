@@ -5,13 +5,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error, Handler, Message,
-    NotPersistentActor, Response, TimerKey,
+    Actor, ActorContext, ActorPath, Error, Handler, Message,
+    NotPersistentActor, Response, TestSystem, TimerKey,
 };
 use serde::{Deserialize, Serialize};
 use test_log::test;
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 mod helpers;
@@ -114,25 +113,10 @@ impl Handler<Self> for TimerActor {
     }
 }
 
-async fn join_runner(
-    handle: tokio::task::JoinHandle<ave_actors_actor::ShutdownReason>,
-) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(2), handle)
-        .await
-        .map_err(|_| Error::Functional {
-            description: "runner timed out".to_owned(),
-        })?
-        .map_err(|_| Error::Functional {
-            description: "runner panicked".to_owned(),
-        })?;
-    Ok(())
-}
-
 #[test(tokio::test)]
 async fn test_schedule_once_delivers_message() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = TimerActor {
         fires: Arc::new(Mutex::new(0)),
@@ -157,15 +141,14 @@ async fn test_schedule_once_delivers_message() -> Result<(), Error> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_schedule_periodic_and_cancel() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = TimerActor {
         fires: Arc::new(Mutex::new(0)),
@@ -202,15 +185,14 @@ async fn test_schedule_periodic_and_cancel() -> Result<(), Error> {
         resp.ticks
     );
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_timers_are_cancelled_on_actor_stop() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = TimerActor {
         fires: Arc::new(Mutex::new(0)),
@@ -228,15 +210,14 @@ async fn test_timers_are_cancelled_on_actor_stop() -> Result<(), Error> {
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(*fires.lock().await, 0);
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_cancel_timer_before_fire() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = TimerActor {
         fires: Arc::new(Mutex::new(0)),
@@ -256,8 +237,8 @@ async fn test_cancel_timer_before_fire() -> Result<(), Error> {
     let resp = actor_ref.ask(TimerMsg::GetCounts).await?;
     assert_eq!(resp.fires, 0, "cancelled timer should not fire");
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,9 +318,8 @@ impl Handler<Self> for LimitedTimerActor {
 
 #[test(tokio::test)]
 async fn test_max_timers_limits_new_timers() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = LimitedTimerActor {
         fires: Arc::new(Mutex::new(0)),
@@ -362,8 +342,8 @@ async fn test_max_timers_limits_new_timers() -> Result<(), Error> {
     .await;
     assert_eq!(resp.fires, 2);
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,9 +413,8 @@ impl Handler<Self> for ValidateTimerActor {
 #[test(tokio::test)]
 async fn test_schedule_once_zero_delay_delivers_immediately()
 -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = TimerActor {
         fires: Arc::new(Mutex::new(0)),
@@ -462,15 +441,14 @@ async fn test_schedule_once_zero_delay_delivers_immediately()
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_schedule_zero_period_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = system
         .create_root_actor("validate_zero_period", ValidateTimerActor)
@@ -482,15 +460,14 @@ async fn test_schedule_zero_period_rejected() -> Result<(), Error> {
         "zero period schedule should be rejected"
     );
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_schedule_once_excessive_delay_rejected() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = system
         .create_root_actor("validate_excessive", ValidateTimerActor)
@@ -502,6 +479,6 @@ async fn test_schedule_once_excessive_delay_rejected() -> Result<(), Error> {
         "excessive delay schedule_once should be rejected"
     );
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }

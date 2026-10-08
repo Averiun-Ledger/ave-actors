@@ -18,15 +18,14 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
-    Handler, Message, NotPersistentActor, Response,
+    Actor, ActorContext, ActorPath, Error as ActorError, Event, Handler,
+    Message, NotPersistentActor, Response, TestSystem,
 };
 use ave_actors_store::store::PersistentActor;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use test_log::test;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 // ============================================================================
@@ -224,9 +223,8 @@ impl Handler<Self> for ParentActor {
 /// ✅ SUCCESS: Non-persistent actor with direct instance
 #[test(tokio::test)]
 async fn test_create_root_actor_non_persistent_direct() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = MyNonPersistentActor {
         _value: "test".to_string(),
@@ -236,14 +234,14 @@ async fn test_create_root_actor_non_persistent_direct() {
         result.is_ok(),
         "Non-persistent actor should be created with direct instance"
     );
+    harness.shutdown().await;
 }
 
 /// ✅ SUCCESS: Persistent actor with initial() wrapper
 #[test(tokio::test)]
 async fn test_create_root_actor_persistent_initial() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let result = system
         .create_root_actor("persistent", MyPersistentActor::initial(42))
@@ -252,6 +250,7 @@ async fn test_create_root_actor_persistent_initial() {
         result.is_ok(),
         "Persistent actor should be created with initial()"
     );
+    harness.shutdown().await;
 }
 
 // ❌ COMPILE FAIL: Persistent actor with direct instance
@@ -278,9 +277,8 @@ async fn test_create_root_actor_persistent_initial() {
 /// ✅ SUCCESS: Non-persistent child with direct instance
 #[test(tokio::test)]
 async fn test_create_child_non_persistent_direct() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent_ref = system
         .create_root_actor("parent", ParentActor)
@@ -296,14 +294,14 @@ async fn test_create_child_non_persistent_direct() {
     let _: MyNonPersistentActor = child;
 
     drop(parent_ref);
+    harness.shutdown().await;
 }
 
 /// ✅ SUCCESS: Persistent child with initial() wrapper
 #[test(tokio::test)]
 async fn test_create_child_persistent_initial() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let _parent_ref = system
         .create_root_actor("parent2", ParentActor)
@@ -312,6 +310,7 @@ async fn test_create_child_persistent_initial() {
 
     // Verify the type compiles for create_child usage
     let _child = MyPersistentActor::initial(100);
+    harness.shutdown().await;
 }
 
 /// ❌ COMPILE FAIL: Persistent child with direct instance
@@ -333,9 +332,8 @@ async fn test_create_child_persistent_initial() {
 
 #[test(tokio::test)]
 async fn test_all_valid_combinations() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     // ✅ Pattern 1: Non-persistent + Direct instance
     let non_persistent = MyNonPersistentActor {
@@ -362,6 +360,7 @@ async fn test_all_valid_combinations() {
 
     // ❌ Pattern 4: Non-persistent + initial() → N/A (doesn't have initial())
     // MyNonPersistentActor::initial(...) // Method doesn't exist!
+    harness.shutdown().await;
 }
 
 /// Documentation test showing the type safety in action

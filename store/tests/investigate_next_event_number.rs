@@ -11,15 +11,14 @@ use ave_actors_store::{
 };
 
 use ave_actors_actor::{
-    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler,
-    Message, Response,
+    Actor, ActorContext, Error as ActorError, Event, Handler, Message,
+    Response, TestSystem,
 };
 use test_log::test;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(
@@ -113,9 +112,8 @@ impl PersistentActor for TestActor {
 
 #[test(tokio::test)]
 async fn test_next_event_number_after_persist() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let memory_manager = MemoryManager::default();
 
@@ -192,4 +190,5 @@ async fn test_next_event_number_after_persist() {
     if let StoreResponse::NextEventNumber(count) = result {
         assert_eq!(count, 2);
     }
+    harness.shutdown().await;
 }

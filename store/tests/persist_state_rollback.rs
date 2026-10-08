@@ -6,8 +6,8 @@
 //! failure) leaves the actor state untouched.
 
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
-    Handler, Message, Response,
+    Actor, ActorContext, ActorPath, Error as ActorError, Event, Handler,
+    Message, Response, TestSystem,
 };
 use ave_actors_store::{memory::MemoryManager, store::PersistentActor};
 use test_log::test;
@@ -15,7 +15,6 @@ use test_log::test;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(
@@ -150,9 +149,8 @@ impl PersistentActor for GuardActor {
 
 #[test(tokio::test)]
 async fn test_state_unchanged_when_apply_fails() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("guard", GuardActor::initial(()))
@@ -179,4 +177,5 @@ async fn test_state_unchanged_when_apply_fails() {
 
     let result = actor_ref.ask(GuardMessage::GetState).await.unwrap();
     assert!(matches!(result, GuardResponse::State(8)));
+    harness.shutdown().await;
 }

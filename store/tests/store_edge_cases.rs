@@ -3,8 +3,8 @@
 #[macro_use]
 mod helpers;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, EncryptedKey,
-    Error as ActorError, Event, Handler, Message, Response,
+    Actor, ActorContext, ActorPath, EncryptedKey, Error as ActorError, Event,
+    Handler, Message, Response, TestSystem,
 };
 use ave_actors_store::{
     Error as StoreError, StoreOperation,
@@ -18,7 +18,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 // State struct for encrypted actor
@@ -494,9 +493,8 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
 
 #[test(tokio::test)]
 async fn test_encrypted_store_operations() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("encrypted", EncryptedActor::initial(()))
@@ -581,13 +579,13 @@ async fn test_encrypted_store_operations() {
 
     // Test purge
     actor_ref.ask(EncryptedMessage::Purge).await.unwrap();
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_prefix_isolation() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("prefix", PrefixActor::initial(()))
@@ -642,13 +640,13 @@ async fn test_prefix_isolation() {
     } else {
         panic!("Expected State response");
     }
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_store_error_scenarios() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     // Test store creation failure
     let failing_manager = FailingManager {
@@ -716,13 +714,13 @@ async fn test_store_error_scenarios() {
         result,
         Ok(StoreResponse::State(None)) | Err(ActorError::StoreOperation { .. })
     ));
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_store_commands_coverage() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         EncryptedActor,
@@ -821,14 +819,14 @@ async fn test_store_commands_coverage() {
         }
         _ => panic!("Expected Some event for last event"),
     }
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 
 async fn test_persist_actor_error_scenarios() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     // Test actor without store child
     #[derive(
@@ -931,14 +929,14 @@ async fn test_persist_actor_error_scenarios() {
         }
         _ => panic!("Expected error response"),
     }
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_encryption_failure_scenarios() {
     // Test with invalid key size (this would be a compile-time error, so we test valid scenario)
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let encrypt_key = EncryptedKey::new(&[0u8; 32]).unwrap();
     let store = store_new!(
@@ -985,4 +983,5 @@ async fn test_encryption_failure_scenarios() {
         }
         _ => panic!("Expected recovered state"),
     }
+    harness.shutdown().await;
 }

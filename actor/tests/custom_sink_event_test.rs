@@ -1,16 +1,11 @@
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler,
-    NotPersistentActor, Subscriber,
+    Actor, ActorContext, ActorPath, Error, Event, Handler, Message,
+    NotPersistentActor, TestProbe, TestSystem,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
-
-mod helpers;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InternalEvent(usize);
@@ -19,6 +14,7 @@ impl Event for InternalEvent {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ExternalNotification(String);
 impl Event for ExternalNotification {}
+impl Message for ExternalNotification {}
 
 struct CustomSinkActor {
     counter: usize,
@@ -49,7 +45,8 @@ impl Handler<Self> for CustomSinkActor {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         self.counter += 1;
-        // Internal event (could be for persistence, though this actor is not persistent)
+        // Internal event (could be for persistence, though this actor
+        // is not persistent)
         // ctx.on_event(InternalEvent(self.counter), ctx).await;
 
         // External notification to sink
@@ -61,25 +58,10 @@ impl Handler<Self> for CustomSinkActor {
     }
 }
 
-struct TestSubscriber {
-    notifications: Arc<Mutex<Vec<String>>>,
-}
-
-#[async_trait]
-impl Subscriber<ExternalNotification> for TestSubscriber {
-    async fn notify(
-        &self,
-        event: Arc<ExternalNotification>,
-    ) -> Result<(), Error> {
-        self.notifications.lock().await.push(event.0.clone());
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn test_custom_sink_event() {
-    let (system, _) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = CustomSinkActor { counter: 0 };
     let actor_ref = system
@@ -87,34 +69,19 @@ async fn test_custom_sink_event() {
         .await
         .unwrap();
 
-    let notifications = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = TestSubscriber {
-        notifications: notifications.clone(),
-    };
-
+    let probe = TestProbe::<ExternalNotification>::new();
     let sink = actor_ref
         .register_sink("notifications", None)
         .expect("valid sink");
-    sink.add("sub1", subscriber);
+    sink.add("sub1", probe.clone());
 
     actor_ref.ask(()).await.unwrap();
     actor_ref.ask(()).await.unwrap();
 
-    // Poll for both notifications instead of a fixed sleep.
-    helpers::assert_eventually(
-        "sink delivers both notifications",
-        Duration::from_secs(2),
-        || async {
-            let received = notifications.lock().await;
-            if received.len() == 2
-                && received[0] == "Counter is now 1"
-                && received[1] == "Counter is now 2"
-            {
-                Some(())
-            } else {
-                None
-            }
-        },
-    )
-    .await;
+    let received = probe.expect_count(2, Duration::from_secs(2)).await.unwrap();
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0].0, "Counter is now 1");
+    assert_eq!(received[1].0, "Counter is now 2");
+
+    harness.shutdown().await;
 }

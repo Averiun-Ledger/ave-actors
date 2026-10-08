@@ -2,15 +2,14 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler,
-    Message, Response,
+    Actor, ActorContext, Error as ActorError, Event, Handler, Message,
+    Response, TestSystem,
 };
 use ave_actors_store::{memory::MemoryManager, store::PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use test_log::test;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
@@ -105,9 +104,8 @@ impl Handler<Self> for ZeroSnapshotActor {
 
 #[test(tokio::test)]
 async fn test_snapshot_every_zero_is_rejected() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = ZeroSnapshotActor::initial(());
     let result = system.create_root_actor("zero_snapshot", actor).await;
@@ -117,4 +115,5 @@ async fn test_snapshot_every_zero_is_rejected() {
         "expected InvalidConfiguration for snapshot_every Some(0), got {:?}",
         result
     );
+    harness.shutdown().await;
 }

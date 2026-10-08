@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction,
-    Error as ActorError, Event, Handler, Message, NotPersistentActor, Response,
+    Actor, ActorContext, ActorPath, ActorRef, ChildAction, Error as ActorError,
+    Event, Handler, Message, NotPersistentActor, Response, TestSystem,
 };
 use ave_actors_sqlite::SqliteManager;
 use ave_actors_store::{
@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use test_log::test;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 // ============================================================================
@@ -339,9 +338,8 @@ fn sqlite_manager() -> (tempfile::TempDir, SqliteManager) {
 #[test(tokio::test)]
 async fn test_sqlite_persistence_recovers_across_restart() {
     let (_dir, manager) = sqlite_manager();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     system.add_helper("db", manager.clone());
 
@@ -378,14 +376,14 @@ async fn test_sqlite_persistence_recovers_across_restart() {
     assert_eq!(events.len(), 3);
 
     actor_ref.ask_stop().await.unwrap();
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_sqlite_recovers_snapshot_with_events() {
     let (_dir, manager) = sqlite_manager();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     system.add_helper("db", manager.clone());
 
@@ -414,14 +412,14 @@ async fn test_sqlite_recovers_snapshot_with_events() {
     assert!(collection.iter(false).unwrap().next().is_some());
 
     actor_ref.ask_stop().await.unwrap();
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_sqlite_same_leaf_under_different_parents_is_isolated() {
     let (_dir, manager) = sqlite_manager();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     system.add_helper("db", manager.clone());
 
@@ -442,6 +440,7 @@ async fn test_sqlite_same_leaf_under_different_parents_is_isolated() {
 
     parent_a.ask_stop().await.unwrap();
     parent_b.ask_stop().await.unwrap();
+    harness.shutdown().await;
 }
 
 // ============================================================================
@@ -543,9 +542,8 @@ async fn test_sqlite_prune_compacts_history_across_restart() {
     use ave_actors_store::database::Collection;
 
     let (_dir, manager) = sqlite_manager();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     system.add_helper("db", manager.clone());
 
@@ -595,4 +593,5 @@ async fn test_sqlite_prune_compacts_history_across_restart() {
     );
 
     actor_ref.ask_stop().await.unwrap();
+    harness.shutdown().await;
 }

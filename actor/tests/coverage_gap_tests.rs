@@ -5,6 +5,7 @@ use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
     Event, Handler, IntervalStrategy, Message, NoIntervalStrategy, Response,
     RetryActor, RetryMessage, ShutdownReason, Strategy, SupervisionStrategy,
+    TestSystem,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -42,6 +43,8 @@ impl Response for SimpleResponse {}
 
 #[test(tokio::test)]
 async fn test_crash_system_returns_crash_reason() {
+    // TestSystem::shutdown is graceful-only, so this crash-path test
+    // keeps the manual runner to assert `Crash` deterministically.
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     let runner_handle = tokio::spawn(async move { runner.run().await });
@@ -172,9 +175,8 @@ impl Handler<Self> for EventEmitterActor {
 
 #[test(tokio::test)]
 async fn test_child_error_observed_by_parent() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent = ErrorObservingParent {
         errors_seen: Arc::new(AtomicUsize::new(0)),
@@ -204,8 +206,7 @@ async fn test_child_error_observed_by_parent() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    system.stop_system();
-    let _ = runner_handle.await;
+    harness.shutdown().await;
 }
 
 // ============================================================================
@@ -252,20 +253,20 @@ impl Handler<Self> for MinimalActor {
 
 #[test(tokio::test)]
 async fn test_get_actor_not_found() {
-    let (system, _runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let result = system
         .get_actor::<MinimalActor>(&ActorPath::from("/user/nonexistent"))
         .await;
     assert!(matches!(result, Err(Error::NotFound { .. })));
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_ask_timeout_hits_deadline() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     #[derive(Debug, Clone)]
     struct SlowActor;
@@ -307,13 +308,13 @@ async fn test_ask_timeout_hits_deadline() {
         .ask_timeout(SimpleMsg, Duration::from_millis(50))
         .await;
     assert!(matches!(result, Err(Error::Timeout { .. })));
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_ask_timeout_success() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("fast", MinimalActor)
@@ -324,6 +325,7 @@ async fn test_ask_timeout_success() {
         .await
         .unwrap();
     assert_eq!(result.0, 1);
+    harness.shutdown().await;
 }
 
 // ============================================================================
@@ -542,9 +544,8 @@ impl Handler<Self> for ErrorChildActor {
 
 #[test(tokio::test)]
 async fn test_child_fault_propagates_to_parent() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent = ParentOfFaultyChild {
         child_fault_count: Arc::new(AtomicUsize::new(0)),
@@ -598,9 +599,8 @@ async fn test_child_fault_propagates_to_parent() {
 
 #[test(tokio::test)]
 async fn test_child_error_propagates_to_parent() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent = ParentOfFaultyChild {
         child_fault_count: Arc::new(AtomicUsize::new(0)),
@@ -724,9 +724,8 @@ impl Handler<Self> for ChildCreatorActor {
 
 #[test(tokio::test)]
 async fn test_create_child_duplicate_returns_error() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent_ref = system
         .create_root_actor("creator", ChildCreatorActor)
@@ -869,9 +868,8 @@ impl Handler<Self> for RootFailActor {
 
 #[test(tokio::test)]
 async fn test_child_emit_fail_stops_actor() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let _parent_ref = system
         .create_root_actor("root_fail", StopOnFaultParent)
@@ -978,9 +976,8 @@ impl Handler<Self> for WatchingParent {
 
 #[test(tokio::test)]
 async fn test_child_stopped_removes_from_parent() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent = WatchingParent {
         child_stopped: Arc::new(Mutex::new(false)),
@@ -1084,14 +1081,14 @@ impl Handler<Self> for AlwaysFailActor {
 
 #[test(tokio::test)]
 async fn test_stop_supervision_no_retries() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let result = system
         .create_root_actor("always_fail", AlwaysFailActor)
         .await;
     assert!(result.is_err());
+    harness.shutdown().await;
 }
 
 // ============================================================================
@@ -1222,9 +1219,8 @@ impl Handler<Self> for RetryNotifyParent {
 
 #[test(tokio::test)]
 async fn test_retry_actor_with_parent_notification() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let completions = Arc::new(AtomicUsize::new(0));
     let parent = RetryNotifyParent {
@@ -1323,9 +1319,8 @@ impl Handler<Self> for DrainTestActor {
 
 #[test(tokio::test)]
 async fn test_non_critical_discarded_on_stop() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let processed = Arc::new(Mutex::new(Vec::new()));
     let actor = DrainTestActor {
@@ -1496,11 +1491,8 @@ impl Handler<Self> for ErrorPublisherActor {
 
 #[test(tokio::test)]
 async fn test_system_runner_handles_child_error_events() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-
-    // Drive the runner in a task but also intercept its result.
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent = RunnerErrorParent {
         errors_seen: Arc::new(AtomicUsize::new(0)),
@@ -1529,14 +1521,7 @@ async fn test_system_runner_handles_child_error_events() {
     )
     .await;
 
-    system.stop_system();
-
-    let reason = tokio::time::timeout(Duration::from_secs(2), runner_handle)
-        .await
-        .expect("runner should finish")
-        .expect("runner should not panic");
-
-    assert_eq!(reason, ave_actors_actor::ShutdownReason::Graceful);
+    assert_eq!(harness.shutdown().await, ShutdownReason::Graceful);
 }
 
 // ============================================================================
@@ -1665,9 +1650,8 @@ impl Handler<Self> for DefaultBehaviorActor {
 
 #[test(tokio::test)]
 async fn test_default_pre_restart_and_supervision() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = DefaultBehaviorActor {
         child_error_count: Arc::new(AtomicUsize::new(0)),
@@ -1696,9 +1680,8 @@ async fn test_default_pre_restart_and_supervision() {
 
 #[test(tokio::test)]
 async fn test_retry_end_before_retry_returns_early() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let retry_actor = RetryActor::new(
         MinimalActor,
@@ -1727,9 +1710,8 @@ async fn test_retry_end_before_retry_returns_early() {
 
 #[test(tokio::test)]
 async fn test_retry_double_end_finishes_once() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let retry_actor = RetryActor::new(
         MinimalActor,
@@ -1811,9 +1793,8 @@ impl Handler<Self> for SelfStopActor {
 
 #[test(tokio::test)]
 async fn test_root_already_stopped_on_system_shutdown() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("self_stop", SelfStopActor)
@@ -1830,13 +1811,7 @@ async fn test_root_already_stopped_on_system_shutdown() {
 
     // Now stop the system; the root sender is closed, so the system
     // should hit the warn! branch at system.rs:147.
-    system.stop_system();
-
-    let shutdown = tokio::time::timeout(Duration::from_secs(2), runner_handle)
-        .await
-        .expect("runner should finish")
-        .expect("runner task should not panic");
-    assert_eq!(shutdown, ShutdownReason::Graceful);
+    assert_eq!(harness.shutdown().await, ShutdownReason::Graceful);
 }
 
 // ============================================================================
@@ -2054,9 +2029,8 @@ impl Handler<Self> for TypedParent {
 
 #[test(tokio::test)]
 async fn test_child_and_parent_use_different_error_types() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent = TypedParent {
         errors: Arc::new(Mutex::new(vec![])),
@@ -2102,9 +2076,5 @@ async fn test_child_and_parent_use_different_error_types() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    system.stop_system();
-    let _ = tokio::time::timeout(Duration::from_secs(2), runner_handle)
-        .await
-        .expect("runner should finish")
-        .expect("runner task should not panic");
+    harness.shutdown().await;
 }

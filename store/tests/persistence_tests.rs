@@ -8,8 +8,8 @@ mod helpers;
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction,
-    Error as ActorError, Event, Handler, Message, NotPersistentActor, Response,
+    Actor, ActorContext, ActorPath, ActorRef, ChildAction, Error as ActorError,
+    Event, Handler, Message, NotPersistentActor, Response, TestSystem,
 };
 use ave_actors_store::{
     database::{Collection, DbManager},
@@ -21,7 +21,6 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use test_log::test;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
@@ -139,9 +138,8 @@ impl Handler<Self> for StandardActor {
 
 #[test(tokio::test)]
 async fn test_persistence_actor_recovers_from_snapshot_and_events() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     system.add_helper("db", MemoryManager::default());
 
@@ -169,14 +167,14 @@ async fn test_persistence_actor_recovers_from_snapshot_and_events() {
     assert_eq!(response, StandardResponse::Counter(18));
 
     actor_ref.ask_stop().await.unwrap();
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_persistence_actor_keeps_event_history() {
     let manager = MemoryManager::default();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     system.add_helper("db", manager.clone());
 
@@ -209,14 +207,14 @@ async fn test_persistence_actor_keeps_event_history() {
     );
 
     actor_ref.ask_stop().await.unwrap();
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_persistence_store_command_returns_last_event() {
     let manager = MemoryManager::default();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         StandardActor,
@@ -270,6 +268,7 @@ async fn test_persistence_store_command_returns_last_event() {
         response,
         StoreResponse::State(Some(state)) if state.counter == 8
     ));
+    harness.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -365,9 +364,8 @@ impl Handler<Self> for StandardActorEvery5 {
 #[test(tokio::test)]
 async fn test_persistence_actor_snapshot_every_respected() {
     let manager = MemoryManager::default();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     system.add_helper("db", manager.clone());
 
@@ -402,14 +400,14 @@ async fn test_persistence_actor_snapshot_every_respected() {
     );
 
     actor_ref.ask_stop().await.unwrap();
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_persistence_actor_no_snapshot_before_due() {
     let manager = MemoryManager::default();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     system.add_helper("db", manager.clone());
 
@@ -431,14 +429,14 @@ async fn test_persistence_actor_no_snapshot_before_due() {
     );
 
     actor_ref.ask_stop().await.unwrap();
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_persistence_actor_snapshot_on_stop() {
     let manager = MemoryManager::default();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     system.add_helper("db", manager.clone());
 
@@ -459,6 +457,7 @@ async fn test_persistence_actor_snapshot_on_stop() {
         ave_actors_store::database::State::get(&state).is_ok(),
         "snapshot must be created on actor stop"
     );
+    harness.shutdown().await;
 }
 
 // Non-persistent parent that hosts a persistent child named "counter".
@@ -534,9 +533,8 @@ impl Handler<Self> for BranchParent {
 #[test(tokio::test)]
 async fn test_same_leaf_name_under_different_parents_is_isolated() {
     let manager = MemoryManager::default();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     system.add_helper("db", manager.clone());
 
@@ -582,4 +580,5 @@ async fn test_same_leaf_name_under_different_parents_is_isolated() {
 
     parent_a.ask_stop().await.unwrap();
     parent_b.ask_stop().await.unwrap();
+    harness.shutdown().await;
 }

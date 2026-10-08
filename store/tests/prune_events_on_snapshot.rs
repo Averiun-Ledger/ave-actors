@@ -15,13 +15,12 @@ use ave_actors_store::{
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler,
-    Message, Response,
+    Actor, ActorContext, Error as ActorError, Event, Handler, Message,
+    Response, TestSystem,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use test_log::test;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(
@@ -151,9 +150,8 @@ fn event_count(
 
 #[test(tokio::test)]
 async fn test_prune_keeps_storage_flat() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let memory_manager = MemoryManager::default();
     let store = store_new!(
@@ -189,13 +187,13 @@ async fn test_prune_keeps_storage_flat() {
         StoreResponse::NextEventNumber(count) => assert_eq!(count, 5),
         other => panic!("expected NextEventNumber, got {other:?}"),
     }
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_prune_recovery_replays_across_boundary() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let memory_manager = MemoryManager::default();
     let store = store_new!(
@@ -235,6 +233,7 @@ async fn test_prune_recovery_replays_across_boundary() {
         }
         other => panic!("expected recovered state, got {other:?}"),
     }
+    harness.shutdown().await;
 }
 
 /// Crash-mid-prune residue must be harmless: leftover events below
@@ -245,9 +244,8 @@ async fn test_prune_recovery_replays_across_boundary() {
 async fn test_prune_partial_residue_is_ignored() {
     use ave_actors_store::database::{Collection, DbManager};
 
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let memory_manager = MemoryManager::default();
     let store = store_new!(
@@ -298,15 +296,15 @@ async fn test_prune_partial_residue_is_ignored() {
         }
         other => panic!("expected recovered state, got {other:?}"),
     }
+    harness.shutdown().await;
 }
 
 /// A manual `Snapshot` command prunes too, not just the automatic
 /// cadence: same function, same guarantee.
 #[test(tokio::test)]
 async fn test_prune_on_manual_snapshot() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let memory_manager = MemoryManager::default();
     let store = store_new!(
@@ -355,4 +353,5 @@ async fn test_prune_on_manual_snapshot() {
         0,
         "manual snapshot must prune everything it covers"
     );
+    harness.shutdown().await;
 }

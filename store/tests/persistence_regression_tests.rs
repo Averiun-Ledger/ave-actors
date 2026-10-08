@@ -2,8 +2,8 @@
 mod helpers;
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, EncryptedKey,
-    Error as ActorError, Event, Handler, Message, Response,
+    Actor, ActorContext, ActorPath, ActorRef, EncryptedKey,
+    Error as ActorError, Event, Handler, Message, Response, TestSystem,
 };
 use ave_actors_store::{
     Error as StoreError, StoreOperation,
@@ -15,7 +15,6 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use test_log::test;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(Default, Clone)]
@@ -397,9 +396,8 @@ impl Handler<Self> for GapActor {
 
 #[test(tokio::test)]
 async fn test_persistent_actor_rolls_back_state_when_store_persist_fails() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref: ActorRef<RollbackActor> = system
         .create_root_actor("rollback", RollbackActor::initial(()))
@@ -411,13 +409,13 @@ async fn test_persistent_actor_rolls_back_state_when_store_persist_fails() {
 
     let value = actor_ref.ask(ValueMessage::GetValue).await.unwrap();
     assert_eq!(value, ValueResponse::Value(0));
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_snapshot_failure_rolls_back() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         RollbackActor,
@@ -448,14 +446,14 @@ async fn test_snapshot_failure_rolls_back() {
 
     let recovered = store_ref.ask(StoreCommand::Recover).await.unwrap();
     assert!(matches!(recovered, StoreResponse::State(None)));
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_recover_fails_when_event_log_has_gap() {
     let manager = MemoryManager::default();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         GapActor,
@@ -499,6 +497,7 @@ async fn test_recover_fails_when_event_log_has_gap() {
 
     let recovered = store_ref.ask(StoreCommand::Recover).await;
     assert!(matches!(recovered, Err(ActorError::StoreOperation { .. })));
+    harness.shutdown().await;
 }
 
 #[test]
@@ -584,9 +583,8 @@ fn test_store_new_propagates_collection_last_error() {
 async fn test_recover_falls_back_when_metadata_state_is_missing() {
     let manager = MemoryManager::default();
 
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         GapActor,
@@ -619,9 +617,8 @@ async fn test_recover_falls_back_when_metadata_state_is_missing() {
         .unwrap();
     State::purge(&mut metadata).unwrap();
 
-    let (system2, mut runner2) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner2.run().await });
+    let harness2 = TestSystem::start();
+    let system2 = harness2.system();
 
     let restarted = store_new!(
         GapActor,
@@ -641,14 +638,15 @@ async fn test_recover_falls_back_when_metadata_state_is_missing() {
         StoreResponse::State(Some(state)) => assert_eq!(state.value, 4),
         _ => panic!("expected recovery via snapshot fallback without metadata"),
     }
+    harness.shutdown().await;
+    harness2.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
     let manager = MemoryManager::default();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let encrypt_key = EncryptedKey::new(&[9u8; 32]).unwrap();
     let store = store_new!(
@@ -696,14 +694,14 @@ async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
 
     let recovered = store_ref.ask(StoreCommand::Recover).await;
     assert!(matches!(recovered, Err(ActorError::StoreOperation { .. })));
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_persist_full_event_requests_snapshot_only_when_due() {
     let manager = MemoryManager::default();
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let store = store_new!(
         GapActor,
@@ -756,6 +754,7 @@ async fn test_persist_full_event_requests_snapshot_only_when_due() {
         }
         _ => panic!("expected recovered state after inline snapshot"),
     }
+    harness.shutdown().await;
 }
 
 #[test]

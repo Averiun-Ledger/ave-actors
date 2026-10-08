@@ -13,6 +13,7 @@ mod selection;
 mod sink;
 mod supervision;
 mod system;
+mod testkit;
 mod timer;
 
 pub use actor::{
@@ -37,6 +38,7 @@ pub use system::{
     ActorSystem, ActorSystemConfig, ShutdownReason, SystemEvent, SystemRef,
     SystemRunner,
 };
+pub use testkit::{ProbeActor, TestProbe, TestSystem};
 pub use timer::TimerKey;
 
 #[cfg(feature = "prometheus")]

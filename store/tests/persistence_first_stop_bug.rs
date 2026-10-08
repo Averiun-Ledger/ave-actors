@@ -8,8 +8,8 @@
 mod helpers;
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
-    Handler, Message, Response,
+    Actor, ActorContext, ActorPath, Error as ActorError, Event, Handler,
+    Message, Response, TestSystem,
 };
 use ave_actors_store::memory::MemoryManager;
 use ave_actors_store::store::PersistentActor;
@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use test_log::test;
 use tokio::sync::Mutex as TokioMutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 static SHARED_MANAGER_FIRST_STOP: OnceLock<Arc<TokioMutex<MemoryManager>>> =
@@ -136,9 +135,8 @@ impl PersistentActor for TestActor {
 
 #[test(tokio::test)]
 async fn test_persistence_first_stop_no_previous_snapshot() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     // Brand new actor: no snapshot exists yet.
     let actor_ref = system
@@ -167,15 +165,15 @@ async fn test_persistence_first_stop_no_previous_snapshot() {
         "BUG: Should recover value=30 after graceful stop. Got value={}",
         response.value
     );
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_snapshot_created_when_events_pending() {
     use ave_actors_store::store::{StoreCommand, StoreResponse};
 
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let memory_manager = MemoryManager::default();
 
@@ -277,4 +275,5 @@ async fn test_snapshot_created_when_events_pending() {
         }
         _ => panic!("Unexpected response"),
     }
+    harness.shutdown().await;
 }
