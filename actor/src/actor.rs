@@ -3,6 +3,7 @@
 use crate::{
     ActorPath, Error, ParentRef, TimerKey,
     handler::HandleHelper,
+    middleware::MessageMetadata,
     parent_ref::boxed_notifier,
     runner::{StopHandle, StopSender},
     sink::Sink,
@@ -54,6 +55,11 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     /// when the actor stops so spawned work does not outlive the actor.
     spawned_tasks: Arc<Mutex<Vec<AbortHandle>>>,
 
+    /// Metadata of the message currently being handled, if any. Set by
+    /// the runner before each handler invocation; absent in `pre_start`
+    /// and other message-less hooks.
+    current_metadata: Option<MessageMetadata>,
+
     span: tracing::Span,
 }
 
@@ -88,6 +94,7 @@ where
             child_senders: HashMap::new(),
             sinks: params.sinks,
             spawned_tasks: params.spawned_tasks,
+            current_metadata: None,
         }
     }
 
@@ -259,6 +266,30 @@ where
     /// Returns a reference to the actor system this actor belongs to.
     pub const fn system(&self) -> &SystemRef {
         &self.system
+    }
+
+    /// Metadata of the message currently being handled, if any.
+    ///
+    /// Set by the runner before each handler invocation; `None` in
+    /// `pre_start` and other message-less hooks.
+    pub const fn message_metadata(&self) -> Option<MessageMetadata> {
+        self.current_metadata
+    }
+
+    /// Correlation id of the message currently being handled, if any.
+    ///
+    /// Pass it to `tell_with` / `ask_with` to continue the causal
+    /// chain instead of starting a new one.
+    pub fn correlation_id(&self) -> Option<u64> {
+        self.current_metadata
+            .map(|metadata| metadata.correlation_id)
+    }
+
+    pub(crate) const fn set_current_metadata(
+        &mut self,
+        metadata: MessageMetadata,
+    ) {
+        self.current_metadata = Some(metadata);
     }
 
     /// Returns a typed handle to the parent actor, or an error if this is a root
@@ -991,6 +1022,19 @@ where
         self.sender.tell(self.path(), message).await
     }
 
+    /// Like [`tell`](Self::tell), but continues the `correlation_id`
+    /// chain (see [`MessageMetadata`](crate::MessageMetadata)) instead
+    /// of starting a new one.
+    pub async fn tell_with(
+        &self,
+        message: A::Message,
+        correlation_id: u64,
+    ) -> Result<(), Error> {
+        self.sender
+            .tell_with(self.path(), message, correlation_id)
+            .await
+    }
+
     /// Sends `message` to the actor and waits for a response.
     ///
     /// Returns the actor's response on success, or an error if the actor has stopped
@@ -1000,6 +1044,19 @@ where
     /// [`ActorRef::ask_timeout`] when the handler may hang.
     pub async fn ask(&self, message: A::Message) -> Result<A::Response, Error> {
         self.sender.ask(self.path(), message).await
+    }
+
+    /// Like [`ask`](Self::ask), but continues the `correlation_id`
+    /// chain (see [`MessageMetadata`](crate::MessageMetadata)) instead
+    /// of starting a new one.
+    pub async fn ask_with(
+        &self,
+        message: A::Message,
+        correlation_id: u64,
+    ) -> Result<A::Response, Error> {
+        self.sender
+            .ask_with(self.path(), message, correlation_id)
+            .await
     }
 
     /// Sends `message` and waits up to `timeout` for a response, returning

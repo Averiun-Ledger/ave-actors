@@ -5,9 +5,12 @@ mod error;
 mod handler;
 mod helpers;
 mod into_actor;
+mod middleware;
 mod parent_ref;
 mod path;
+mod pipe;
 mod retries;
+mod router;
 mod runner;
 mod selection;
 mod sink;
@@ -22,13 +25,16 @@ pub use actor::{
 };
 pub use error::Error;
 pub use into_actor::{IntoActor, NotPersistentActor};
+pub use middleware::{Intercept, Interceptor, MessageMetadata};
 pub use parent_ref::ParentRef;
 pub use path::ActorPath;
+pub use pipe::pipe_to;
 
 pub use helpers::encrypted_key::EncryptedKey;
 pub use sink::{RetryPolicy, Sink, SinkEntry, Subscriber};
 
 pub use retries::{RetryActor, RetryMessage};
+pub use router::{Router, RouterMsg, RouterResponse, RoutingStrategy};
 pub use selection::ActorSelection;
 pub use supervision::{
     CustomIntervalStrategy, ExponentialBackoffStrategy, IntervalStrategy,

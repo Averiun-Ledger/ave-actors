@@ -111,6 +111,9 @@ pub struct ActorRunner<A: Actor> {
 
     stop_signal: bool,
     sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
+    /// Middleware snapshotted from the system at init. Empty in the
+    /// common case, when the hot path below skips every hook.
+    interceptors: Vec<Arc<dyn crate::middleware::Interceptor>>,
     /// Optional Prometheus metrics collection shared by the actor system.
     #[cfg(feature = "prometheus")]
     metrics: Option<Arc<crate::metrics::ActorMetrics>>,
@@ -211,6 +214,7 @@ where
             error_receiver,
             stop_signal: false,
             sinks,
+            interceptors: Vec::new(),
             #[cfg(feature = "prometheus")]
             metrics: metrics.clone(),
             #[cfg(feature = "prometheus")]
@@ -243,6 +247,7 @@ where
             self.path.clone(),
             A::max_timers(),
         );
+        self.interceptors = system.interceptors_snapshot();
         let spawned_tasks = Arc::new(Mutex::new(Vec::new()));
 
         // Create the actor context.
@@ -627,6 +632,33 @@ where
                 // Receive the next message from the mailbox.
                 msg = self.receiver.recv(), if !self.stop_signal => {
                     if let Some(mut envelope) = msg {
+                        let metadata = envelope.metadata();
+                        ctx.set_current_metadata(metadata);
+                        // Middleware is opt-in: with an empty registry
+                        // this is one branch and no clock reads.
+                        let observed = !self.interceptors.is_empty();
+                        let route_kind = if observed {
+                            match &envelope {
+                                Envelope::Tell { .. } => "tell",
+                                Envelope::Ask { .. } => "ask",
+                            }
+                        } else {
+                            ""
+                        };
+                        if observed {
+                            let view =
+                                crate::middleware::Intercept {
+                                    path: &self.path,
+                                    kind: route_kind,
+                                    metadata,
+                                };
+                            for interceptor in &self.interceptors {
+                                interceptor.before_handle(view);
+                            }
+                        }
+                        let intercept_start = observed.then(|| {
+                            std::time::Instant::now()
+                        });
                         #[cfg(feature = "prometheus")]
                         let kind = match &envelope {
                             Envelope::Tell { .. } => "tell",
@@ -670,6 +702,24 @@ where
                         };
                         #[cfg(not(feature = "prometheus"))]
                         let _ = result;
+                        if observed {
+                            let view =
+                                crate::middleware::Intercept {
+                                    path: &self.path,
+                                    kind: route_kind,
+                                    metadata,
+                                };
+                            let elapsed = intercept_start
+                                .map(|start| start.elapsed())
+                                .unwrap_or_default();
+                            for interceptor in &self.interceptors {
+                                interceptor.after_handle(
+                                    view,
+                                    &result,
+                                    elapsed,
+                                );
+                            }
+                        }
                         #[cfg(feature = "prometheus")]
                         {
                             if let (Some(handles), Some(start)) =

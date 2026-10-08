@@ -1,6 +1,7 @@
 use crate::{
     ActorPath, Error, OverflowStrategy,
     actor::{Actor, ActorContext, Handler, Message},
+    middleware::MessageMetadata,
 };
 
 #[cfg(feature = "prometheus")]
@@ -26,6 +27,8 @@ pub enum Envelope<A: Actor + Handler<A>> {
         /// Time when the envelope was placed in the mailbox.
         #[cfg(feature = "prometheus")]
         queued_at: Instant,
+        /// Envelope metadata: unique id, correlation chain, send time.
+        metadata: MessageMetadata,
     },
     /// Request-response message.
     Ask {
@@ -38,48 +41,48 @@ pub enum Envelope<A: Actor + Handler<A>> {
         /// Time when the envelope was placed in the mailbox.
         #[cfg(feature = "prometheus")]
         queued_at: Instant,
+        /// Envelope metadata: unique id, correlation chain, send time.
+        metadata: MessageMetadata,
     },
 }
 
 impl<A: Actor + Handler<A>> Envelope<A> {
-    #[cfg(not(feature = "prometheus"))]
-    pub const fn tell(message: A::Message, sender: ActorPath) -> Self {
-        Self::Tell { message, sender }
-    }
-
-    #[cfg(feature = "prometheus")]
-    pub fn tell(message: A::Message, sender: ActorPath) -> Self {
+    pub const fn tell(
+        message: A::Message,
+        sender: ActorPath,
+        metadata: MessageMetadata,
+    ) -> Self {
         Self::Tell {
             message,
             sender,
-            queued_at: Instant::now(),
+            #[cfg(feature = "prometheus")]
+            queued_at: metadata.sent_at,
+            metadata,
         }
     }
 
-    #[cfg(not(feature = "prometheus"))]
     pub const fn ask(
         message: A::Message,
         sender: ActorPath,
         rsvp: oneshot::Sender<Result<A::Response, Error>>,
+        metadata: MessageMetadata,
     ) -> Self {
         Self::Ask {
             message,
             sender,
             rsvp: Some(rsvp),
+            #[cfg(feature = "prometheus")]
+            queued_at: metadata.sent_at,
+            metadata,
         }
     }
 
-    #[cfg(feature = "prometheus")]
-    pub fn ask(
-        message: A::Message,
-        sender: ActorPath,
-        rsvp: oneshot::Sender<Result<A::Response, Error>>,
-    ) -> Self {
-        Self::Ask {
-            message,
-            sender,
-            rsvp: Some(rsvp),
-            queued_at: Instant::now(),
+    /// Envelope metadata (id, correlation chain, send time).
+    pub const fn metadata(&self) -> MessageMetadata {
+        match self {
+            Self::Tell { metadata, .. } | Self::Ask { metadata, .. } => {
+                *metadata
+            }
         }
     }
 
@@ -262,14 +265,43 @@ where
         sender: ActorPath,
         message: A::Message,
     ) -> Result<(), Error> {
+        self.tell_inner(sender, message, MessageMetadata::root())
+            .await
+    }
+
+    /// Like [`tell`](Self::tell), but continues the `correlation_id`
+    /// chain instead of starting a new one.
+    pub(crate) async fn tell_with(
+        &self,
+        sender: ActorPath,
+        message: A::Message,
+        correlation_id: u64,
+    ) -> Result<(), Error> {
+        self.tell_inner(
+            sender,
+            message,
+            MessageMetadata::correlated(correlation_id),
+        )
+        .await
+    }
+
+    async fn tell_inner(
+        &self,
+        sender: ActorPath,
+        message: A::Message,
+        metadata: MessageMetadata,
+    ) -> Result<(), Error> {
         match self.strategy {
             OverflowStrategy::Backpressure => self
                 .sender
-                .send(Envelope::tell(message, sender))
+                .send(Envelope::tell(message, sender, metadata))
                 .await
                 .map_err(|_| Error::ActorStopped),
             OverflowStrategy::DropNewest => {
-                match self.sender.try_send(Envelope::tell(message, sender)) {
+                match self
+                    .sender
+                    .try_send(Envelope::tell(message, sender, metadata))
+                {
                     Ok(()) => Ok(()),
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         #[cfg(feature = "prometheus")]
@@ -311,7 +343,10 @@ where
                 }
             }
             OverflowStrategy::Fail => {
-                match self.sender.try_send(Envelope::tell(message, sender)) {
+                match self
+                    .sender
+                    .try_send(Envelope::tell(message, sender, metadata))
+                {
                     Ok(()) => Ok(()),
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         #[cfg(feature = "prometheus")]
@@ -354,6 +389,32 @@ where
         sender: ActorPath,
         message: A::Message,
     ) -> Result<A::Response, Error> {
+        self.ask_inner(sender, message, MessageMetadata::root())
+            .await
+    }
+
+    /// Like [`ask`](Self::ask), but continues the `correlation_id`
+    /// chain instead of starting a new one.
+    pub(crate) async fn ask_with(
+        &self,
+        sender: ActorPath,
+        message: A::Message,
+        correlation_id: u64,
+    ) -> Result<A::Response, Error> {
+        self.ask_inner(
+            sender,
+            message,
+            MessageMetadata::correlated(correlation_id),
+        )
+        .await
+    }
+
+    async fn ask_inner(
+        &self,
+        sender: ActorPath,
+        message: A::Message,
+        metadata: MessageMetadata,
+    ) -> Result<A::Response, Error> {
         // Ask requires a response, so `DropNewest` cannot silently discard the
         // message. Use backpressure for asks under `DropNewest`; only `Fail`
         // returns `MailboxFull` immediately.
@@ -362,7 +423,12 @@ where
             OverflowStrategy::Backpressure | OverflowStrategy::DropNewest => {
                 if self
                     .sender
-                    .send(Envelope::ask(message, sender, response_sender))
+                    .send(Envelope::ask(
+                        message,
+                        sender,
+                        response_sender,
+                        metadata,
+                    ))
                     .await
                     .is_err()
                 {
@@ -387,6 +453,7 @@ where
                     message,
                     sender,
                     response_sender,
+                    metadata,
                 )) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {

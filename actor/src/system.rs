@@ -238,6 +238,10 @@ pub struct SystemRef {
     /// system.  Only present when the `prometheus` feature is enabled.
     #[cfg(feature = "prometheus")]
     pub(crate) actor_metrics: Option<Arc<crate::metrics::ActorMetrics>>,
+    /// System-wide message middleware. Actors snapshot this registry at
+    /// spawn; interceptors registered afterwards do not apply to them.
+    interceptors:
+        Arc<std::sync::RwLock<Vec<Arc<dyn crate::middleware::Interceptor>>>>,
 }
 
 impl SystemRef {
@@ -330,6 +334,7 @@ impl SystemRef {
                 shutting_down,
                 #[cfg(feature = "prometheus")]
                 actor_metrics: None,
+                interceptors: Arc::new(std::sync::RwLock::new(Vec::new())),
             },
             shutdown_complete_rx,
         )
@@ -745,6 +750,31 @@ impl SystemRef {
             .get(path)
             .map(|children| children.iter().cloned().collect::<Vec<_>>())
             .unwrap_or_default()
+    }
+
+    /// Registers system-wide message middleware.
+    ///
+    /// Each actor snapshots the registry at spawn, so register
+    /// interceptors before spawning the actors they must observe.
+    /// With no interceptors registered, the per-message cost is a
+    /// single empty check.
+    pub fn add_interceptor(
+        &self,
+        interceptor: impl crate::middleware::Interceptor,
+    ) {
+        self.interceptors
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Arc::new(interceptor));
+    }
+
+    pub(crate) fn interceptors_snapshot(
+        &self,
+    ) -> Vec<Arc<dyn crate::middleware::Interceptor>> {
+        self.interceptors
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Stores a shared resource (e.g. a database pool or config object) under
