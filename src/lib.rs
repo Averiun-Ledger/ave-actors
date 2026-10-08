@@ -33,8 +33,7 @@ pub use ave_actors_store::{
     database::{BatchOp, BatchWrite, Collection, DbManager, Durability, State},
     default_store_prefix,
     store::{
-        FullPersistence, InitializedActor, LightPersistence, PersistentActor,
-        Store, StoreCommand, StoreResponse,
+        InitializedActor, PersistentActor, Store, StoreCommand, StoreResponse,
     },
 };
 

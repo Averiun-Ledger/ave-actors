@@ -1,5 +1,5 @@
-//! Persistence benchmarks: Full vs Light throughput on the memory
-//! backend, recovery time over a 5k-event log, and Full throughput on
+//! Persistence benchmarks: event throughput on the memory
+//! backend, recovery time over a 5k-event log, and throughput on
 //! SQLite (relaxed durability) for a production-adjacent number.
 
 use async_trait::async_trait;
@@ -11,8 +11,7 @@ use ave_actors_store::database::Durability;
 use ave_actors_store::database::{Collection, DbManager};
 use ave_actors_store::memory::MemoryManager;
 use ave_actors_store::store::{
-    FullPersistence, LightPersistence, PersistentActor, Store, StoreCommand,
-    StoreResponse,
+    PersistentActor, Store, StoreCommand, StoreResponse,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 use serde::{Deserialize, Serialize};
@@ -46,7 +45,7 @@ struct BenchPersistEvent {
 impl Event for BenchPersistEvent {}
 
 macro_rules! bench_actor {
-    ($name:ident, $persistence:ty) => {
+    ($name:ident) => {
         #[derive(Debug)]
         struct $name {
             state_ptr: Arc<BenchState>,
@@ -71,7 +70,6 @@ macro_rules! bench_actor {
 
         #[async_trait]
         impl PersistentActor for $name {
-            type Persistence = $persistence;
             type InitParams = ();
             type State = BenchState;
 
@@ -115,8 +113,7 @@ macro_rules! bench_actor {
     };
 }
 
-bench_actor!(FullActor, FullPersistence);
-bench_actor!(LightActor, LightPersistence);
+bench_actor!(BenchActor);
 
 /// Local copy of the `store_new!` test helper (that macro lives in the
 /// integration-test targets, so benches need their own).
@@ -161,10 +158,10 @@ fn system() -> (
     (system, handle, rt)
 }
 
-async fn fill_full(store: &ActorRef<Store<FullActor>>, n: u64) {
+async fn fill_events(store: &ActorRef<Store<BenchActor>>, n: u64) {
     for _ in 0..n {
         store
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(BenchPersistEvent { delta: 1 }),
                 state: Arc::new(BenchState::default()),
                 snapshot_every: None,
@@ -178,12 +175,12 @@ async fn fill_full(store: &ActorRef<Store<FullActor>>, n: u64) {
 // Benches
 // ---------------------------------------------------------------------------
 
-fn bench_persist_full_memory(c: &mut Criterion) {
+fn bench_persist_memory(c: &mut Criterion) {
     let (system, _runner, rt) = system();
     let store = store_new!(
-        FullActor,
+        BenchActor,
         "bench",
-        "full",
+        "store",
         MemoryManager::default(),
         None,
         Arc::new(BenchState::default()),
@@ -192,11 +189,11 @@ fn bench_persist_full_memory(c: &mut Criterion) {
     let store_ref = rt
         .block_on(system.create_root_actor("store", store))
         .expect("root");
-    c.bench_function("persist_full_memory/20_per_iter", |b| {
+    c.bench_function("persist_memory/20_per_iter", |b| {
         b.to_async(&rt).iter(|| async {
             for _ in 0..20 {
                 store_ref
-                    .ask(StoreCommand::PersistFull {
+                    .ask(StoreCommand::Persist {
                         event: Arc::new(BenchPersistEvent { delta: 1 }),
                         state: Arc::new(BenchState::default()),
                         snapshot_every: None,
@@ -208,40 +205,10 @@ fn bench_persist_full_memory(c: &mut Criterion) {
     });
     system.stop_system();
 }
-
-fn bench_persist_light_memory(c: &mut Criterion) {
-    let (system, _runner, rt) = system();
-    let store = store_new!(
-        LightActor,
-        "bench",
-        "light",
-        MemoryManager::default(),
-        None,
-        Arc::new(BenchState::default()),
-    )
-    .expect("store");
-    let store_ref = rt
-        .block_on(system.create_root_actor("store", store))
-        .expect("root");
-    c.bench_function("persist_light_memory/20_per_iter", |b| {
-        b.to_async(&rt).iter(|| async {
-            for _ in 0..20 {
-                store_ref
-                    .ask(StoreCommand::PersistLight(Arc::new(BenchState {
-                        value: 1,
-                    })))
-                    .await
-                    .expect("persist");
-            }
-        });
-    });
-    system.stop_system();
-}
-
 fn bench_recover_5k(c: &mut Criterion) {
     let (system, _runner, rt) = system();
     let store = store_new!(
-        FullActor,
+        BenchActor,
         "bench",
         "recover",
         MemoryManager::default(),
@@ -252,11 +219,11 @@ fn bench_recover_5k(c: &mut Criterion) {
     let store_ref = rt
         .block_on(system.create_root_actor("store", store))
         .expect("root");
-    rt.block_on(fill_full(&store_ref, 5_000));
+    rt.block_on(fill_events(&store_ref, 5_000));
     {
         let mut group = c.benchmark_group("recover_5k_events");
         group.sample_size(20);
-        group.bench_function("full_memory", |b| {
+        group.bench_function("memory", |b| {
             b.to_async(&rt).iter(|| async {
                 store_ref.ask(StoreCommand::Recover).await.expect("recover");
             });
@@ -272,7 +239,7 @@ fn bench_recover_5k(c: &mut Criterion) {
 fn bench_recover_replay_5k(c: &mut Criterion) {
     let (system, _runner, rt) = system();
     let store = store_new!(
-        FullActor,
+        BenchActor,
         "bench",
         "replay",
         MemoryManager::default(),
@@ -286,7 +253,7 @@ fn bench_recover_replay_5k(c: &mut Criterion) {
     rt.block_on(async {
         for _ in 0..5_000 {
             store_ref
-                .ask(StoreCommand::PersistFull {
+                .ask(StoreCommand::Persist {
                     event: Arc::new(BenchPersistEvent { delta: 1 }),
                     state: Arc::new(BenchState::default()),
                     snapshot_every: Some(u64::MAX),
@@ -308,7 +275,7 @@ fn bench_recover_replay_5k(c: &mut Criterion) {
             }
             other => panic!("expected full replay, got {other:?}"),
         }
-        group.bench_function("full_memory_no_snapshot", |b| {
+        group.bench_function("memory_no_snapshot", |b| {
             b.to_async(&rt).iter(|| async {
                 store_ref.ask(StoreCommand::Recover).await.expect("recover");
             });
@@ -321,7 +288,7 @@ fn bench_recover_replay_5k(c: &mut Criterion) {
 fn bench_get_events_range_5k(c: &mut Criterion) {
     let (system, _runner, rt) = system();
     let store = store_new!(
-        FullActor,
+        BenchActor,
         "bench",
         "range",
         MemoryManager::default(),
@@ -332,11 +299,11 @@ fn bench_get_events_range_5k(c: &mut Criterion) {
     let store_ref = rt
         .block_on(system.create_root_actor("store", store))
         .expect("root");
-    rt.block_on(fill_full(&store_ref, 5_000));
+    rt.block_on(fill_events(&store_ref, 5_000));
     {
         let mut group = c.benchmark_group("get_events_range_5k");
         group.sample_size(20);
-        group.bench_function("full_memory", |b| {
+        group.bench_function("memory", |b| {
             b.to_async(&rt).iter(|| async {
                 store_ref
                     .ask(StoreCommand::GetEvents { from: 0, to: 4_999 })
@@ -350,12 +317,12 @@ fn bench_get_events_range_5k(c: &mut Criterion) {
 }
 
 /// Pure ask + dispatch cost on a live store actor: no backend read,
-/// no encoding. Subtracting this from `persist_full_memory` isolates
+/// no encoding. Subtracting this from `persist_memory` isolates
 /// the persistence work itself.
 fn bench_ask_overhead(c: &mut Criterion) {
     let (system, _runner, rt) = system();
     let store = store_new!(
-        FullActor,
+        BenchActor,
         "bench",
         "askover",
         MemoryManager::default(),
@@ -525,7 +492,7 @@ fn bench_memory_backend(c: &mut Criterion) {
     });
 }
 
-fn bench_persist_full_sqlite(c: &mut Criterion) {
+fn bench_persist_sqlite(c: &mut Criterion) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let manager = ave_actors_sqlite::SqliteManager::new(
         tmp.path(),
@@ -535,7 +502,7 @@ fn bench_persist_full_sqlite(c: &mut Criterion) {
     .expect("sqlite manager");
     let (system, _runner, rt) = system();
     let store = store_new!(
-        FullActor,
+        BenchActor,
         "bench",
         "sqlite",
         manager,
@@ -547,13 +514,13 @@ fn bench_persist_full_sqlite(c: &mut Criterion) {
         .block_on(system.create_root_actor("store", store))
         .expect("root");
     {
-        let mut group = c.benchmark_group("persist_full_sqlite");
+        let mut group = c.benchmark_group("persist_sqlite");
         group.sample_size(20);
         group.bench_function("relaxed_10_per_iter", |b| {
             b.to_async(&rt).iter(|| async {
                 for _ in 0..10 {
                     store_ref
-                        .ask(StoreCommand::PersistFull {
+                        .ask(StoreCommand::Persist {
                             event: Arc::new(BenchPersistEvent { delta: 1 }),
                             state: Arc::new(BenchState::default()),
                             snapshot_every: None,
@@ -570,14 +537,13 @@ fn bench_persist_full_sqlite(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_persist_full_memory,
-    bench_persist_light_memory,
+    bench_persist_memory,
     bench_recover_5k,
     bench_recover_replay_5k,
     bench_get_events_range_5k,
     bench_ask_overhead,
     bench_get_child,
     bench_memory_backend,
-    bench_persist_full_sqlite,
+    bench_persist_sqlite,
 );
 criterion_main!(benches);

@@ -9,8 +9,6 @@ use thiserror::Error;
 pub enum StoreOperation {
     StoreInit,
     Persist,
-    PersistLight,
-    PersistFull,
     Snapshot,
     Recover,
     ApplyEvent,
@@ -54,8 +52,6 @@ impl fmt::Display for StoreOperation {
         let value = match self {
             Self::StoreInit => "store_init",
             Self::Persist => "persist",
-            Self::PersistLight => "persist_light",
-            Self::PersistFull => "persist_full",
             Self::Snapshot => "snapshot",
             Self::Recover => "recover",
             Self::ApplyEvent => "apply_event",

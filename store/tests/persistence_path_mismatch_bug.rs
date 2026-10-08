@@ -1,4 +1,4 @@
-//! Regression tests for FullPersistence prefix-based recovery.
+//! Regression tests for persistence prefix-based recovery.
 //!
 //! Guarantees that an actor recovers its state when recreated with the same
 //! actor name (path-derived prefix), and when recreated under a different
@@ -10,7 +10,7 @@ use ave_actors_actor::{
     Handler, Message, Response,
 };
 use ave_actors_store::memory::MemoryManager;
-use ave_actors_store::store::{FullPersistence, PersistentActor};
+use ave_actors_store::store::PersistentActor;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
@@ -92,7 +92,6 @@ impl Handler<Self> for PathActor {
 
 #[async_trait]
 impl PersistentActor for PathActor {
-    type Persistence = FullPersistence;
     type InitParams = ();
     type State = PathActorState;
 
@@ -217,7 +216,6 @@ async fn test_explicit_prefix_usage() {
 
     #[async_trait]
     impl PersistentActor for PrefixActor {
-        type Persistence = FullPersistence;
         type InitParams = ();
         type State = PrefixActorState;
 

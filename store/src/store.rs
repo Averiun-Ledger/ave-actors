@@ -103,48 +103,6 @@ fn actor_store_error(
 }
 
 // ---------------------------------------------------------------------------
-// Persistence types
-// ---------------------------------------------------------------------------
-
-/// Selects the persistence strategy used by a [`PersistentActor`].
-///
-/// `Light` persists only the latest state snapshot for fast recovery; `Full`
-/// persists every event and reconstructs state by replay, trading recovery
-/// speed for a complete audit trail.
-#[derive(Debug, Clone)]
-pub enum PersistenceType {
-    /// Only the latest state snapshot is persisted; no events are stored.
-    /// Recovery loads the snapshot directly.
-    Light,
-    /// Only events are stored; state is reconstructed by replaying them.
-    Full,
-}
-
-/// Marker type that selects [`PersistenceType::Light`] for a [`PersistentActor`].
-pub struct LightPersistence;
-
-/// Marker type that selects [`PersistenceType::Full`] for a [`PersistentActor`].
-pub struct FullPersistence;
-
-/// Type-level selector that maps a marker type to a [`PersistenceType`] value.
-pub trait Persistence {
-    /// Returns the runtime persistence mode represented by this marker type.
-    fn get_persistence() -> PersistenceType;
-}
-
-impl Persistence for LightPersistence {
-    fn get_persistence() -> PersistenceType {
-        PersistenceType::Light
-    }
-}
-
-impl Persistence for FullPersistence {
-    fn get_persistence() -> PersistenceType {
-        PersistenceType::Full
-    }
-}
-
-// ---------------------------------------------------------------------------
 // InitializedActor
 // ---------------------------------------------------------------------------
 
@@ -186,9 +144,6 @@ where
         BorshSerialize + BorshDeserialize + Send + Sync + Debug + 'static,
     Self::Event: BorshSerialize + BorshDeserialize,
 {
-    /// The persistence strategy ([`LightPersistence`] or [`FullPersistence`]).
-    type Persistence: Persistence;
-
     /// Parameters passed to [`create_initial`](PersistentActor::create_initial).
     type InitParams;
 
@@ -220,7 +175,7 @@ where
         event: &Self::Event,
     ) -> Result<Arc<Self::State>, ActorError>;
 
-    /// Snapshot cadence for `FullPersistence`.
+    /// Snapshot cadence.
     ///
     /// - `None`: snapshots are only manual or done during store shutdown.
     /// - `Some(n)`: after every `n` persisted events since the last snapshot,
@@ -232,6 +187,25 @@ where
     /// Default: `Some(100)`.
     fn snapshot_every() -> Option<u64> {
         Some(100)
+    }
+
+    /// Delete events covered by a snapshot right after it is taken.
+    ///
+    /// Once a snapshot is durable, every event at or below its
+    /// coverage is replay-dead weight — recovery restarts from the
+    /// snapshot, never from them.
+    /// With pruning on, storage stays flat (one snapshot plus at most
+    /// `snapshot_every` pending events) instead of growing a full
+    /// history nobody asked to keep.
+    ///
+    /// Off by default: actors that want an audit trail keep it.
+    /// Counters stay monotonic (keys are never reused): only covered
+    /// rows are deleted, so a crash mid-prune can only leave garbage
+    /// a later prune collects — never a gap.
+    ///
+    /// Default: `false`.
+    fn prune_events_on_snapshot() -> bool {
+        false
     }
 
     /// Version of the serialized `Event` format written by this actor.
@@ -299,6 +273,30 @@ where
         })
     }
 
+    /// Restores live runtime fields onto a recovered base state.
+    ///
+    /// Snapshots only carry persisted fields: anything runtime-only
+    /// (node keys, helpers, handles) decodes as a placeholder. Before
+    /// the store replays uncovered events onto that base, it calls
+    /// this hook so [`apply`](PersistentActor::apply) sees the same
+    /// runtime context it saw live. A base replayed with placeholder
+    /// keys can mis-split state (e.g. owned vs known subjects) and
+    /// bake the corruption into the next snapshot.
+    ///
+    /// `live` is the actor state captured at store start: never
+    /// replayed, never snapshotted, the only source of truth for
+    /// runtime fields inside the store.
+    ///
+    /// The default keeps `base` untouched. Actors whose `apply`
+    /// branches on runtime data must override it.
+    fn restore_runtime(
+        base: Arc<Self::State>,
+        live: &Self::State,
+    ) -> Arc<Self::State> {
+        let _ = live;
+        base
+    }
+
     /// Returns the current actor state.
     fn state(&self) -> Arc<Self::State>;
 
@@ -321,24 +319,14 @@ where
 
         let new_state = Self::apply(self.state(), &event)?;
 
-        let response = match Self::Persistence::get_persistence() {
-            PersistenceType::Light => {
-                let state = Arc::clone(&new_state);
-                store.ask(StoreCommand::PersistLight(state)).await.map_err(
-                    |e| actor_store_error(StoreOperation::PersistLight, e),
-                )?
-            }
-            PersistenceType::Full => store
-                .ask(StoreCommand::PersistFull {
-                    event: Arc::new(event),
-                    state: Arc::clone(&new_state),
-                    snapshot_every: Self::snapshot_every(),
-                })
-                .await
-                .map_err(|e| {
-                    actor_store_error(StoreOperation::PersistFull, e)
-                })?,
-        };
+        let response = store
+            .ask(StoreCommand::Persist {
+                event: Arc::new(event),
+                state: Arc::clone(&new_state),
+                snapshot_every: Self::snapshot_every(),
+            })
+            .await
+            .map_err(|e| actor_store_error(StoreOperation::Persist, e))?;
 
         match response {
             StoreResponse::Persisted => {
@@ -365,10 +353,9 @@ where
     /// snapshot.
     ///
     /// This helper is used internally by [`persist`](PersistentActor::persist).
-    /// For `LightPersistence` it is the only persistence write; for
-    /// `FullPersistence` it complements the event log. In both cases the
-    /// snapshot reflects the already-applied state without requiring an
-    /// in-place mutation of `self`.
+    /// It complements the event log: the snapshot reflects the
+    /// already-applied state without requiring an in-place mutation
+    /// of `self`.
     async fn snapshot_state(
         &self,
         state: Arc<Self::State>,
@@ -1039,41 +1026,7 @@ where
         result
     }
 
-    fn persist_light_state(&mut self, state: &A::State) -> Result<(), Error> {
-        debug!("Persisting light snapshot");
-
-        self.check_fence(StoreOperation::PersistLight)?;
-
-        self.event_counter =
-            self.event_counter.checked_add(1).ok_or_else(|| {
-                store_error(
-                    StoreOperation::PersistLight,
-                    "event counter overflow",
-                )
-            })?;
-        debug!(
-            "Incremented event_counter to {} before snapshot",
-            self.event_counter
-        );
-
-        if let Err(e) = self.snapshot(state) {
-            error!(error = %e, "Snapshot failed during light persistence");
-            self.event_counter -= 1;
-            debug!(
-                "Rolled back event_counter to {} after snapshot failure",
-                self.event_counter
-            );
-            return Err(store_error(StoreOperation::Snapshot, e));
-        }
-
-        debug!(
-            "Successfully persisted light snapshot, event_counter now: {}",
-            self.event_counter
-        );
-        Ok(())
-    }
-
-    fn persist_full_state(
+    fn persist_event_state(
         &mut self,
         event: &A::Event,
         state: &A::State,
@@ -1089,10 +1042,10 @@ where
             return self.persist(event);
         }
 
-        self.check_fence(StoreOperation::PersistFull)?;
+        self.check_fence(StoreOperation::Persist)?;
 
         let next = self.event_counter.checked_add(1).ok_or_else(|| {
-            store_error(StoreOperation::PersistFull, "event counter overflow")
+            store_error(StoreOperation::Persist, "event counter overflow")
         })?;
 
         // Atomic path: event + snapshot + metadata in one all-or-nothing
@@ -1122,11 +1075,16 @@ where
                         },
                     ],
                 )
-                .map_err(|e| store_error(StoreOperation::PersistFull, e))?;
+                .map_err(|e| store_error(StoreOperation::Persist, e))?;
             self.event_counter = next;
             self.state_counter = next;
             #[cfg(feature = "prometheus")]
             self.record_pending_events();
+            // Same guarantee as the sequential path: the batch made
+            // the snapshot durable, so covered events can go.
+            if A::prune_events_on_snapshot() {
+                self.prune_covered_events();
+            }
             return Ok(());
         }
 
@@ -1140,7 +1098,7 @@ where
         let written_index = self.event_counter - 1;
 
         if let Err(snapshot_err) = self.snapshot(state) {
-            error!(error = %snapshot_err, "Snapshot failed during full persistence; rolling back event {written_index}");
+            error!(error = %snapshot_err, "Snapshot failed during persistence; rolling back event {written_index}");
             let key = format!("{:020}", written_index);
             if let Err(rollback_err) = self.events.del(&key) {
                 error!(
@@ -1283,6 +1241,18 @@ where
             ));
         }
 
+        // With pruning on, the prefix below coverage is gone by
+        // design, not corruption: start user reads at the snapshot
+        // coverage. Without pruning every event is still there, so
+        // the strict path stays. The gap check inside `events()`
+        // still guards the retained window either way, and replay
+        // (which never asks below coverage) keeps the strict path.
+        let from = if A::prune_events_on_snapshot() {
+            from.max(self.state_counter)
+        } else {
+            from
+        };
+
         // O(1)-ish emptiness probe: `last()` seeks the end instead of
         // cloning the whole collection like `iter(false)` does.
         let empty_events = self.events.last()?.is_none();
@@ -1342,7 +1312,34 @@ where
             }
             return Err(e);
         }
+        // The snapshot (and its coverage in metadata) is durable at
+        // this point: covered events can go. Best-effort by design —
+        // replay only ever reads above `state_counter`, so a crash
+        // mid-prune leaves collectible garbage, never a gap.
+        if A::prune_events_on_snapshot() {
+            self.prune_covered_events();
+        }
         Ok(())
+    }
+
+    /// Deletes every event at or below the snapshot coverage
+    /// (`[0..state_counter)`). Counters stay monotonic on purpose:
+    /// keys are positional in recovery, so reusing them would replay
+    /// the wrong events. Failures only warn — leftovers are still
+    /// below coverage and the next prune collects them.
+    fn prune_covered_events(&mut self) {
+        if self.state_counter == 0 {
+            return;
+        }
+        let end = format!("{:020}", self.state_counter - 1);
+        if let Err(e) = self.events.del_range("00000000000000000000", &end) {
+            warn!(
+                error = %e,
+                covered_through = self.state_counter - 1,
+                "Event prune failed after snapshot; leftovers will be \
+                 retried on the next snapshot"
+            );
+        }
     }
 
     fn recover(&mut self) -> Result<Option<Arc<A::State>>, Error> {
@@ -1433,6 +1430,9 @@ where
 
         let mut state = state;
         if self.event_counter > self.state_counter {
+            // The base may carry placeholder runtime fields (decoded
+            // snapshot); replay must see the live ones.
+            state = A::restore_runtime(state, &self.initial_state);
             warn!(
                 event_counter = self.event_counter,
                 state_counter = self.state_counter,
@@ -1517,10 +1517,6 @@ where
     }
 
     fn snapshot_if_needed(&mut self) -> Result<(), Error> {
-        if !matches!(A::Persistence::get_persistence(), PersistenceType::Full) {
-            return Ok(());
-        }
-
         if self.event_counter == 0 || self.event_counter <= self.state_counter {
             return Ok(());
         }
@@ -1530,6 +1526,9 @@ where
             .map(|s| s.state)
             .unwrap_or_else(|| Arc::clone(&self.initial_state));
 
+        // Same placeholder hazard as boot recovery: replay onto live
+        // runtime fields, or the snapshot then written bakes it in.
+        state = A::restore_runtime(state, &self.initial_state);
         state = self.apply_events(
             self.state_counter,
             self.event_counter - 1,
@@ -1704,16 +1703,15 @@ where
     A::Event: BorshSerialize + BorshDeserialize,
 {
     /// Persist an event and snapshot the supplied state if required.
-    PersistFull {
+    Persist {
         /// Event to append to the event log.
         event: Arc<A::Event>,
         /// Current actor state, used when a snapshot is triggered.
         state: Arc<A::State>,
-        /// Snapshot cadence for `FullPersistence`.
+        /// Snapshot cadence: after every `n` persisted events since the
+        /// last snapshot, the store snapshots automatically.
         snapshot_every: Option<u64>,
     },
-    /// Persist a snapshot of the supplied state (LightPersistence).
-    PersistLight(Arc<A::State>),
     /// Snapshot the supplied state immediately.
     Snapshot(Arc<A::State>),
     /// Return the most recently persisted event.
@@ -1736,16 +1734,15 @@ where
 {
     fn clone(&self) -> Self {
         match self {
-            Self::PersistFull {
+            Self::Persist {
                 event,
                 state,
                 snapshot_every,
-            } => Self::PersistFull {
+            } => Self::Persist {
                 event: Arc::clone(event),
                 state: Arc::clone(state),
                 snapshot_every: *snapshot_every,
             },
-            Self::PersistLight(s) => Self::PersistLight(Arc::clone(s)),
             Self::Snapshot(s) => Self::Snapshot(Arc::clone(s)),
             Self::LastEvent => Self::LastEvent,
             Self::NextEventNumber => Self::NextEventNumber,
@@ -1845,14 +1842,14 @@ where
         _ctx: &mut ActorContext<Self>,
     ) -> Result<StoreResponse<A>, ActorError> {
         match msg {
-            StoreCommand::PersistFull {
+            StoreCommand::Persist {
                 event,
                 state,
                 snapshot_every,
             } => {
                 if snapshot_every == Some(0) {
                     return Err(actor_store_error(
-                        StoreOperation::PersistFull,
+                        StoreOperation::Persist,
                         Error::InvalidConfiguration {
                             component: "actor persistence".to_owned(),
                             reason: "snapshot_every cannot be Some(0)"
@@ -1862,7 +1859,7 @@ where
                 }
                 #[cfg(feature = "prometheus")]
                 let start = Instant::now();
-                let combined = self.persist_full_state(
+                let combined = self.persist_event_state(
                     event.as_ref(),
                     state.as_ref(),
                     snapshot_every,
@@ -1871,12 +1868,12 @@ where
                 #[cfg(feature = "prometheus")]
                 self.record_command_metrics(
                     start,
-                    "persist_full",
+                    "persist",
                     &combined.as_ref().map(|_| ()),
                 );
 
                 combined.map_err(|e| {
-                    actor_store_error(StoreOperation::PersistFull, e)
+                    actor_store_error(StoreOperation::Persist, e)
                 })?;
                 #[cfg(feature = "prometheus")]
                 self.record_pending_events();
@@ -1885,22 +1882,6 @@ where
                     event_type = std::any::type_name::<A::Event>(),
                     "Persisted full event"
                 );
-                Ok(StoreResponse::Persisted)
-            }
-            StoreCommand::PersistLight(state) => {
-                #[cfg(feature = "prometheus")]
-                let start = Instant::now();
-                let result = self.persist_light_state(state.as_ref());
-                #[cfg(feature = "prometheus")]
-                self.record_command_metrics(
-                    start,
-                    "persist_light",
-                    &result.as_ref().map(|_| ()),
-                );
-                result.map_err(|e| {
-                    actor_store_error(StoreOperation::PersistLight, e)
-                })?;
-                debug!("Light persistence of state snapshot");
                 Ok(StoreResponse::Persisted)
             }
             StoreCommand::Snapshot(state) => {
@@ -2125,7 +2106,6 @@ mod tests {
 
     #[async_trait]
     impl PersistentActor for CounterActor {
-        type Persistence = crate::store::LightPersistence;
         type InitParams = ();
         type State = CounterState;
 
@@ -2175,16 +2155,16 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Full-persistence actor with automatic snapshots
+    // Actor with automatic snapshots every 2 events
     // ------------------------------------------------------------------
 
     #[derive(Debug)]
-    struct FullCounterActor {
+    struct SnapshotCounterActor {
         state: Arc<CounterState>,
     }
 
     #[async_trait]
-    impl Actor for FullCounterActor {
+    impl Actor for SnapshotCounterActor {
         type Message = CounterMessage;
         type Event = CounterEvent;
         type SinkEvent = Self::Event;
@@ -2196,7 +2176,7 @@ mod tests {
             id: &str,
             _parent_span: Option<tracing::Span>,
         ) -> tracing::Span {
-            info_span!("FullCounterActor", id = %id)
+            info_span!("SnapshotCounterActor", id = %id)
         }
 
         async fn pre_start(
@@ -2212,8 +2192,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl PersistentActor for FullCounterActor {
-        type Persistence = crate::store::FullPersistence;
+    impl PersistentActor for SnapshotCounterActor {
         type InitParams = ();
         type State = CounterState;
 
@@ -2247,7 +2226,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Handler<Self> for FullCounterActor {
+    impl Handler<Self> for SnapshotCounterActor {
         async fn handle_message(
             &mut self,
             _sender: ActorPath,
@@ -2267,49 +2246,11 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Test: Light persistence with recovery
+    // Test: persistence with automatic snapshots
     // ------------------------------------------------------------------
 
     #[test(tokio::test)]
-    async fn test_cow_light_persistence_recovery() {
-        let (system, ..) = ActorSystem::create(
-            CancellationToken::new(),
-            CancellationToken::new(),
-        );
-
-        system.add_helper("db", MemoryManager::default());
-
-        let actor_ref = system
-            .create_root_actor("counter", CounterActor::initial(()))
-            .await
-            .unwrap();
-
-        actor_ref.ask(CounterMessage::Add(10)).await.unwrap();
-        actor_ref.ask(CounterMessage::Add(5)).await.unwrap();
-
-        let value = actor_ref.ask(CounterMessage::Get).await.unwrap();
-        assert_eq!(value, CounterResponse::Value(15));
-
-        actor_ref.ask_stop().await.unwrap();
-
-        // Recreate and verify recovery
-        let actor_ref = system
-            .create_root_actor("counter", CounterActor::initial(()))
-            .await
-            .unwrap();
-
-        let value = actor_ref.ask(CounterMessage::Get).await.unwrap();
-        assert_eq!(value, CounterResponse::Value(15));
-
-        actor_ref.ask_stop().await.unwrap();
-    }
-
-    // ------------------------------------------------------------------
-    // Test: Full persistence with automatic snapshots
-    // ------------------------------------------------------------------
-
-    #[test(tokio::test)]
-    async fn test_cow_full_persistence_with_snapshots() {
+    async fn test_cow_persistence_with_snapshots() {
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -2321,7 +2262,7 @@ mod tests {
         system.add_helper("db", MemoryManager::default());
 
         let actor_ref = system
-            .create_root_actor("full", FullCounterActor::initial(()))
+            .create_root_actor("counter", SnapshotCounterActor::initial(()))
             .await
             .unwrap();
 
@@ -2336,7 +2277,7 @@ mod tests {
 
         // Recreate and verify recovery (events + snapshots)
         let actor_ref = system
-            .create_root_actor("full", FullCounterActor::initial(()))
+            .create_root_actor("counter", SnapshotCounterActor::initial(()))
             .await
             .unwrap();
 
@@ -2423,7 +2364,7 @@ mod tests {
         let store_ref = system.create_root_actor("store", store).await.unwrap();
 
         store_ref
-            .tell(StoreCommand::PersistFull {
+            .tell(StoreCommand::Persist {
                 event: Arc::new(CounterEvent(5)),
                 state: Arc::new(CounterState { value: 0 }),
                 snapshot_every: None,
@@ -2435,7 +2376,7 @@ mod tests {
             .await
             .unwrap();
         store_ref
-            .tell(StoreCommand::PersistFull {
+            .tell(StoreCommand::Persist {
                 event: Arc::new(CounterEvent(3)),
                 state: Arc::new(CounterState { value: 0 }),
                 snapshot_every: None,
@@ -2471,7 +2412,7 @@ mod tests {
     }
 
     #[test(tokio::test)]
-    async fn test_persist_full_rejects_snapshot_every_zero() {
+    async fn test_persist_rejects_snapshot_every_zero() {
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -2492,7 +2433,7 @@ mod tests {
         let store_ref = system.create_root_actor("store", store).await.unwrap();
 
         let result = store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(CounterEvent(1)),
                 state: Arc::new(CounterState { value: 1 }),
                 snapshot_every: Some(0),
@@ -2500,13 +2441,13 @@ mod tests {
             .await;
         assert!(
             result.is_err(),
-            "PersistFull with snapshot_every Some(0) must be rejected, got \
+            "snapshot_every Some(0) must be rejected, got \
              {result:?}"
         );
     }
 
     #[test(tokio::test)]
-    async fn test_persist_full_rolls_back_event_when_snapshot_fails() {
+    async fn test_persist_rolls_back_event_when_snapshot_fails() {
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -2528,13 +2469,13 @@ mod tests {
         let store_ref = system.create_root_actor("store", store).await.unwrap();
 
         let result = store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(CounterEvent(1)),
                 state: Arc::new(CounterState { value: 1 }),
                 snapshot_every: Some(1),
             })
             .await;
-        assert!(result.is_err(), "snapshot failure must fail PersistFull");
+        assert!(result.is_err(), "snapshot failure must fail persist");
 
         // The appended event must be compensated: no event left behind,
         // counters back at zero, recovery finds nothing.
@@ -2553,7 +2494,7 @@ mod tests {
     }
 
     #[test(tokio::test)]
-    async fn test_persist_full_rolls_back_event_when_metadata_fails() {
+    async fn test_persist_rolls_back_event_when_metadata_fails() {
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -2576,13 +2517,13 @@ mod tests {
         let store_ref = system.create_root_actor("store", store).await.unwrap();
 
         let result = store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(CounterEvent(1)),
                 state: Arc::new(CounterState { value: 1 }),
                 snapshot_every: Some(1),
             })
             .await;
-        assert!(result.is_err(), "metadata failure must fail PersistFull");
+        assert!(result.is_err(), "metadata failure must fail persist");
 
         let response =
             store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
@@ -2767,7 +2708,7 @@ mod tests {
     }
 
     #[test(tokio::test)]
-    async fn test_persist_full_atomic_batch_failure_applies_nothing() {
+    async fn test_persist_atomic_batch_failure_applies_nothing() {
         let (system, mut runner) = ActorSystem::create(
             CancellationToken::new(),
             CancellationToken::new(),
@@ -2789,13 +2730,13 @@ mod tests {
         let store_ref = system.create_root_actor("store", store).await.unwrap();
 
         let result = store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(CounterEvent(1)),
                 state: Arc::new(CounterState { value: 1 }),
                 snapshot_every: Some(1),
             })
             .await;
-        assert!(result.is_err(), "batch failure must fail PersistFull");
+        assert!(result.is_err(), "batch failure must fail persist");
 
         // All-or-nothing: no event, no snapshot, counters at zero.
         let response =
@@ -2813,186 +2754,8 @@ mod tests {
         assert!(matches!(response, StoreResponse::State(None)));
     }
 
-    #[test]
-    fn test_light_persistence_stores_only_snapshot() {
-        let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<CounterActor>::test_new(
-            "store",
-            "test",
-            MemoryManager::default(),
-            None,
-            initial,
-        )
-        .unwrap();
-
-        store
-            .persist_light_state(&CounterState { value: 5 })
-            .unwrap();
-
-        assert!(
-            store.events.iter(false).unwrap().next().is_none(),
-            "LightPersistence must not store events"
-        );
-
-        let snapshot =
-            store.get_state().unwrap().expect("snapshot should exist");
-        assert_eq!(snapshot.state.value, 5);
-        assert_eq!(snapshot.counter, 1);
-    }
-
-    #[test]
-    fn test_light_persistence_no_events_stored() {
-        let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<CounterActor>::test_new(
-            "store",
-            "test",
-            MemoryManager::default(),
-            None,
-            initial,
-        )
-        .unwrap();
-
-        store
-            .persist_light_state(&CounterState { value: 1 })
-            .unwrap();
-        store
-            .persist_light_state(&CounterState { value: 2 })
-            .unwrap();
-
-        assert!(
-            store.events.iter(false).unwrap().next().is_none(),
-            "LightPersistence must leave the event collection empty"
-        );
-    }
-
-    #[test]
-    fn test_light_persistence_last_event_is_none() {
-        let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<CounterActor>::test_new(
-            "store",
-            "test",
-            MemoryManager::default(),
-            None,
-            initial,
-        )
-        .unwrap();
-
-        store
-            .persist_light_state(&CounterState { value: 7 })
-            .unwrap();
-
-        assert!(store.last_event().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_light_persistence_event_counter_equals_state_counter() {
-        let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<CounterActor>::test_new(
-            "store",
-            "test",
-            MemoryManager::default(),
-            None,
-            initial,
-        )
-        .unwrap();
-
-        store
-            .persist_light_state(&CounterState { value: 1 })
-            .unwrap();
-        store
-            .persist_light_state(&CounterState { value: 2 })
-            .unwrap();
-
-        assert_eq!(store.event_counter, 2);
-        assert_eq!(store.state_counter, 2);
-    }
-
-    #[test]
-    fn test_light_persistence_pending_events_is_zero() {
-        let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<CounterActor>::test_new(
-            "store",
-            "test",
-            MemoryManager::default(),
-            None,
-            initial,
-        )
-        .unwrap();
-
-        store
-            .persist_light_state(&CounterState { value: 1 })
-            .unwrap();
-        store
-            .persist_light_state(&CounterState { value: 2 })
-            .unwrap();
-
-        assert_eq!(store.pending_events_since_snapshot(), 0);
-    }
-
-    #[test]
-    fn test_light_persistence_recovery_loads_last_snapshot() {
-        let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<CounterActor>::test_new(
-            "store",
-            "test",
-            MemoryManager::default(),
-            None,
-            initial,
-        )
-        .unwrap();
-
-        store
-            .persist_light_state(&CounterState { value: 5 })
-            .unwrap();
-        store
-            .persist_light_state(&CounterState { value: 10 })
-            .unwrap();
-
-        let recovered = store.recover().unwrap();
-        assert_eq!(recovered.unwrap().value, 10);
-    }
-
-    #[test]
-    fn test_light_persistence_recovery_without_snapshot_returns_none() {
-        let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<CounterActor>::test_new(
-            "store",
-            "test",
-            MemoryManager::default(),
-            None,
-            initial,
-        )
-        .unwrap();
-
-        assert!(store.recover().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_light_persistence_no_events_in_range() {
-        let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<CounterActor>::test_new(
-            "store",
-            "test",
-            MemoryManager::default(),
-            None,
-            initial,
-        )
-        .unwrap();
-
-        store
-            .persist_light_state(&CounterState { value: 1 })
-            .unwrap();
-        store
-            .persist_light_state(&CounterState { value: 2 })
-            .unwrap();
-
-        // Even though the logical event counter advanced, no events are stored.
-        let events = store.query_events(0, 0).unwrap();
-        assert!(events.is_empty());
-    }
-
     // ------------------------------------------------------------------
-    // Mock backend that fails state writes, used to verify LightPersistence
+    // Mock backend that fails state writes, used to verify snapshot
     // rollback behaviour.
     // ------------------------------------------------------------------
 
@@ -3068,30 +2831,6 @@ mod tests {
             Ok(())
         }
     }
-
-    #[test]
-    fn test_light_persistence_snapshot_failure_rolls_back() {
-        let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<CounterActor>::test_new(
-            "store",
-            "test",
-            FailingStateManager,
-            None,
-            initial,
-        )
-        .unwrap();
-
-        assert!(
-            store
-                .persist_light_state(&CounterState { value: 5 })
-                .is_err()
-        );
-
-        assert_eq!(store.event_counter, 0);
-        assert_eq!(store.state_counter, 0);
-        assert!(store.recover().unwrap().is_none());
-    }
-
     // ------------------------------------------------------------------
     // Mock backend where snapshot writes succeed but metadata writes fail,
     // used to verify `snapshot()` rolls back `state_counter`.
@@ -3226,9 +2965,9 @@ mod tests {
     }
 
     #[test]
-    fn test_full_persistence_stores_events() {
+    fn test_persistence_stores_events() {
         let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<FullCounterActor>::test_new(
+        let mut store = Store::<SnapshotCounterActor>::test_new(
             "store",
             "test",
             MemoryManager::default(),
@@ -3250,9 +2989,9 @@ mod tests {
     }
 
     #[test]
-    fn test_full_persistence_replays_events_on_recovery() {
+    fn test_persistence_replays_events_on_recovery() {
         let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<FullCounterActor>::test_new(
+        let mut store = Store::<SnapshotCounterActor>::test_new(
             "store",
             "test",
             MemoryManager::default(),
@@ -3269,9 +3008,9 @@ mod tests {
     }
 
     #[test]
-    fn test_full_persistence_replays_many_windows_on_recovery() {
+    fn test_persistence_replays_many_windows_on_recovery() {
         let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<FullCounterActor>::test_new(
+        let mut store = Store::<SnapshotCounterActor>::test_new(
             "store",
             "test",
             MemoryManager::default(),
@@ -3340,7 +3079,6 @@ mod tests {
 
     #[async_trait]
     impl PersistentActor for V2Actor {
-        type Persistence = crate::store::FullPersistence;
         type InitParams = ();
         type State = CounterState;
 
@@ -3555,7 +3293,6 @@ mod tests {
 
     #[async_trait]
     impl PersistentActor for V2StateActor {
-        type Persistence = crate::store::FullPersistence;
         type InitParams = ();
         type State = V2State;
 
@@ -3618,9 +3355,9 @@ mod tests {
     }
 
     #[test]
-    fn test_full_persistence_snapshot_captures_pending_events() {
+    fn test_persistence_snapshot_captures_pending_events() {
         let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<FullCounterActor>::test_new(
+        let mut store = Store::<SnapshotCounterActor>::test_new(
             "store",
             "test",
             MemoryManager::default(),
@@ -3645,7 +3382,7 @@ mod tests {
     #[test]
     fn test_query_events_rejects_oversized_range() {
         let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<FullCounterActor>::test_new(
+        let mut store = Store::<SnapshotCounterActor>::test_new(
             "store",
             "test",
             MemoryManager::default(),
@@ -3670,9 +3407,9 @@ mod tests {
     }
 
     #[test]
-    fn test_full_persistence_pending_events_correct() {
+    fn test_persistence_pending_events_correct() {
         let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<FullCounterActor>::test_new(
+        let mut store = Store::<SnapshotCounterActor>::test_new(
             "store",
             "test",
             MemoryManager::default(),
@@ -3692,9 +3429,9 @@ mod tests {
     }
 
     #[test]
-    fn test_full_persistence_last_event_present() {
+    fn test_persistence_last_event_present() {
         let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<FullCounterActor>::test_new(
+        let mut store = Store::<SnapshotCounterActor>::test_new(
             "store",
             "test",
             MemoryManager::default(),
@@ -3714,9 +3451,9 @@ mod tests {
     }
 
     #[test]
-    fn test_full_persistence_get_events_range() {
+    fn test_persistence_get_events_range() {
         let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<FullCounterActor>::test_new(
+        let mut store = Store::<SnapshotCounterActor>::test_new(
             "store",
             "test",
             MemoryManager::default(),
@@ -3737,9 +3474,9 @@ mod tests {
     }
 
     #[test]
-    fn test_full_persistence_recovery_with_snapshot_and_events() {
+    fn test_persistence_recovery_with_snapshot_and_events() {
         let initial = Arc::new(CounterState { value: 0 });
-        let mut store = Store::<FullCounterActor>::test_new(
+        let mut store = Store::<SnapshotCounterActor>::test_new(
             "store",
             "test",
             MemoryManager::default(),
@@ -3758,17 +3495,9 @@ mod tests {
     }
 
     #[test]
-    fn test_persist_increments_event_counter_both_strategies() {
+    fn test_persist_increments_event_counter() {
         let initial = Arc::new(CounterState { value: 0 });
-        let mut light = Store::<CounterActor>::test_new(
-            "light",
-            "test",
-            MemoryManager::default(),
-            None,
-            Arc::clone(&initial),
-        )
-        .unwrap();
-        let mut full = Store::<FullCounterActor>::test_new(
+        let mut full = Store::<SnapshotCounterActor>::test_new(
             "full",
             "test",
             MemoryManager::default(),
@@ -3777,27 +3506,15 @@ mod tests {
         )
         .unwrap();
 
-        light
-            .persist_light_state(&CounterState { value: 1 })
-            .unwrap();
         full.persist(&CounterEvent(1)).unwrap();
 
-        assert_eq!(light.event_counter, 1);
         assert_eq!(full.event_counter, 1);
     }
 
     #[test]
-    fn test_recover_with_empty_store_both_strategies() {
+    fn test_recover_with_empty_store() {
         let initial = Arc::new(CounterState { value: 0 });
-        let mut light = Store::<CounterActor>::test_new(
-            "light",
-            "test",
-            MemoryManager::default(),
-            None,
-            Arc::clone(&initial),
-        )
-        .unwrap();
-        let mut full = Store::<FullCounterActor>::test_new(
+        let mut full = Store::<SnapshotCounterActor>::test_new(
             "full",
             "test",
             MemoryManager::default(),
@@ -3806,7 +3523,6 @@ mod tests {
         )
         .unwrap();
 
-        assert!(light.recover().unwrap().is_none());
         assert!(full.recover().unwrap().is_none());
     }
 
@@ -3822,12 +3538,8 @@ mod tests {
         )
         .unwrap();
 
-        store
-            .persist_light_state(&CounterState { value: 1 })
-            .unwrap();
-        store
-            .persist_light_state(&CounterState { value: 2 })
-            .unwrap();
+        store.persist(&CounterEvent(1)).unwrap();
+        store.persist(&CounterEvent(2)).unwrap();
         store.snapshot(&CounterState { value: 2 }).unwrap();
 
         let snapshot =
@@ -3908,7 +3620,7 @@ mod tests {
             assert_eq!(pending_events_value(&buf, &path), Some(0));
 
             store_ref
-                .ask(StoreCommand::PersistFull {
+                .ask(StoreCommand::Persist {
                     event: Arc::new(CounterEvent(5)),
                     state: Arc::new(CounterState::default()),
                     snapshot_every: None,
@@ -3917,7 +3629,7 @@ mod tests {
                 .expect("persist command should succeed");
 
             let buf = encode_registry(&registry);
-            assert!(buf.contains("operation=\"persist_full\""));
+            assert!(buf.contains("operation=\"persist\""));
             assert_eq!(pending_events_value(&buf, &path), Some(1));
 
             store_ref
@@ -3932,17 +3644,7 @@ mod tests {
             assert_eq!(pending_events_value(&buf, &path), Some(0));
 
             store_ref
-                .ask(StoreCommand::PersistLight(Arc::new(CounterState {
-                    value: 5,
-                })))
-                .await
-                .expect("persist light command should succeed");
-
-            let buf = encode_registry(&registry);
-            assert_eq!(pending_events_value(&buf, &path), Some(0));
-
-            store_ref
-                .ask(StoreCommand::PersistFull {
+                .ask(StoreCommand::Persist {
                     event: Arc::new(CounterEvent(3)),
                     state: Arc::new(CounterState { value: 8 }),
                     snapshot_every: Some(100),

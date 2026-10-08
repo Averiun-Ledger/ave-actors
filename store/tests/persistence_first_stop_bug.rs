@@ -1,4 +1,4 @@
-//! Regression tests for FullPersistence recovery after the first graceful
+//! Regression tests for persistence recovery after the first graceful
 //! stop, when no snapshot existed beforehand.
 //!
 //! Guarantees that stopping an actor with pending events creates a snapshot,
@@ -12,7 +12,7 @@ use ave_actors_actor::{
     Handler, Message, Response,
 };
 use ave_actors_store::memory::MemoryManager;
-use ave_actors_store::store::{FullPersistence, PersistentActor};
+use ave_actors_store::store::PersistentActor;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
@@ -107,7 +107,6 @@ impl Handler<Self> for TestActor {
 
 #[async_trait]
 impl PersistentActor for TestActor {
-    type Persistence = FullPersistence;
     type InitParams = ();
     type State = TestActorState;
 
@@ -136,7 +135,7 @@ impl PersistentActor for TestActor {
 }
 
 #[test(tokio::test)]
-async fn test_full_persistence_first_stop_no_previous_snapshot() {
+async fn test_persistence_first_stop_no_previous_snapshot() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -192,7 +191,7 @@ async fn test_snapshot_created_when_events_pending() {
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(AddEvent(5)),
             state: Arc::new(TestActorState::default()),
             snapshot_every: None,
@@ -200,7 +199,7 @@ async fn test_snapshot_created_when_events_pending() {
         .await
         .unwrap();
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(AddEvent(7)),
             state: Arc::new(TestActorState::default()),
             snapshot_every: None,

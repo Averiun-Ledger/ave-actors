@@ -7,7 +7,7 @@
 mod helpers;
 use ave_actors_store::{
     memory::MemoryManager,
-    store::{FullPersistence, PersistentActor, StoreCommand, StoreResponse},
+    store::{PersistentActor, StoreCommand, StoreResponse},
 };
 
 use ave_actors_actor::{
@@ -84,7 +84,6 @@ impl Handler<Self> for TestActor {
 
 #[async_trait]
 impl PersistentActor for TestActor {
-    type Persistence = FullPersistence;
     type InitParams = ();
     type State = TestActorState;
 
@@ -137,7 +136,7 @@ async fn test_next_event_number_after_persist() {
     }
 
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(TestEvent(10)),
             state: Arc::new(TestActorState::default()),
             snapshot_every: None,
@@ -151,7 +150,7 @@ async fn test_next_event_number_after_persist() {
     }
 
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(TestEvent(20)),
             state: Arc::new(TestActorState::default()),
             snapshot_every: None,

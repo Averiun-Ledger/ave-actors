@@ -1,4 +1,4 @@
-//! Regression test for FullPersistence state recovery.
+//! Regression test for persistence state recovery.
 //!
 //! Guarantees that an actor recovers its accumulated state after a graceful
 //! stop followed by a restart.
@@ -9,7 +9,7 @@ use ave_actors_actor::{
     Handler, Message, Response,
 };
 use ave_actors_store::memory::MemoryManager;
-use ave_actors_store::store::{FullPersistence, PersistentActor};
+use ave_actors_store::store::PersistentActor;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
@@ -18,7 +18,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
-static SHARED_MANAGER_FULL_RECOVERY: OnceLock<Arc<TokioMutex<MemoryManager>>> =
+static SHARED_MANAGER_RECOVERY: OnceLock<Arc<TokioMutex<MemoryManager>>> =
     OnceLock::new();
 
 #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
@@ -70,13 +70,13 @@ impl Actor for CounterActor {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let manager_ref = SHARED_MANAGER_FULL_RECOVERY.get_or_init(|| {
+        let manager_ref = SHARED_MANAGER_RECOVERY.get_or_init(|| {
             Arc::new(TokioMutex::new(MemoryManager::default()))
         });
 
         let manager = manager_ref.lock().await.clone();
 
-        self.start_store("counter_test_full", None, ctx, manager, None)
+        self.start_store("counter_test", None, ctx, manager, None)
             .await
     }
 }
@@ -105,7 +105,6 @@ impl Handler<Self> for CounterActor {
 
 #[async_trait]
 impl PersistentActor for CounterActor {
-    type Persistence = FullPersistence;
     type InitParams = ();
     type State = CounterActorState;
 
@@ -134,7 +133,7 @@ impl PersistentActor for CounterActor {
 }
 
 #[test(tokio::test)]
-async fn test_full_persistence_doesnt_recover_state() {
+async fn test_persistence_doesnt_recover_state() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -166,7 +165,7 @@ async fn test_full_persistence_doesnt_recover_state() {
 
     assert_eq!(
         recovered_count.count, 3,
-        "BUG: FullPersistence should recover state. Expected count=3, got count={}",
+        "BUG: should recover state. Expected count=3, got count={}",
         recovered_count.count
     );
 }

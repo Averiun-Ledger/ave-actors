@@ -9,10 +9,7 @@ use ave_actors_store::{
     Error as StoreError, StoreOperation,
     database::{Collection, DbManager, State},
     memory::{MemoryManager, MemoryStore},
-    store::{
-        FullPersistence, LightPersistence, PersistentActor, Store,
-        StoreCommand, StoreResponse,
-    },
+    store::{PersistentActor, Store, StoreCommand, StoreResponse},
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -231,17 +228,17 @@ impl Event for ValueEvent {}
 // State structs and actors
 
 #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
-struct RollbackLightActorState {
+struct RollbackActorState {
     value: i32,
 }
 
 #[derive(Debug)]
-struct RollbackLightActor {
-    state_ptr: Arc<RollbackLightActorState>,
+struct RollbackActor {
+    state_ptr: Arc<RollbackActorState>,
 }
 
 #[async_trait]
-impl Actor for RollbackLightActor {
+impl Actor for RollbackActor {
     type Message = ValueMessage;
     type Response = ValueResponse;
     type Event = ValueEvent;
@@ -253,7 +250,7 @@ impl Actor for RollbackLightActor {
         id: &str,
         _parent_span: Option<tracing::Span>,
     ) -> tracing::Span {
-        info_span!("RollbackLightActor", id = %id)
+        info_span!("RollbackActor", id = %id)
     }
 
     async fn pre_start(
@@ -261,7 +258,7 @@ impl Actor for RollbackLightActor {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         self.start_store(
-            "rollback_light",
+            "rollback",
             None,
             ctx,
             FailingStateManager::default(),
@@ -272,14 +269,13 @@ impl Actor for RollbackLightActor {
 }
 
 #[async_trait]
-impl PersistentActor for RollbackLightActor {
-    type Persistence = LightPersistence;
+impl PersistentActor for RollbackActor {
     type InitParams = ();
-    type State = RollbackLightActorState;
+    type State = RollbackActorState;
 
     fn create_initial(_: ()) -> Self {
         Self {
-            state_ptr: Arc::new(RollbackLightActorState::default()),
+            state_ptr: Arc::new(RollbackActorState::default()),
         }
     }
 
@@ -302,7 +298,7 @@ impl PersistentActor for RollbackLightActor {
 }
 
 #[async_trait]
-impl Handler<Self> for RollbackLightActor {
+impl Handler<Self> for RollbackActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -350,7 +346,6 @@ impl Actor for GapActor {
 
 #[async_trait]
 impl PersistentActor for GapActor {
-    type Persistence = FullPersistence;
     type InitParams = ();
     type State = GapActorState;
 
@@ -406,8 +401,8 @@ async fn test_persistent_actor_rolls_back_state_when_store_persist_fails() {
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    let actor_ref: ActorRef<RollbackLightActor> = system
-        .create_root_actor("rollback-light", RollbackLightActor::initial(()))
+    let actor_ref: ActorRef<RollbackActor> = system
+        .create_root_actor("rollback", RollbackActor::initial(()))
         .await
         .unwrap();
 
@@ -419,35 +414,35 @@ async fn test_persistent_actor_rolls_back_state_when_store_persist_fails() {
 }
 
 #[test(tokio::test)]
-async fn test_light_persistence_rolls_back_snapshot_failure() {
+async fn test_snapshot_failure_rolls_back() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let store = store_new!(
-        RollbackLightActor,
+        RollbackActor,
         "rollback_store",
         "prefix",
         FailingStateManager::default(),
         None,
-        Arc::new(RollbackLightActorState::default()),
+        Arc::new(RollbackActorState::default()),
     )
     .unwrap();
 
-    let store_ref: ActorRef<Store<RollbackLightActor>> = system
+    let store_ref: ActorRef<Store<RollbackActor>> = system
         .create_root_actor("rollback-store", store)
         .await
         .unwrap();
 
     let response = store_ref
-        .ask(StoreCommand::PersistLight(Arc::new(
-            RollbackLightActorState { value: 5 },
-        )))
+        .ask(StoreCommand::Snapshot(Arc::new(RollbackActorState {
+            value: 5,
+        })))
         .await;
     assert!(matches!(response, Err(ActorError::StoreOperation { .. })));
 
-    // With LightPersistence as snapshot-only, a snapshot failure leaves nothing
-    // persisted. The logical event counter is rolled back as well.
+    // A failed snapshot leaves nothing persisted. The logical event
+    // counter is rolled back as well.
     let counter = store_ref.ask(StoreCommand::NextEventNumber).await.unwrap();
     assert!(matches!(counter, StoreResponse::NextEventNumber(0)));
 
@@ -476,7 +471,7 @@ async fn test_recover_fails_when_event_log_has_gap() {
 
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(ValueEvent(1)),
                 state: Arc::new(GapActorState::default()),
                 snapshot_every: None,
@@ -487,7 +482,7 @@ async fn test_recover_fails_when_event_log_has_gap() {
     ));
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(ValueEvent(2)),
                 state: Arc::new(GapActorState::default()),
                 snapshot_every: None,
@@ -609,7 +604,7 @@ async fn test_recover_falls_back_when_metadata_state_is_missing() {
 
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(ValueEvent(4)),
                 state: Arc::new(GapActorState { value: 4 }),
                 snapshot_every: Some(1),
@@ -672,7 +667,7 @@ async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
 
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(ValueEvent(2)),
                 state: Arc::new(GapActorState { value: 2 }),
                 snapshot_every: Some(1),
@@ -683,7 +678,7 @@ async fn test_recover_fails_when_encrypted_pending_event_is_corrupted() {
     ));
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(ValueEvent(3)),
                 state: Arc::new(GapActorState::default()),
                 snapshot_every: None,
@@ -727,7 +722,7 @@ async fn test_persist_full_event_requests_snapshot_only_when_due() {
     // First event: no snapshot yet (event_counter will be 1, not multiple of 2)
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(ValueEvent(2)),
                 state: Arc::new(GapActorState { value: 2 }),
                 snapshot_every: Some(2),
@@ -740,7 +735,7 @@ async fn test_persist_full_event_requests_snapshot_only_when_due() {
     // Second event: snapshot is triggered inline (event_counter = 2, multiple of 2)
     assert!(matches!(
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(ValueEvent(3)),
                 state: Arc::new(GapActorState { value: 5 }),
                 snapshot_every: Some(2),

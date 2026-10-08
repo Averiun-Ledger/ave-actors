@@ -21,7 +21,7 @@ use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
     Handler, Message, NotPersistentActor, Response,
 };
-use ave_actors_store::store::{FullPersistence, PersistentActor};
+use ave_actors_store::store::PersistentActor;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -95,7 +95,6 @@ impl Handler<Self> for MyPersistentActor {
 
 #[async_trait]
 impl PersistentActor for MyPersistentActor {
-    type Persistence = FullPersistence;
     type InitParams = i32;
     type State = MyPersistentActorState;
 

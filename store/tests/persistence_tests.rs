@@ -1,6 +1,6 @@
-//! Integration tests for `FullPersistence`.
+//! Integration tests for persistence.
 //!
-//! `FullPersistence` stores the event stream and snapshots periodically. These
+//! persistence stores the event stream and snapshots periodically. These
 //! tests verify that behaviour end-to-end.
 
 #[macro_use]
@@ -15,7 +15,7 @@ use ave_actors_store::{
     database::{Collection, DbManager},
     default_store_prefix,
     memory::MemoryManager,
-    store::{FullPersistence, PersistentActor, StoreCommand, StoreResponse},
+    store::{PersistentActor, StoreCommand, StoreResponse},
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -25,43 +25,43 @@ use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
-struct FullActorState {
+struct StandardActorState {
     counter: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum FullMessage {
+enum StandardMessage {
     Increment(i32),
     Get,
 }
 
-impl Message for FullMessage {}
+impl Message for StandardMessage {}
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
-struct FullEvent(i32);
+struct StandardEvent(i32);
 
-impl Event for FullEvent {}
+impl Event for StandardEvent {}
 
 #[derive(Debug, Clone, PartialEq)]
-enum FullResponse {
+enum StandardResponse {
     Counter(i32),
 }
 
-impl Response for FullResponse {}
+impl Response for StandardResponse {}
 
 #[derive(Debug)]
-struct FullActor {
-    state: Arc<FullActorState>,
+struct StandardActor {
+    state: Arc<StandardActorState>,
 }
 
 #[async_trait]
-impl Actor for FullActor {
-    type Message = FullMessage;
-    type Event = FullEvent;
+impl Actor for StandardActor {
+    type Message = StandardMessage;
+    type Event = StandardEvent;
     type SinkEvent = Self::Event;
-    type Response = FullResponse;
+    type Response = StandardResponse;
     type ChildError = ActorError;
     type ChildFault = ActorError;
 
@@ -69,7 +69,7 @@ impl Actor for FullActor {
         id: &str,
         _parent_span: Option<tracing::Span>,
     ) -> tracing::Span {
-        info_span!("FullActor", id = %id)
+        info_span!("StandardActor", id = %id)
     }
 
     async fn pre_start(
@@ -85,14 +85,13 @@ impl Actor for FullActor {
 }
 
 #[async_trait]
-impl PersistentActor for FullActor {
-    type Persistence = FullPersistence;
+impl PersistentActor for StandardActor {
     type InitParams = ();
-    type State = FullActorState;
+    type State = StandardActorState;
 
     fn create_initial(_: ()) -> Self {
         Self {
-            state: Arc::new(FullActorState::default()),
+            state: Arc::new(StandardActorState::default()),
         }
     }
 
@@ -119,25 +118,27 @@ impl PersistentActor for FullActor {
 }
 
 #[async_trait]
-impl Handler<Self> for FullActor {
+impl Handler<Self> for StandardActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
-        msg: FullMessage,
+        msg: StandardMessage,
         ctx: &mut ActorContext<Self>,
-    ) -> Result<FullResponse, ActorError> {
+    ) -> Result<StandardResponse, ActorError> {
         match msg {
-            FullMessage::Increment(delta) => {
-                self.persist(FullEvent(delta), ctx).await?;
-                Ok(FullResponse::Counter(self.state.counter))
+            StandardMessage::Increment(delta) => {
+                self.persist(StandardEvent(delta), ctx).await?;
+                Ok(StandardResponse::Counter(self.state.counter))
             }
-            FullMessage::Get => Ok(FullResponse::Counter(self.state.counter)),
+            StandardMessage::Get => {
+                Ok(StandardResponse::Counter(self.state.counter))
+            }
         }
     }
 }
 
 #[test(tokio::test)]
-async fn test_full_persistence_actor_recovers_from_snapshot_and_events() {
+async fn test_persistence_actor_recovers_from_snapshot_and_events() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -145,33 +146,33 @@ async fn test_full_persistence_actor_recovers_from_snapshot_and_events() {
     system.add_helper("db", MemoryManager::default());
 
     let actor_ref = system
-        .create_root_actor("full-recover", FullActor::initial(()))
+        .create_root_actor("full-recover", StandardActor::initial(()))
         .await
         .unwrap();
 
     // snapshot_every = 2, so after 3 events: snapshot at 2 events, 1 pending.
-    actor_ref.ask(FullMessage::Increment(10)).await.unwrap();
-    actor_ref.ask(FullMessage::Increment(5)).await.unwrap();
-    actor_ref.ask(FullMessage::Increment(3)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(10)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(5)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(3)).await.unwrap();
 
-    let response = actor_ref.ask(FullMessage::Get).await.unwrap();
-    assert_eq!(response, FullResponse::Counter(18));
+    let response = actor_ref.ask(StandardMessage::Get).await.unwrap();
+    assert_eq!(response, StandardResponse::Counter(18));
 
     actor_ref.ask_stop().await.unwrap();
 
     let actor_ref = system
-        .create_root_actor("full-recover", FullActor::initial(()))
+        .create_root_actor("full-recover", StandardActor::initial(()))
         .await
         .unwrap();
 
-    let response = actor_ref.ask(FullMessage::Get).await.unwrap();
-    assert_eq!(response, FullResponse::Counter(18));
+    let response = actor_ref.ask(StandardMessage::Get).await.unwrap();
+    assert_eq!(response, StandardResponse::Counter(18));
 
     actor_ref.ask_stop().await.unwrap();
 }
 
 #[test(tokio::test)]
-async fn test_full_persistence_actor_keeps_event_history() {
+async fn test_persistence_actor_keeps_event_history() {
     let manager = MemoryManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -180,12 +181,12 @@ async fn test_full_persistence_actor_keeps_event_history() {
     system.add_helper("db", manager.clone());
 
     let actor_ref = system
-        .create_root_actor("full-history", FullActor::initial(()))
+        .create_root_actor("full-history", StandardActor::initial(()))
         .await
         .unwrap();
 
-    actor_ref.ask(FullMessage::Increment(2)).await.unwrap();
-    actor_ref.ask(FullMessage::Increment(3)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(2)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(3)).await.unwrap();
 
     // The store was started with name "store" and the default prefix
     // derived from the actor's full path, so the backend collections are
@@ -201,48 +202,49 @@ async fn test_full_persistence_actor_keeps_event_history() {
 
     let state = manager.create_state("store_states", &prefix).unwrap();
 
-    assert_eq!(events.len(), 2, "FullPersistence must keep event history");
+    assert_eq!(events.len(), 2, "must keep event history");
     assert!(
         ave_actors_store::database::State::get(&state).is_ok(),
-        "FullPersistence must store at least one snapshot"
+        "must store at least one snapshot"
     );
 
     actor_ref.ask_stop().await.unwrap();
 }
 
 #[test(tokio::test)]
-async fn test_full_persistence_store_command_returns_last_event() {
+async fn test_persistence_store_command_returns_last_event() {
     let manager = MemoryManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let store = store_new!(
-        FullActor,
+        StandardActor,
         "store",
         "full-cmd",
         manager,
         None,
-        Arc::new(FullActorState::default()),
+        Arc::new(StandardActorState::default()),
     )
     .unwrap();
-    let store_ref: ActorRef<ave_actors_store::store::Store<FullActor>> = system
-        .create_root_actor("full-cmd-store", store)
-        .await
-        .unwrap();
+    let store_ref: ActorRef<ave_actors_store::store::Store<StandardActor>> =
+        system
+            .create_root_actor("full-cmd-store", store)
+            .await
+            .unwrap();
 
     store_ref
-        .ask(StoreCommand::PersistFull {
-            event: Arc::new(FullEvent(5)),
-            state: Arc::new(FullActorState::default()),
+        .ask(StoreCommand::Persist {
+            event: Arc::new(StandardEvent(5)),
+            state: Arc::new(StandardActorState::default()),
             snapshot_every: None,
         })
         .await
         .unwrap();
     store_ref
-        .ask(StoreCommand::PersistFull {
-            event: Arc::new(FullEvent(3)),
-            state: Arc::new(FullActorState::default()),
+        .ask(StoreCommand::Persist {
+            event: Arc::new(StandardEvent(3)),
+            state: Arc::new(StandardActorState::default()),
             snapshot_every: None,
         })
         .await
@@ -275,16 +277,16 @@ async fn test_full_persistence_store_command_returns_last_event() {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-struct FullActorEvery5 {
-    state: Arc<FullActorState>,
+struct StandardActorEvery5 {
+    state: Arc<StandardActorState>,
 }
 
 #[async_trait]
-impl Actor for FullActorEvery5 {
-    type Message = FullMessage;
-    type Event = FullEvent;
+impl Actor for StandardActorEvery5 {
+    type Message = StandardMessage;
+    type Event = StandardEvent;
     type SinkEvent = Self::Event;
-    type Response = FullResponse;
+    type Response = StandardResponse;
     type ChildError = ActorError;
     type ChildFault = ActorError;
 
@@ -292,7 +294,7 @@ impl Actor for FullActorEvery5 {
         id: &str,
         _parent_span: Option<tracing::Span>,
     ) -> tracing::Span {
-        info_span!("FullActorEvery5", id = %id)
+        info_span!("StandardActorEvery5", id = %id)
     }
 
     async fn pre_start(
@@ -308,14 +310,13 @@ impl Actor for FullActorEvery5 {
 }
 
 #[async_trait]
-impl PersistentActor for FullActorEvery5 {
-    type Persistence = FullPersistence;
+impl PersistentActor for StandardActorEvery5 {
     type InitParams = ();
-    type State = FullActorState;
+    type State = StandardActorState;
 
     fn create_initial(_: ()) -> Self {
         Self {
-            state: Arc::new(FullActorState::default()),
+            state: Arc::new(StandardActorState::default()),
         }
     }
 
@@ -342,25 +343,27 @@ impl PersistentActor for FullActorEvery5 {
 }
 
 #[async_trait]
-impl Handler<Self> for FullActorEvery5 {
+impl Handler<Self> for StandardActorEvery5 {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
-        msg: FullMessage,
+        msg: StandardMessage,
         ctx: &mut ActorContext<Self>,
-    ) -> Result<FullResponse, ActorError> {
+    ) -> Result<StandardResponse, ActorError> {
         match msg {
-            FullMessage::Increment(delta) => {
-                self.persist(FullEvent(delta), ctx).await?;
-                Ok(FullResponse::Counter(self.state.counter))
+            StandardMessage::Increment(delta) => {
+                self.persist(StandardEvent(delta), ctx).await?;
+                Ok(StandardResponse::Counter(self.state.counter))
             }
-            FullMessage::Get => Ok(FullResponse::Counter(self.state.counter)),
+            StandardMessage::Get => {
+                Ok(StandardResponse::Counter(self.state.counter))
+            }
         }
     }
 }
 
 #[test(tokio::test)]
-async fn test_full_persistence_actor_snapshot_every_respected() {
+async fn test_persistence_actor_snapshot_every_respected() {
     let manager = MemoryManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -369,12 +372,12 @@ async fn test_full_persistence_actor_snapshot_every_respected() {
     system.add_helper("db", manager.clone());
 
     let actor_ref = system
-        .create_root_actor("full-every2", FullActor::initial(()))
+        .create_root_actor("full-every2", StandardActor::initial(()))
         .await
         .unwrap();
 
-    actor_ref.ask(FullMessage::Increment(2)).await.unwrap();
-    actor_ref.ask(FullMessage::Increment(3)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(2)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(3)).await.unwrap();
 
     let prefix = default_store_prefix(&actor_ref.path());
     let state = manager.create_state("store_states", &prefix).unwrap();
@@ -383,7 +386,7 @@ async fn test_full_persistence_actor_snapshot_every_respected() {
         "snapshot must be created after reaching snapshot_every"
     );
 
-    actor_ref.ask(FullMessage::Increment(5)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(5)).await.unwrap();
 
     let collection =
         manager.create_collection("store_events", &prefix).unwrap();
@@ -402,7 +405,7 @@ async fn test_full_persistence_actor_snapshot_every_respected() {
 }
 
 #[test(tokio::test)]
-async fn test_full_persistence_actor_no_snapshot_before_due() {
+async fn test_persistence_actor_no_snapshot_before_due() {
     let manager = MemoryManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -411,14 +414,14 @@ async fn test_full_persistence_actor_no_snapshot_before_due() {
     system.add_helper("db", manager.clone());
 
     let actor_ref = system
-        .create_root_actor("full-every5", FullActorEvery5::initial(()))
+        .create_root_actor("full-every5", StandardActorEvery5::initial(()))
         .await
         .unwrap();
 
-    actor_ref.ask(FullMessage::Increment(1)).await.unwrap();
-    actor_ref.ask(FullMessage::Increment(2)).await.unwrap();
-    actor_ref.ask(FullMessage::Increment(3)).await.unwrap();
-    actor_ref.ask(FullMessage::Increment(4)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(1)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(2)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(3)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(4)).await.unwrap();
 
     let prefix = default_store_prefix(&actor_ref.path());
     let state = manager.create_state("store_states", &prefix).unwrap();
@@ -431,7 +434,7 @@ async fn test_full_persistence_actor_no_snapshot_before_due() {
 }
 
 #[test(tokio::test)]
-async fn test_full_persistence_actor_snapshot_on_stop() {
+async fn test_persistence_actor_snapshot_on_stop() {
     let manager = MemoryManager::default();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -440,13 +443,13 @@ async fn test_full_persistence_actor_snapshot_on_stop() {
     system.add_helper("db", manager.clone());
 
     let actor_ref = system
-        .create_root_actor("full-stop", FullActorEvery5::initial(()))
+        .create_root_actor("full-stop", StandardActorEvery5::initial(()))
         .await
         .unwrap();
 
-    actor_ref.ask(FullMessage::Increment(1)).await.unwrap();
-    actor_ref.ask(FullMessage::Increment(2)).await.unwrap();
-    actor_ref.ask(FullMessage::Increment(3)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(1)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(2)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(3)).await.unwrap();
 
     actor_ref.ask_stop().await.unwrap();
 
@@ -468,9 +471,9 @@ impl NotPersistentActor for BranchParent {}
 
 #[async_trait]
 impl Actor for BranchParent {
-    type Message = FullMessage;
-    type Response = FullResponse;
-    type Event = FullEvent;
+    type Message = StandardMessage;
+    type Response = StandardResponse;
+    type Event = StandardEvent;
     type SinkEvent = Self::Event;
     type ChildError = ActorError;
     type ChildFault = ActorError;
@@ -486,7 +489,8 @@ impl Actor for BranchParent {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        ctx.create_child("counter", FullActor::initial(())).await?;
+        ctx.create_child("counter", StandardActor::initial(()))
+            .await?;
         Ok(())
     }
 }
@@ -496,18 +500,18 @@ impl Handler<Self> for BranchParent {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
-        msg: FullMessage,
+        msg: StandardMessage,
         ctx: &mut ActorContext<Self>,
-    ) -> Result<FullResponse, ActorError> {
-        let child: ActorRef<FullActor> = ctx
+    ) -> Result<StandardResponse, ActorError> {
+        let child: ActorRef<StandardActor> = ctx
             .get_child("counter")
             .await
             .map_err(|_| ActorError::Functional {
                 description: "counter child missing".to_owned(),
             })?;
         match msg {
-            FullMessage::Increment(_) => child.ask(msg).await,
-            FullMessage::Get => child.ask(msg).await,
+            StandardMessage::Increment(_) => child.ask(msg).await,
+            StandardMessage::Get => child.ask(msg).await,
         }
     }
 
@@ -539,18 +543,18 @@ async fn test_same_leaf_name_under_different_parents_is_isolated() {
     let parent_a = system.create_root_actor("p1", BranchParent).await.unwrap();
     let parent_b = system.create_root_actor("p2", BranchParent).await.unwrap();
 
-    parent_a.ask(FullMessage::Increment(10)).await.unwrap();
-    parent_b.ask(FullMessage::Increment(100)).await.unwrap();
+    parent_a.ask(StandardMessage::Increment(10)).await.unwrap();
+    parent_b.ask(StandardMessage::Increment(100)).await.unwrap();
 
     // Each subtree keeps its own state: previously both children shared
     // the "counter" prefix and the second write corrupted the first.
     assert_eq!(
-        parent_a.ask(FullMessage::Get).await.unwrap(),
-        FullResponse::Counter(10)
+        parent_a.ask(StandardMessage::Get).await.unwrap(),
+        StandardResponse::Counter(10)
     );
     assert_eq!(
-        parent_b.ask(FullMessage::Get).await.unwrap(),
-        FullResponse::Counter(100)
+        parent_b.ask(StandardMessage::Get).await.unwrap(),
+        StandardResponse::Counter(100)
     );
 
     // The backend holds two distinct prefixes.

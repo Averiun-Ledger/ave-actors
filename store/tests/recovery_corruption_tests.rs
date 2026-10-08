@@ -14,7 +14,7 @@ use ave_actors_store::{
     database::{Collection, DbManager, State},
     default_store_prefix,
     memory::MemoryManager,
-    store::{FullPersistence, PersistentActor},
+    store::PersistentActor,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -82,7 +82,6 @@ impl Actor for CorruptActor {
 
 #[async_trait]
 impl PersistentActor for CorruptActor {
-    type Persistence = FullPersistence;
     type InitParams = ();
     type State = CorruptState;
 

@@ -9,7 +9,7 @@
 mod helpers;
 use ave_actors_store::{
     memory::MemoryManager,
-    store::{FullPersistence, PersistentActor, StoreCommand, StoreResponse},
+    store::{PersistentActor, StoreCommand, StoreResponse},
 };
 use test_log::test;
 
@@ -85,7 +85,6 @@ impl Actor for CounterTestActor {
 
 #[async_trait]
 impl PersistentActor for CounterTestActor {
-    type Persistence = FullPersistence;
     type InitParams = ();
     type State = CounterState;
 
@@ -180,7 +179,7 @@ async fn test_event_counter_after_first_event() {
     // Persist first event
     let event = CounterEvent { delta: 10 };
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(event),
             state: Arc::new(CounterState::default()),
             snapshot_every: None,
@@ -241,7 +240,7 @@ async fn test_event_counter_multiple_events() {
     for i in 1..=5 {
         let event = CounterEvent { delta: i };
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(event),
                 state: Arc::new(CounterState::default()),
                 snapshot_every: None,
@@ -298,7 +297,7 @@ async fn test_get_events_out_of_range_returns_empty() {
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(CounterEvent { delta: 10 }),
             state: Arc::new(CounterState::default()),
             snapshot_every: None,
@@ -337,7 +336,7 @@ async fn test_get_events_partial_overlap_returns_existing_suffix() {
     let store_ref = system.create_root_actor("store", store).await.unwrap();
 
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(CounterEvent { delta: 10 }),
             state: Arc::new(CounterState::default()),
             snapshot_every: None,
@@ -345,7 +344,7 @@ async fn test_get_events_partial_overlap_returns_existing_suffix() {
         .await
         .unwrap();
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(CounterEvent { delta: 20 }),
             state: Arc::new(CounterState::default()),
             snapshot_every: None,
@@ -392,7 +391,7 @@ async fn test_state_counter_after_snapshot() {
     for i in 1..=3 {
         let event = CounterEvent { delta: i * 10 };
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(event.clone()),
                 state: Arc::new(CounterState::default()),
                 snapshot_every: None,
@@ -452,7 +451,7 @@ async fn test_recovery_with_events_after_snapshot() {
     for i in 1..=2 {
         let event = CounterEvent { delta: i * 10 };
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(event.clone()),
                 state: Arc::new(CounterState::default()),
                 snapshot_every: None,
@@ -475,7 +474,7 @@ async fn test_recovery_with_events_after_snapshot() {
     for i in 3..=5 {
         let event = CounterEvent { delta: i * 10 };
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(event.clone()),
                 state: Arc::new(CounterState::default()),
                 snapshot_every: None,
@@ -525,7 +524,7 @@ async fn test_recovery_without_snapshot() {
     for i in 1..=3 {
         let event = CounterEvent { delta: i * 10 };
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(event),
                 state: Arc::new(CounterState::default()),
                 snapshot_every: None,
@@ -619,7 +618,7 @@ async fn test_last_events_from_positions() {
     for i in 1..=5 {
         let event = CounterEvent { delta: i * 10 };
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(event),
                 state: Arc::new(CounterState::default()),
                 snapshot_every: None,
@@ -707,7 +706,7 @@ async fn test_multiple_snapshots_and_recoveries() {
     for i in 1..=2 {
         let event = CounterEvent { delta: i };
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(event.clone()),
                 state: Arc::new(CounterState::default()),
                 snapshot_every: None,
@@ -730,7 +729,7 @@ async fn test_multiple_snapshots_and_recoveries() {
     for i in 3..=5 {
         let event = CounterEvent { delta: i };
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(event.clone()),
                 state: Arc::new(CounterState::default()),
                 snapshot_every: None,
@@ -753,7 +752,7 @@ async fn test_multiple_snapshots_and_recoveries() {
     for i in 6..=7 {
         let event = CounterEvent { delta: i };
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(event.clone()),
                 state: Arc::new(CounterState::default()),
                 snapshot_every: None,
@@ -806,7 +805,7 @@ async fn test_event_counter_with_encryption() {
     for i in 1..=3 {
         let event = CounterEvent { delta: i * 10 };
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(event),
                 state: Arc::new(CounterState::default()),
                 snapshot_every: None,

@@ -13,7 +13,7 @@ use ave_actors_sqlite::SqliteManager;
 use ave_actors_store::{
     database::{Collection, DbManager, Durability},
     default_store_prefix,
-    store::{FullPersistence, LightPersistence, PersistentActor},
+    store::PersistentActor,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -28,42 +28,42 @@ use tracing::info_span;
 // ============================================================================
 
 #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
-struct FullState {
+struct StandardState {
     counter: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum FullMessage {
+enum StandardMessage {
     Increment(i32),
     Get,
 }
 
-impl Message for FullMessage {}
+impl Message for StandardMessage {}
 
 #[derive(Debug, Clone, PartialEq)]
-enum FullResponse {
+enum StandardResponse {
     Counter(i32),
 }
 
-impl Response for FullResponse {}
+impl Response for StandardResponse {}
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
-struct FullEvent(i32);
+struct StandardEvent(i32);
 
-impl Event for FullEvent {}
+impl Event for StandardEvent {}
 
 #[derive(Debug)]
-struct FullActor {
-    state: Arc<FullState>,
+struct StandardActor {
+    state: Arc<StandardState>,
 }
 
 #[async_trait]
-impl Actor for FullActor {
-    type Message = FullMessage;
-    type Response = FullResponse;
-    type Event = FullEvent;
+impl Actor for StandardActor {
+    type Message = StandardMessage;
+    type Response = StandardResponse;
+    type Event = StandardEvent;
     type SinkEvent = Self::Event;
     type ChildError = ActorError;
     type ChildFault = ActorError;
@@ -72,7 +72,7 @@ impl Actor for FullActor {
         id: &str,
         _parent_span: Option<tracing::Span>,
     ) -> tracing::Span {
-        info_span!("SqliteFullActor", id = %id)
+        info_span!("SqliteStandardActor", id = %id)
     }
 
     async fn pre_start(
@@ -88,14 +88,13 @@ impl Actor for FullActor {
 }
 
 #[async_trait]
-impl PersistentActor for FullActor {
-    type Persistence = FullPersistence;
+impl PersistentActor for StandardActor {
     type InitParams = ();
-    type State = FullState;
+    type State = StandardState;
 
     fn create_initial(_: ()) -> Self {
         Self {
-            state: Arc::new(FullState::default()),
+            state: Arc::new(StandardState::default()),
         }
     }
 
@@ -122,64 +121,66 @@ impl PersistentActor for FullActor {
 }
 
 #[async_trait]
-impl Handler<Self> for FullActor {
+impl Handler<Self> for StandardActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
-        msg: FullMessage,
+        msg: StandardMessage,
         ctx: &mut ActorContext<Self>,
-    ) -> Result<FullResponse, ActorError> {
+    ) -> Result<StandardResponse, ActorError> {
         match msg {
-            FullMessage::Increment(delta) => {
-                self.persist(FullEvent(delta), ctx).await?;
-                Ok(FullResponse::Counter(self.state.counter))
+            StandardMessage::Increment(delta) => {
+                self.persist(StandardEvent(delta), ctx).await?;
+                Ok(StandardResponse::Counter(self.state.counter))
             }
-            FullMessage::Get => Ok(FullResponse::Counter(self.state.counter)),
+            StandardMessage::Get => {
+                Ok(StandardResponse::Counter(self.state.counter))
+            }
         }
     }
 }
 
 // ============================================================================
-// Light actor (snapshots only)
+// Plain actor (events + snapshots, no pruning)
 // ============================================================================
 
 #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
-struct LightState {
+struct SnapshotState {
     value: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum LightMessage {
+enum SnapshotMessage {
     Increment(i32),
     Get,
 }
 
-impl Message for LightMessage {}
+impl Message for SnapshotMessage {}
 
 #[derive(Debug, Clone, PartialEq)]
-enum LightResponse {
+enum SnapshotResponse {
     Value(i32),
 }
 
-impl Response for LightResponse {}
+impl Response for SnapshotResponse {}
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
-struct LightEvent(i32);
+struct SnapshotEvent(i32);
 
-impl Event for LightEvent {}
+impl Event for SnapshotEvent {}
 
 #[derive(Debug)]
-struct LightActor {
-    state: Arc<LightState>,
+struct SnapshotActor {
+    state: Arc<SnapshotState>,
 }
 
 #[async_trait]
-impl Actor for LightActor {
-    type Message = LightMessage;
-    type Response = LightResponse;
-    type Event = LightEvent;
+impl Actor for SnapshotActor {
+    type Message = SnapshotMessage;
+    type Response = SnapshotResponse;
+    type Event = SnapshotEvent;
     type SinkEvent = Self::Event;
     type ChildError = ActorError;
     type ChildFault = ActorError;
@@ -188,7 +189,7 @@ impl Actor for LightActor {
         id: &str,
         _parent_span: Option<tracing::Span>,
     ) -> tracing::Span {
-        info_span!("SqliteLightActor", id = %id)
+        info_span!("SqliteSnapshotActor", id = %id)
     }
 
     async fn pre_start(
@@ -204,14 +205,13 @@ impl Actor for LightActor {
 }
 
 #[async_trait]
-impl PersistentActor for LightActor {
-    type Persistence = LightPersistence;
+impl PersistentActor for SnapshotActor {
     type InitParams = ();
-    type State = LightState;
+    type State = SnapshotState;
 
     fn create_initial(_: ()) -> Self {
         Self {
-            state: Arc::new(LightState::default()),
+            state: Arc::new(SnapshotState::default()),
         }
     }
 
@@ -234,19 +234,21 @@ impl PersistentActor for LightActor {
 }
 
 #[async_trait]
-impl Handler<Self> for LightActor {
+impl Handler<Self> for SnapshotActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
-        msg: LightMessage,
+        msg: SnapshotMessage,
         ctx: &mut ActorContext<Self>,
-    ) -> Result<LightResponse, ActorError> {
+    ) -> Result<SnapshotResponse, ActorError> {
         match msg {
-            LightMessage::Increment(delta) => {
-                self.persist(LightEvent(delta), ctx).await?;
-                Ok(LightResponse::Value(self.state.value))
+            SnapshotMessage::Increment(delta) => {
+                self.persist(SnapshotEvent(delta), ctx).await?;
+                Ok(SnapshotResponse::Value(self.state.value))
             }
-            LightMessage::Get => Ok(LightResponse::Value(self.state.value)),
+            SnapshotMessage::Get => {
+                Ok(SnapshotResponse::Value(self.state.value))
+            }
         }
     }
 }
@@ -262,9 +264,9 @@ impl NotPersistentActor for BranchParent {}
 
 #[async_trait]
 impl Actor for BranchParent {
-    type Message = FullMessage;
-    type Response = FullResponse;
-    type Event = FullEvent;
+    type Message = StandardMessage;
+    type Response = StandardResponse;
+    type Event = StandardEvent;
     type SinkEvent = Self::Event;
     type ChildError = ActorError;
     type ChildFault = ActorError;
@@ -280,7 +282,8 @@ impl Actor for BranchParent {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        ctx.create_child("counter", FullActor::initial(())).await?;
+        ctx.create_child("counter", StandardActor::initial(()))
+            .await?;
         Ok(())
     }
 }
@@ -290,10 +293,10 @@ impl Handler<Self> for BranchParent {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
-        msg: FullMessage,
+        msg: StandardMessage,
         ctx: &mut ActorContext<Self>,
-    ) -> Result<FullResponse, ActorError> {
-        let child: ActorRef<FullActor> = ctx
+    ) -> Result<StandardResponse, ActorError> {
+        let child: ActorRef<StandardActor> = ctx
             .get_child("counter")
             .await
             .map_err(|_| ActorError::Functional {
@@ -334,7 +337,7 @@ fn sqlite_manager() -> (tempfile::TempDir, SqliteManager) {
 }
 
 #[test(tokio::test)]
-async fn test_sqlite_full_persistence_recovers_across_restart() {
+async fn test_sqlite_persistence_recovers_across_restart() {
     let (_dir, manager) = sqlite_manager();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -343,24 +346,24 @@ async fn test_sqlite_full_persistence_recovers_across_restart() {
     system.add_helper("db", manager.clone());
 
     let actor_ref = system
-        .create_root_actor("full-sqlite", FullActor::initial(()))
+        .create_root_actor("full-sqlite", StandardActor::initial(()))
         .await
         .unwrap();
 
-    actor_ref.ask(FullMessage::Increment(10)).await.unwrap();
-    actor_ref.ask(FullMessage::Increment(5)).await.unwrap();
-    actor_ref.ask(FullMessage::Increment(3)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(10)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(5)).await.unwrap();
+    actor_ref.ask(StandardMessage::Increment(3)).await.unwrap();
     actor_ref.ask_stop().await.unwrap();
 
     // Same name: full-path prefix matches, state recovers from snapshot +
     // replayed tail event.
     let actor_ref = system
-        .create_root_actor("full-sqlite", FullActor::initial(()))
+        .create_root_actor("full-sqlite", StandardActor::initial(()))
         .await
         .unwrap();
     assert_eq!(
-        actor_ref.ask(FullMessage::Get).await.unwrap(),
-        FullResponse::Counter(18)
+        actor_ref.ask(StandardMessage::Get).await.unwrap(),
+        StandardResponse::Counter(18)
     );
 
     // The event history survived on disk (snapshot_every does not compact).
@@ -378,7 +381,7 @@ async fn test_sqlite_full_persistence_recovers_across_restart() {
 }
 
 #[test(tokio::test)]
-async fn test_sqlite_light_persistence_recovers_snapshot_without_events() {
+async fn test_sqlite_recovers_snapshot_with_events() {
     let (_dir, manager) = sqlite_manager();
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
@@ -387,27 +390,28 @@ async fn test_sqlite_light_persistence_recovers_snapshot_without_events() {
     system.add_helper("db", manager.clone());
 
     let actor_ref = system
-        .create_root_actor("light-sqlite", LightActor::initial(()))
+        .create_root_actor("snapshot-sqlite", SnapshotActor::initial(()))
         .await
         .unwrap();
 
-    actor_ref.ask(LightMessage::Increment(7)).await.unwrap();
+    actor_ref.ask(SnapshotMessage::Increment(7)).await.unwrap();
     actor_ref.ask_stop().await.unwrap();
 
     let actor_ref = system
-        .create_root_actor("light-sqlite", LightActor::initial(()))
+        .create_root_actor("snapshot-sqlite", SnapshotActor::initial(()))
         .await
         .unwrap();
     assert_eq!(
-        actor_ref.ask(LightMessage::Get).await.unwrap(),
-        LightResponse::Value(7)
+        actor_ref.ask(SnapshotMessage::Get).await.unwrap(),
+        SnapshotResponse::Value(7)
     );
 
-    // LightPersistence keeps no event history, even on SQLite.
+    // Single persistence mode: the event that produced the
+    // snapshot is retained (pruning is opt-in per actor).
     let prefix = default_store_prefix(&actor_ref.path());
     let collection =
         manager.create_collection("store_events", &prefix).unwrap();
-    assert!(collection.iter(false).unwrap().next().is_none());
+    assert!(collection.iter(false).unwrap().next().is_some());
 
     actor_ref.ask_stop().await.unwrap();
 }
@@ -424,18 +428,171 @@ async fn test_sqlite_same_leaf_under_different_parents_is_isolated() {
     let parent_a = system.create_root_actor("p1", BranchParent).await.unwrap();
     let parent_b = system.create_root_actor("p2", BranchParent).await.unwrap();
 
-    parent_a.ask(FullMessage::Increment(10)).await.unwrap();
-    parent_b.ask(FullMessage::Increment(100)).await.unwrap();
+    parent_a.ask(StandardMessage::Increment(10)).await.unwrap();
+    parent_b.ask(StandardMessage::Increment(100)).await.unwrap();
 
     assert_eq!(
-        parent_a.ask(FullMessage::Get).await.unwrap(),
-        FullResponse::Counter(10)
+        parent_a.ask(StandardMessage::Get).await.unwrap(),
+        StandardResponse::Counter(10)
     );
     assert_eq!(
-        parent_b.ask(FullMessage::Get).await.unwrap(),
-        FullResponse::Counter(100)
+        parent_b.ask(StandardMessage::Get).await.unwrap(),
+        StandardResponse::Counter(100)
     );
 
     parent_a.ask_stop().await.unwrap();
     parent_b.ask_stop().await.unwrap();
+}
+
+// ============================================================================
+// Prune actor (snapshots every 2 events, covered events deleted)
+// ============================================================================
+
+#[derive(Debug)]
+struct PruneActor {
+    state: Arc<StandardState>,
+}
+
+#[async_trait]
+impl Actor for PruneActor {
+    type Message = StandardMessage;
+    type Response = StandardResponse;
+    type Event = StandardEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("SqlitePruneActor", id = %id)
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let db: SqliteManager = ctx
+            .system()
+            .get_helper("db")
+            .expect("db helper should be installed");
+        self.start_store("store", None, ctx, db, None).await
+    }
+}
+
+#[async_trait]
+impl PersistentActor for PruneActor {
+    type InitParams = ();
+    type State = StandardState;
+
+    fn snapshot_every() -> Option<u64> {
+        Some(2)
+    }
+
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
+
+    fn create_initial(_: ()) -> Self {
+        Self {
+            state: Arc::new(StandardState::default()),
+        }
+    }
+
+    fn apply(
+        state: Arc<Self::State>,
+        event: &Self::Event,
+    ) -> Result<Arc<Self::State>, ActorError> {
+        let mut new_state = Arc::clone(&state);
+        Arc::make_mut(&mut new_state).counter += event.0;
+        Ok(new_state)
+    }
+
+    fn state(&self) -> Arc<Self::State> {
+        Arc::clone(&self.state)
+    }
+
+    fn set_state(&mut self, state: Arc<Self::State>) {
+        self.state = state;
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for PruneActor {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: StandardMessage,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<StandardResponse, ActorError> {
+        match msg {
+            StandardMessage::Increment(delta) => {
+                self.persist(StandardEvent(delta), ctx).await?;
+                Ok(StandardResponse::Counter(self.state.counter))
+            }
+            StandardMessage::Get => {
+                Ok(StandardResponse::Counter(self.state.counter))
+            }
+        }
+    }
+}
+
+#[test(tokio::test)]
+async fn test_sqlite_prune_compacts_history_across_restart() {
+    use ave_actors_store::database::Collection;
+
+    let (_dir, manager) = sqlite_manager();
+    let (system, mut runner) =
+        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
+    tokio::spawn(async move { runner.run().await });
+
+    system.add_helper("db", manager.clone());
+
+    let actor_ref = system
+        .create_root_actor("prune-sqlite", PruneActor::initial(()))
+        .await
+        .unwrap();
+
+    // 4 events: snapshots at 2 and 4 prune everything covered via the
+    // native SQLite range delete.
+    for delta in [10, 5, 3, 7] {
+        actor_ref
+            .ask(StandardMessage::Increment(delta))
+            .await
+            .unwrap();
+    }
+    actor_ref.ask_stop().await.unwrap();
+
+    let prefix = default_store_prefix(&actor_ref.path());
+    let events = manager
+        .create_collection("store_events", &prefix)
+        .unwrap()
+        .iter(false)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        events.is_empty(),
+        "pruned history must not survive on disk, found {} rows",
+        events.len()
+    );
+
+    // Same name: state recovers from the snapshot alone, and the log
+    // keeps working with monotonic keys.
+    let actor_ref = system
+        .create_root_actor("prune-sqlite", PruneActor::initial(()))
+        .await
+        .unwrap();
+    assert_eq!(
+        actor_ref.ask(StandardMessage::Get).await.unwrap(),
+        StandardResponse::Counter(25)
+    );
+    actor_ref.ask(StandardMessage::Increment(1)).await.unwrap();
+    assert_eq!(
+        actor_ref.ask(StandardMessage::Get).await.unwrap(),
+        StandardResponse::Counter(26)
+    );
+
+    actor_ref.ask_stop().await.unwrap();
 }

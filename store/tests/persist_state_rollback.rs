@@ -9,10 +9,7 @@ use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
     Handler, Message, Response,
 };
-use ave_actors_store::{
-    memory::MemoryManager,
-    store::{FullPersistence, PersistentActor},
-};
+use ave_actors_store::{memory::MemoryManager, store::PersistentActor};
 use test_log::test;
 
 use async_trait::async_trait;
@@ -119,7 +116,6 @@ impl Handler<Self> for GuardActor {
 
 #[async_trait]
 impl PersistentActor for GuardActor {
-    type Persistence = FullPersistence;
     type InitParams = ();
     type State = GuardState;
 

@@ -1,4 +1,4 @@
-//! Regression tests for FullPersistence recovery when events exist but no
+//! Regression tests for persistence recovery when events exist but no
 //! snapshot was ever created.
 //!
 //! Guarantees that recover() falls back to replaying every event from index 0
@@ -9,7 +9,7 @@
 mod helpers;
 use ave_actors_store::{
     memory::MemoryManager,
-    store::{FullPersistence, PersistentActor, StoreCommand, StoreResponse},
+    store::{PersistentActor, StoreCommand, StoreResponse},
 };
 
 use async_trait::async_trait;
@@ -87,7 +87,6 @@ impl Handler<Self> for TestActor {
 
 #[async_trait]
 impl PersistentActor for TestActor {
-    type Persistence = FullPersistence;
     type InitParams = ();
     type State = TestActorState;
 
@@ -116,7 +115,7 @@ impl PersistentActor for TestActor {
 }
 
 #[test(tokio::test)]
-async fn test_full_persistence_recovery_without_snapshot() {
+async fn test_persistence_recovery_without_snapshot() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
@@ -137,7 +136,7 @@ async fn test_full_persistence_recovery_without_snapshot() {
     for i in 1..=3 {
         let event = TestEvent { delta: i };
         store_ref
-            .ask(StoreCommand::PersistFull {
+            .ask(StoreCommand::Persist {
                 event: Arc::new(event),
                 state: Arc::new(TestActorState::default()),
                 snapshot_every: None,
@@ -204,7 +203,7 @@ async fn test_recover_without_snapshot_replays_all_events() {
 
     // Persist two events (5 and 7) without ever creating a snapshot.
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(TestEvent { delta: 5 }),
             state: Arc::new(TestActorState::default()),
             snapshot_every: None,
@@ -212,7 +211,7 @@ async fn test_recover_without_snapshot_replays_all_events() {
         .await
         .unwrap();
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(TestEvent { delta: 7 }),
             state: Arc::new(TestActorState::default()),
             snapshot_every: None,

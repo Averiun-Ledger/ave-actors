@@ -1,4 +1,4 @@
-//! Regression tests for FullPersistence recovery of a single event.
+//! Regression tests for persistence recovery of a single event.
 //!
 //! Guarantees that a brand-new actor that persists exactly one event and is
 //! then stopped gracefully recovers that event on restart, and that the
@@ -12,7 +12,7 @@ use ave_actors_actor::{
     Handler, Message, Response,
 };
 use ave_actors_store::memory::MemoryManager;
-use ave_actors_store::store::{FullPersistence, PersistentActor};
+use ave_actors_store::store::PersistentActor;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
@@ -105,7 +105,6 @@ impl Handler<Self> for SingleEventActor {
 
 #[async_trait]
 impl PersistentActor for SingleEventActor {
-    type Persistence = FullPersistence;
     type InitParams = ();
     type State = SingleEventActorState;
 
@@ -192,7 +191,7 @@ async fn test_debug_event_counter_after_first_event() {
     }
 
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(DataSet("test".to_string())),
             state: Arc::new(SingleEventActorState::default()),
             snapshot_every: None,

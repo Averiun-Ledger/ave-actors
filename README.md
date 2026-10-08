@@ -162,8 +162,6 @@ If you need event sourcing, use the persistence layer from the root crate or dir
 With the default `sqlite` feature, the root crate already re-exports:
 
 - `PersistentActor`
-- `LightPersistence`
-- `FullPersistence`
 - `DbManager`, `Collection`, `State`
 - `SqliteManager`
 

@@ -29,8 +29,7 @@ tracing = "0.1"
 | Concept | Description |
 |---|---|
 | `PersistentActor` | Trait extending `Actor` with event sourcing — define `type State`, implement `apply`, `state()`, `set_state()`, and call `persist` |
-| `LightPersistence` | Strategy: stores only the state snapshot on every write, no event history (fast recovery) |
-| `FullPersistence` | Strategy: stores events only, replays on recovery (smaller footprint, full audit trail) |
+| Events + snapshots | Every `persist` appends the event; snapshots are automatic every `snapshot_every` events (default 100) plus manual/shutdown; opt-in `prune_events_on_snapshot()` deletes snapshot-covered events |
 | `InitializedActor<A>` | Required wrapper returned by `PersistentActor::initial(params)` |
 | `DbManager<C, S>` | Backend factory trait — implement to plug in a custom database |
 | `Collection` | Ordered key-value storage for the event log |
@@ -61,8 +60,7 @@ use ave_actors_actor::{
     Message, Response,
 };
 use ave_actors_store::{
-    store::{FullPersistence, PersistentActor},
-    memory::MemoryManager,
+    store::PersistentActor, memory::MemoryManager,
 };
 use async_trait::async_trait;
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -139,7 +137,6 @@ impl Handler<Counter> for Counter {
 // --- PersistentActor ---
 
 impl PersistentActor for Counter {
-    type Persistence = FullPersistence;
     type InitParams  = ();
     type State       = CounterState;
 
@@ -198,22 +195,21 @@ async fn main() {
 
 ---
 
-## Persistence strategies
+## Snapshots and pruning
 
-| Strategy | Write | Recovery | When to use |
-|---|---|---|---|
-| `LightPersistence` | State snapshot only | Load snapshot (no replay) | When recovery speed matters most and event history is not needed |
-| `FullPersistence` | Event only | Load last snapshot + replay remaining events | When storage efficiency or a full audit trail matters |
-
-`LightPersistence` does **not** store events. Only the latest state snapshot is kept, so intermediate states cannot be reconstructed. |
-
-For `FullPersistence`, snapshots are taken automatically every N events (default: 100). Override to tune:
+Snapshots are taken automatically every N events (default: 100).
+Override to tune:
 
 ```rust,ignore
 fn snapshot_every() -> Option<u64> {
     Some(50) // snapshot every 50 events
 }
 ```
+
+Opt-in `prune_events_on_snapshot() -> true` deletes snapshot-covered
+events right after each snapshot: storage stays flat (one snapshot
+plus at most N pending events) instead of keeping history. Recovery
+replays from the snapshot, so pruning never loses state.
 
 ---
 

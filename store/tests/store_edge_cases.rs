@@ -10,10 +10,7 @@ use ave_actors_store::{
     Error as StoreError, StoreOperation,
     database::{Collection, DbManager, State},
     memory::MemoryManager,
-    store::{
-        FullPersistence, LightPersistence, PersistentActor, Store,
-        StoreCommand, StoreResponse,
-    },
+    store::{PersistentActor, Store, StoreCommand, StoreResponse},
 };
 use test_log::test;
 
@@ -112,7 +109,6 @@ impl Actor for EncryptedActor {
 
 #[async_trait]
 impl PersistentActor for EncryptedActor {
-    type Persistence = FullPersistence;
     type InitParams = ();
     type State = EncryptedActorState;
 
@@ -205,22 +201,22 @@ impl Handler<Self> for EncryptedActor {
     }
 }
 
-// State struct for light actor
+// State struct for the basic actor
 #[derive(
     Debug, Clone, Default, borsh::BorshSerialize, borsh::BorshDeserialize,
 )]
-struct LightActorState {
+struct PrefixActorState {
     pub value: i32,
 }
 
-// Test actor with light persistence
+// Plain test actor
 #[derive(Debug)]
-struct LightActor {
-    state_ptr: Arc<LightActorState>,
+struct PrefixActor {
+    state_ptr: Arc<PrefixActorState>,
 }
 
 #[async_trait]
-impl Actor for LightActor {
+impl Actor for PrefixActor {
     type Message = EncryptedMessage;
     type Response = EncryptedResponse;
     type Event = EncryptedEvent;
@@ -232,7 +228,7 @@ impl Actor for LightActor {
         id: &str,
         _parent_span: Option<tracing::Span>,
     ) -> tracing::Span {
-        info_span!("LightActor", id = %id)
+        info_span!("PrefixActor", id = %id)
     }
 
     async fn pre_start(
@@ -240,20 +236,19 @@ impl Actor for LightActor {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let memory_db = MemoryManager::default();
-        self.start_store("light_test", None, ctx, memory_db, None)
+        self.start_store("basic_test", None, ctx, memory_db, None)
             .await
     }
 }
 
 #[async_trait]
-impl PersistentActor for LightActor {
-    type Persistence = LightPersistence;
+impl PersistentActor for PrefixActor {
     type InitParams = ();
-    type State = LightActorState;
+    type State = PrefixActorState;
 
     fn create_initial(_: ()) -> Self {
         Self {
-            state_ptr: Arc::new(LightActorState::default()),
+            state_ptr: Arc::new(PrefixActorState::default()),
         }
     }
 
@@ -276,7 +271,7 @@ impl PersistentActor for LightActor {
 }
 
 #[async_trait]
-impl Handler<Self> for LightActor {
+impl Handler<Self> for PrefixActor {
     async fn handle_message(
         &mut self,
         _sender: ActorPath,
@@ -287,14 +282,14 @@ impl Handler<Self> for LightActor {
             EncryptedMessage::Increment(value) => {
                 let event = EncryptedEvent {
                     counter: self.state_ptr.value as usize + value,
-                    data: "light".to_string(),
+                    data: "prefix".to_string(),
                 };
                 self.persist(event, ctx).await?;
                 Ok(EncryptedResponse::Success)
             }
             EncryptedMessage::GetState => Ok(EncryptedResponse::State {
                 counter: self.state_ptr.value as usize,
-                data: "light".to_string(),
+                data: "prefix".to_string(),
             }),
             _ => Ok(EncryptedResponse::Success),
         }
@@ -589,24 +584,24 @@ async fn test_encrypted_store_operations() {
 }
 
 #[test(tokio::test)]
-async fn test_light_persistence() {
+async fn test_prefix_isolation() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
     let actor_ref = system
-        .create_root_actor("light", LightActor::initial(()))
+        .create_root_actor("prefix", PrefixActor::initial(()))
         .await
         .unwrap();
 
-    // Test light persistence (should only keep last state)
+    // Basic persist + recover roundtrip
     actor_ref
         .tell(EncryptedMessage::Increment(10))
         .await
         .unwrap();
     // `tell` is fire-and-forget: poll until the actor applies the message.
     let response = helpers::assert_eventually(
-        "light counter reaches 10",
+        "basic counter reaches 10",
         std::time::Duration::from_secs(3),
         || {
             let actor_ref = actor_ref.clone();
@@ -633,10 +628,10 @@ async fn test_light_persistence() {
 
     // A second actor with a different name uses a different persistence
     // prefix (derived from its path), so it must not see the first actor's
-    // state. LightPersistence does recover by prefix; the fresh start here
-    // comes from the distinct prefix, not from the persistence strategy.
+    // state. Recovery is by prefix; the fresh start here
+    // comes from the distinct prefix.
     let actor_ref2 = system
-        .create_root_actor("light2", LightActor::initial(()))
+        .create_root_actor("prefix2", PrefixActor::initial(()))
         .await
         .unwrap();
 
@@ -698,7 +693,7 @@ async fn test_store_error_scenarios() {
     };
 
     let result = store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(event),
             state: Arc::new(EncryptedActorState::default()),
             snapshot_every: None,
@@ -776,7 +771,7 @@ async fn test_store_commands_coverage() {
         data: "test1".to_string(),
     };
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(event),
             state: Arc::new(EncryptedActorState::default()),
             snapshot_every: None,
@@ -789,7 +784,7 @@ async fn test_store_commands_coverage() {
         data: "test2".to_string(),
     };
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(event),
             state: Arc::new(EncryptedActorState::default()),
             snapshot_every: None,
@@ -867,7 +862,6 @@ async fn test_persist_actor_error_scenarios() {
 
     #[async_trait]
     impl PersistentActor for NoStoreActor {
-        type Persistence = FullPersistence;
         type InitParams = ();
         type State = NoStoreActorState;
 
@@ -968,7 +962,7 @@ async fn test_encryption_failure_scenarios() {
     };
 
     store_ref
-        .ask(StoreCommand::PersistFull {
+        .ask(StoreCommand::Persist {
             event: Arc::new(event.clone()),
             state: Arc::new(EncryptedActorState::default()),
             snapshot_every: None,

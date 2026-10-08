@@ -1,8 +1,7 @@
-//! Regression test for the LightPersistence duplication bug.
+//! Regression test for persistence state duplication on restart.
 //!
-//! LightPersistence persists both the event and the resulting state. On
-//! recovery the snapshot must not have its events replayed a second time,
-//! which previously caused duplicated entries after a restart.
+//! Guarantees that an actor does not re-apply already-applied
+//! events when recovering from a snapshot after a restart.
 
 use async_trait::async_trait;
 use ave_actors_actor::{
@@ -10,7 +9,7 @@ use ave_actors_actor::{
     Handler, Message, Response,
 };
 use ave_actors_store::memory::MemoryManager;
-use ave_actors_store::store::{LightPersistence, PersistentActor};
+use ave_actors_store::store::PersistentActor;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
@@ -25,14 +24,14 @@ static SHARED_MANAGER: OnceLock<Arc<TokioMutex<MemoryManager>>> =
 
 // State struct
 #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
-struct VectorActorState {
+struct VectorActorStandardState {
     numbers: Vec<i32>,
 }
 
-// Actor with a vector that accumulates numbers
+// Actor with a vector that accumulates numbers (version)
 #[derive(Debug)]
 struct VectorActor {
-    state_ptr: Arc<VectorActorState>,
+    state_ptr: Arc<VectorActorStandardState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,7 +73,6 @@ impl Actor for VectorActor {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        // Get or initialize the shared manager
         let manager_ref = SHARED_MANAGER.get_or_init(|| {
             Arc::new(TokioMutex::new(MemoryManager::default()))
         });
@@ -96,7 +94,6 @@ impl Handler<Self> for VectorActor {
     ) -> Result<VectorResponse, ActorError> {
         match msg {
             VectorMessage::Add(number) => {
-                // Persist the event (this will apply it AND save the state)
                 self.persist(NumberAdded(number), ctx).await?;
                 Ok(VectorResponse {
                     numbers: self.state_ptr.numbers.clone(),
@@ -111,13 +108,12 @@ impl Handler<Self> for VectorActor {
 
 #[async_trait]
 impl PersistentActor for VectorActor {
-    type Persistence = LightPersistence;
     type InitParams = ();
-    type State = VectorActorState;
+    type State = VectorActorStandardState;
 
     fn create_initial(_params: ()) -> Self {
         Self {
-            state_ptr: Arc::new(VectorActorState::default()),
+            state_ptr: Arc::new(VectorActorStandardState::default()),
         }
     }
 
@@ -140,40 +136,36 @@ impl PersistentActor for VectorActor {
 }
 
 #[test(tokio::test)]
-async fn test_light_persistence_duplicates_data_on_restart() {
+async fn test_persistence_duplication_on_restart() {
     let (system, mut runner) =
         ActorSystem::create(CancellationToken::new(), CancellationToken::new());
     tokio::spawn(async move { runner.run().await });
 
-    // Create and start the actor (pre_start will initialize with shared manager)
     let actor_ref = system
         .create_root_actor("vector_actor", VectorActor::initial(()))
         .await
         .unwrap();
 
-    // Add number 3
-    let response = actor_ref.ask(VectorMessage::Add(3)).await.unwrap();
+    // Add number 5
+    let response = actor_ref.ask(VectorMessage::Add(5)).await.unwrap();
 
-    assert_eq!(response.numbers, vec![3], "Should have [3] after adding 3");
+    assert_eq!(response.numbers, vec![5], "Should have [5] after adding 5");
 
-    // Stop the actor (this will trigger snapshot in pre_stop)
+    // Stop the actor (it will create snapshot on stop if there are events)
     actor_ref.ask_stop().await.unwrap();
 
-    // Create a NEW actor with the same name (simulating restart)
-    // It will use the SAME shared MemoryManager via pre_start
+    // Restart
     let actor_ref2 = system
         .create_root_actor("vector_actor", VectorActor::initial(()))
         .await
         .unwrap();
 
-    // Get the numbers after restart
     let response = actor_ref2.ask(VectorMessage::Get).await.unwrap();
 
-    // The event must not be replayed onto the already-applied snapshot.
     assert_eq!(
         response.numbers,
-        vec![3],
-        "BUG: Should have [3] after restart, but has {:?} due to event replay on already-applied state",
+        vec![5],
+        "Should have [5] after restart, but has {:?}",
         response.numbers
     );
 }

@@ -5,10 +5,7 @@ use ave_actors_actor::{
     Actor, ActorContext, ActorSystem, Error as ActorError, Event, Handler,
     Message, Response,
 };
-use ave_actors_store::{
-    memory::MemoryManager,
-    store::{FullPersistence, PersistentActor},
-};
+use ave_actors_store::{memory::MemoryManager, store::PersistentActor};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -69,7 +66,6 @@ impl Actor for ZeroSnapshotActor {
 
 #[async_trait]
 impl PersistentActor for ZeroSnapshotActor {
-    type Persistence = FullPersistence;
     type InitParams = ();
     type State = DummyState;
 

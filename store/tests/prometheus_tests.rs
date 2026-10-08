@@ -10,7 +10,7 @@ use ave_actors_actor::{
 use ave_actors_store::{
     memory::MemoryManager,
     metrics::{STORE_METRICS_HELPER, StoreMetrics},
-    store::{LightPersistence, PersistentActor},
+    store::PersistentActor,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -83,7 +83,6 @@ impl Actor for CounterActor {
 
 #[async_trait]
 impl PersistentActor for CounterActor {
-    type Persistence = LightPersistence;
     type InitParams = ();
     type State = CounterState;
 
@@ -166,7 +165,7 @@ async fn store_metrics_are_registered_and_emitted() -> Result<(), ActorError> {
         .create_root_actor("counter", CounterActor::initial(()))
         .await?;
 
-    // Persist a few events; LightPersistence snapshots on every persist.
+    // Persist a few events.
     for i in 1..=3 {
         actor.ask(CounterMessage::Add(i * 10)).await?;
     }
