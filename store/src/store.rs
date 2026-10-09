@@ -2006,6 +2006,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::PurgeScope;
     use crate::memory::{MemoryManager, MemoryStore};
     use ave_actors_actor::{ActorSystem, Error as ActorError};
     use serde::{Deserialize, Serialize};
@@ -2580,6 +2581,10 @@ mod tests {
         fn batch_writer(&self) -> Option<Box<dyn BatchWrite>> {
             Some(Box::new(FailingBatchWriter))
         }
+
+        fn purge_scopes(&self, scopes: &[PurgeScope<'_>]) -> Result<(), Error> {
+            self.inner.purge_scopes(scopes)
+        }
     }
 
     #[test]
@@ -2684,6 +2689,10 @@ mod tests {
             prefix: &str,
         ) -> Result<MemoryStore, Error> {
             self.inner.create_state(name, prefix)
+        }
+
+        fn purge_scopes(&self, scopes: &[PurgeScope<'_>]) -> Result<(), Error> {
+            self.inner.purge_scopes(scopes)
         }
     }
 
@@ -2830,6 +2839,10 @@ mod tests {
         fn stop(self) -> Result<(), Error> {
             Ok(())
         }
+
+        fn purge_scopes(&self, scopes: &[PurgeScope<'_>]) -> Result<(), Error> {
+            MemoryManager::default().purge_scopes(scopes)
+        }
     }
     // ------------------------------------------------------------------
     // Mock backend where snapshot writes succeed but metadata writes fail,
@@ -2899,6 +2912,10 @@ mod tests {
 
         fn stop(self) -> Result<(), Error> {
             Ok(())
+        }
+
+        fn purge_scopes(&self, scopes: &[PurgeScope<'_>]) -> Result<(), Error> {
+            self.inner.purge_scopes(scopes)
         }
     }
 

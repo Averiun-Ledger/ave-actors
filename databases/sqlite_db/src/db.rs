@@ -7,8 +7,8 @@ use ave_actors_store::{
     Error, StoreOperation,
     config::{MachineSpec, resolve_spec},
     database::{
-        BatchOp, BatchWrite, Collection, DbManager, Durability, State,
-        validate_key_prefix,
+        BatchOp, BatchWrite, Collection, DbManager, Durability, PurgeScope,
+        State, validate_key_prefix,
     },
 };
 
@@ -528,6 +528,84 @@ impl DbManager<SqliteCollection, SqliteCollection> for SqliteManager {
         Some(Box::new(SqliteBatchWriter {
             manager: self.clone(),
         }))
+    }
+
+    fn purge_scopes(&self, scopes: &[PurgeScope<'_>]) -> Result<(), Error> {
+        // Validate everything before touching the database: a bad
+        // identifier must fail without deleting anything.
+        for scope in scopes {
+            Self::validate_identifier(scope.store)?;
+            validate_key_prefix(scope.prefix)?;
+        }
+        let conn = self.pool.checkout().map_err(|e| {
+            error!(error = %e, "Failed to check out connection for purge");
+            Error::Store {
+                source: None,
+                code: None,
+                operation: StoreOperation::OpenConnection,
+                reason: format!("{}", e),
+            }
+        })?;
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| {
+            error!(error = %e, "Failed to begin purge transaction");
+            sqlite_store_error(StoreOperation::Purge, e)
+        })?;
+        let result = (|| -> Result<(), Error> {
+            for scope in scopes {
+                // Tables may never have been created (actor never
+                // persisted): ensure them so the DELETEs below cannot
+                // fail the whole batch on a missing table.
+                for (table, ddl) in [
+                    (
+                        format!("{}_events", scope.store),
+                        "prefix TEXT NOT NULL, sn TEXT NOT NULL, value \
+                         BLOB NOT NULL, PRIMARY KEY (prefix, sn)",
+                    ),
+                    (
+                        format!("{}_states", scope.store),
+                        "prefix TEXT NOT NULL, value BLOB NOT NULL, \
+                         PRIMARY KEY (prefix)",
+                    ),
+                    (
+                        format!("{}_metadata", scope.store),
+                        "prefix TEXT NOT NULL, value BLOB NOT NULL, \
+                         PRIMARY KEY (prefix)",
+                    ),
+                ] {
+                    conn.execute(
+                        &format!(
+                            "CREATE TABLE IF NOT EXISTS {} ({})",
+                            table, ddl
+                        ),
+                        (),
+                    )
+                    .map_err(|e| {
+                        error!(table = %table, error = %e, "Failed to ensure purge table");
+                        sqlite_store_error(StoreOperation::Purge, e)
+                    })?;
+                    conn.execute(
+                        &format!(
+                            "DELETE FROM {} WHERE prefix = ?1",
+                            table
+                        ),
+                        params![scope.prefix],
+                    )
+                    .map_err(|e| {
+                        error!(table = %table, error = %e, "Failed to purge scope");
+                        sqlite_store_error(StoreOperation::Purge, e)
+                    })?;
+                }
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = conn.execute_batch("ROLLBACK");
+        } else if let Err(e) = conn.execute_batch("COMMIT") {
+            error!(error = %e, "Failed to commit purge transaction");
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(sqlite_store_error(StoreOperation::Purge, e));
+        }
+        result
     }
 
     fn stop(self) -> Result<(), Error> {
@@ -1639,12 +1717,62 @@ mod tests {
 
     use super::*;
     use ave_actors_store::{
-        database::{Collection, DbManager},
+        database::{Collection, DbManager, State},
         test_store_trait,
     };
 
     test_store_trait! {
         unit_test_sqlite_manager:SqliteManager:SqliteCollection
+    }
+
+    #[test]
+    fn test_purge_scopes_wipes_only_listed_prefixes() {
+        use ave_actors_store::database::PurgeScope;
+        let manager = SqliteManager::default();
+        // Mirror Store::new table naming: `{store}_{events,states,metadata}`.
+        for (store, prefix) in
+            [("a", "gov"), ("a", "other"), ("b", "gov"), ("b", "other")]
+        {
+            let mut events = manager
+                .create_collection(&format!("{store}_events"), prefix)
+                .unwrap();
+            Collection::put(&mut events, "0", b"v").unwrap();
+            let mut states = manager
+                .create_state(&format!("{store}_states"), prefix)
+                .unwrap();
+            State::put(&mut states, b"v").unwrap();
+        }
+        manager
+            .purge_scopes(&[
+                PurgeScope {
+                    store: "a",
+                    prefix: "gov",
+                },
+                PurgeScope {
+                    store: "b",
+                    prefix: "gov",
+                },
+            ])
+            .unwrap();
+        for store in ["a", "b"] {
+            let events = manager
+                .create_collection(&format!("{store}_events"), "gov")
+                .unwrap();
+            assert!(Collection::last(&events).unwrap().is_none());
+        }
+        for store in ["a", "b"] {
+            let events = manager
+                .create_collection(&format!("{store}_events"), "other")
+                .unwrap();
+            assert!(Collection::last(&events).unwrap().is_some());
+        }
+        // Unknown scopes are a no-op, never an error.
+        manager
+            .purge_scopes(&[PurgeScope {
+                store: "nope",
+                prefix: "missing",
+            }])
+            .unwrap();
     }
 
     #[test]

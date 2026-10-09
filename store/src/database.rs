@@ -38,6 +38,21 @@ pub enum BatchOp<'a> {
     },
 }
 
+/// One actor subtree wipe: every row under `prefix` in the event,
+/// snapshot and metadata stores named `store`.
+///
+/// Mirrors what [`Collection`]/[`State`] `purge` deletes for a single
+/// actor, across several at once. Fence rows are left alone, like
+/// `purge` does.
+#[derive(Debug, Clone, Copy)]
+pub struct PurgeScope<'a> {
+    /// Backend store base name (e.g. `"store"` for
+    /// `"store_events"`, `"store_states"`, `"store_metadata"`).
+    pub store: &'a str,
+    /// Key prefix scoping the actor subtree.
+    pub prefix: &'a str,
+}
+
 /// Validates a key prefix for backends that namespace keys.
 ///
 /// Flat keyspaces join keys as `{prefix}.{key}`, so a `.` inside `prefix`
@@ -125,6 +140,15 @@ where
     fn batch_writer(&self) -> Option<Box<dyn BatchWrite>> {
         None
     }
+
+    /// Atomically wipes every listed actor subtree (all-or-nothing,
+    /// including across crashes).
+    ///
+    /// Same coverage as per-actor `purge`: event, snapshot and metadata
+    /// rows under each scope, fence rows untouched. Used when several
+    /// actors die together (e.g. governance deletion) so no crash
+    /// window leaves half of them wiped.
+    fn purge_scopes(&self, scopes: &[PurgeScope<'_>]) -> Result<(), Error>;
 }
 
 /// Atomic multi-write handle for one backend.

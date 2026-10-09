@@ -31,7 +31,10 @@ pub use ave_actors_actor::{
 pub use ave_actors_store::{
     Error as StoreError, StoreOperation,
     config::*,
-    database::{BatchOp, BatchWrite, Collection, DbManager, Durability, State},
+    database::{
+        BatchOp, BatchWrite, Collection, DbManager, Durability, PurgeScope,
+        State,
+    },
     default_store_prefix,
     store::{
         InitializedActor, PersistentActor, Store, StoreCommand, StoreResponse,

@@ -1,7 +1,10 @@
 //! In-memory [`DbManager`] backend, intended for tests and ephemeral usage.
 
 use crate::{
-    database::{BatchOp, BatchWrite, Collection, DbManager, State},
+    database::{
+        BatchOp, BatchWrite, Collection, DbManager, PurgeScope, State,
+        validate_key_prefix,
+    },
     error::{Error, StoreOperation},
 };
 
@@ -76,6 +79,30 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
         Some(Box::new(MemoryBatchWriter {
             manager: self.clone(),
         }))
+    }
+
+    fn purge_scopes(&self, scopes: &[PurgeScope<'_>]) -> Result<(), Error> {
+        for scope in scopes {
+            validate_key_prefix(scope.prefix)?;
+        }
+        let mut data = self.data.write().map_err(|e| Error::Store {
+            source: None,
+            code: None,
+            operation: StoreOperation::LockData,
+            reason: e.to_string(),
+        })?;
+        // One lock for every scope: all-or-nothing by construction.
+        // Same coverage as per-actor purge (events, snapshots,
+        // metadata); fence rows stay, like `purge` does.
+        for scope in scopes {
+            for suffix in ["_events", "_states", "_metadata"] {
+                data.remove(&(
+                    format!("{}{}", scope.store, suffix),
+                    scope.prefix.to_owned(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -440,7 +467,7 @@ impl Collection for MemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::{Collection, State};
+    use crate::database::{Collection, PurgeScope, State};
     use crate::test_store_trait;
     test_store_trait! {
         unit_test_memory_manager:crate::memory::MemoryManager:MemoryStore
@@ -471,5 +498,64 @@ mod tests {
             Collection::del(&mut collection, "missing"),
             Err(Error::EntryNotFound { key }) if key == "test.missing"
         ));
+    }
+
+    #[test]
+    fn test_purge_scopes_wipes_only_listed_prefixes() {
+        use crate::database::PurgeScope;
+        // Table names mirror Store::new: `{store}_events` and friends.
+        let manager = MemoryManager::default();
+        for (store, prefix) in
+            [("a", "gov"), ("a", "other"), ("b", "gov"), ("b", "other")]
+        {
+            let mut events = manager
+                .create_collection(&format!("{store}_events"), prefix)
+                .unwrap();
+            Collection::put(&mut events, "0", b"v").unwrap();
+            let mut states = manager
+                .create_state(&format!("{store}_states"), prefix)
+                .unwrap();
+            State::put(&mut states, b"v").unwrap();
+        }
+        manager
+            .purge_scopes(&[
+                PurgeScope {
+                    store: "a",
+                    prefix: "gov",
+                },
+                PurgeScope {
+                    store: "b",
+                    prefix: "gov",
+                },
+            ])
+            .unwrap();
+        // Listed scopes are empty again (recreated handles see nothing).
+        for store in ["a", "b"] {
+            let events = manager
+                .create_collection(&format!("{store}_events"), "gov")
+                .unwrap();
+            assert!(Collection::last(&events).unwrap().is_none());
+            let states = manager
+                .create_state(&format!("{store}_states"), "gov")
+                .unwrap();
+            assert!(matches!(
+                State::get(&states),
+                Err(Error::EntryNotFound { .. })
+            ));
+        }
+        // Unlisted scopes are untouched.
+        for store in ["a", "b"] {
+            let events = manager
+                .create_collection(&format!("{store}_events"), "other")
+                .unwrap();
+            assert!(Collection::last(&events).unwrap().is_some());
+        }
+        // Unknown scopes are a no-op, never an error.
+        manager
+            .purge_scopes(&[PurgeScope {
+                store: "nope",
+                prefix: "missing",
+            }])
+            .unwrap();
     }
 }

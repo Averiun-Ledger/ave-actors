@@ -7,7 +7,7 @@ use ave_actors_actor::{
 };
 use ave_actors_store::{
     Error as StoreError, StoreOperation,
-    database::{Collection, DbManager, State},
+    database::{Collection, DbManager, PurgeScope, State},
     memory::{MemoryManager, MemoryStore},
     store::{PersistentActor, Store, StoreCommand, StoreResponse},
 };
@@ -73,6 +73,13 @@ impl DbManager<MemoryStore, FailingStateStore> for FailingStateManager {
 
     fn stop(self) -> Result<(), StoreError> {
         Ok(())
+    }
+
+    fn purge_scopes(
+        &self,
+        scopes: &[PurgeScope<'_>],
+    ) -> Result<(), StoreError> {
+        self.memory.purge_scopes(scopes)
     }
 }
 
@@ -190,6 +197,13 @@ impl DbManager<RangeCollection, MemoryStore> for LastErrorManager {
 
     fn stop(self) -> Result<(), StoreError> {
         Ok(())
+    }
+
+    fn purge_scopes(
+        &self,
+        scopes: &[PurgeScope<'_>],
+    ) -> Result<(), StoreError> {
+        self.memory.purge_scopes(scopes)
     }
 }
 

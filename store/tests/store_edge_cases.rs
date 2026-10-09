@@ -8,7 +8,7 @@ use ave_actors_actor::{
 };
 use ave_actors_store::{
     Error as StoreError, StoreOperation,
-    database::{Collection, DbManager, State},
+    database::{Collection, DbManager, PurgeScope, State},
     memory::MemoryManager,
     store::{PersistentActor, Store, StoreCommand, StoreResponse},
 };
@@ -486,6 +486,19 @@ impl DbManager<FailingCollection, FailingCollection> for FailingManager {
                 data: BTreeMap::new(),
             })
         }
+    }
+
+    fn purge_scopes(
+        &self,
+        _scopes: &[PurgeScope<'_>],
+    ) -> Result<(), StoreError> {
+        // Failure injector: batch purge fails like everything else.
+        Err(StoreError::Store {
+            operation: StoreOperation::Purge,
+            reason: "Forced purge failure".to_string(),
+            source: None,
+            code: None,
+        })
     }
 }
 

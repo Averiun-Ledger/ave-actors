@@ -5,8 +5,8 @@ use ave_actors_store::{
     Error, StoreOperation,
     config::{MachineSpec, resolve_spec},
     database::{
-        BatchOp, BatchWrite, Collection, DbManager, Durability, State,
-        validate_key_prefix,
+        BatchOp, BatchWrite, Collection, DbManager, Durability, PurgeScope,
+        State, validate_key_prefix,
     },
 };
 
@@ -402,6 +402,44 @@ impl DbManager<RocksDbStore, RocksDbStore> for RocksDbManager {
             db: Arc::clone(&self.db),
             durability: self.strong_durability,
         }))
+    }
+
+    fn purge_scopes(&self, scopes: &[PurgeScope<'_>]) -> Result<(), Error> {
+        for scope in scopes {
+            validate_key_prefix(scope.prefix)?;
+        }
+        // One WriteBatch over every scope: all-or-nothing, same key
+        // mapping as the handle implementations (events under
+        // `{prefix}.{key}`, states under bare `{prefix}`). Missing
+        // column families mean the actor never persisted: skip, like
+        // a purge of empty stores.
+        let mut batch = WriteBatch::default();
+        for scope in scopes {
+            for suffix in ["_events", "_states", "_metadata"] {
+                let cf_name = format!("{}{}", scope.store, suffix);
+                let Some(handle) = self.db.cf_handle(&cf_name) else {
+                    continue;
+                };
+                if suffix == "_events" {
+                    let start = format!("{}.", scope.prefix).into_bytes();
+                    let mut end = start.clone();
+                    end.push(0xFF);
+                    batch.delete_range_cf(&handle, start, end);
+                } else {
+                    batch.delete_cf(&handle, scope.prefix.as_bytes());
+                }
+            }
+        }
+        let wopts = write_options(self.strong_durability.is_sync());
+        self.db.write_opt(batch, &wopts).map_err(|e| {
+            error!(error = %e, "Failed to write purge batch");
+            Error::Store {
+                source: None,
+                code: None,
+                operation: StoreOperation::RocksdbOperation,
+                reason: format!("{:?}", e),
+            }
+        })
     }
 
     fn stop(self) -> Result<(), Error> {
@@ -1174,6 +1212,56 @@ mod tests {
     use ave_actors_store::test_store_trait;
     test_store_trait! {
         unit_test_rocksdb_manager:crate::db::RocksDbManager:RocksDbStore
+    }
+
+    #[test]
+    fn test_purge_scopes_wipes_only_listed_prefixes() {
+        use ave_actors_store::database::{
+            Collection, DbManager, PurgeScope, State,
+        };
+        let manager = RocksDbManager::default();
+        for (store, prefix) in
+            [("a", "gov"), ("a", "other"), ("b", "gov"), ("b", "other")]
+        {
+            let mut events = manager
+                .create_collection(&format!("{store}_events"), prefix)
+                .unwrap();
+            Collection::put(&mut events, "0", b"v").unwrap();
+            let mut states = manager
+                .create_state(&format!("{store}_states"), prefix)
+                .unwrap();
+            State::put(&mut states, b"v").unwrap();
+        }
+        manager
+            .purge_scopes(&[
+                PurgeScope {
+                    store: "a",
+                    prefix: "gov",
+                },
+                PurgeScope {
+                    store: "b",
+                    prefix: "gov",
+                },
+            ])
+            .unwrap();
+        for store in ["a", "b"] {
+            let events = manager
+                .create_collection(&format!("{store}_events"), "gov")
+                .unwrap();
+            assert!(Collection::last(&events).unwrap().is_none());
+        }
+        for store in ["a", "b"] {
+            let events = manager
+                .create_collection(&format!("{store}_events"), "other")
+                .unwrap();
+            assert!(Collection::last(&events).unwrap().is_some());
+        }
+        manager
+            .purge_scopes(&[PurgeScope {
+                store: "nope",
+                prefix: "missing",
+            }])
+            .unwrap();
     }
 
     #[test]
