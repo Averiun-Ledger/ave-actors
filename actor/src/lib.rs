@@ -18,6 +18,7 @@ mod supervision;
 mod system;
 mod testkit;
 mod timer;
+mod tree;
 
 pub use actor::{
     Actor, ActorContext, ActorRef, ChildAction, Event, Handler, Message,
@@ -46,6 +47,7 @@ pub use system::{
 };
 pub use testkit::{ProbeActor, TestProbe, TestSystem};
 pub use timer::TimerKey;
+pub use tree::{ActorTreeNode, format_tree};
 
 #[cfg(feature = "prometheus")]
 pub mod metrics;

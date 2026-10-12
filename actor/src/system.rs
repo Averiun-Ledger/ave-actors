@@ -202,6 +202,10 @@ pub struct SystemRef {
     actors: Arc<DashMap<ActorPath, Box<dyn Any + Send + Sync + 'static>>>,
     /// Direct-children index to avoid scanning the full actor registry on lookups.
     child_index: Arc<DashMap<ActorPath, HashSet<ActorPath>>>,
+    /// Actor type name per live path (`std::any::type_name`). The
+    /// registry itself is type-erased, so this side index is what
+    /// makes the supervision tree printable for debugging.
+    actor_types: Arc<DashMap<ActorPath, &'static str>>,
 
     /// Registry of helper objects that can be shared across actors.
     /// Helpers can be any type (database connections, configurations, etc.).
@@ -253,6 +257,7 @@ impl SystemRef {
         let root_senders =
             Arc::new(RwLock::new(HashMap::<ActorPath, StopHandle>::new()));
         let child_index = Arc::new(DashMap::new());
+        let actor_types = Arc::new(DashMap::new());
         let watchers = Arc::new(DashMap::new());
         let (system_event_sender, _) =
             broadcast::channel::<SystemEvent>(config.system_event_buffer_size);
@@ -322,6 +327,7 @@ impl SystemRef {
             Self {
                 actors: Arc::new(DashMap::new()),
                 child_index,
+                actor_types,
                 helpers: Arc::new(DashMap::new()),
                 graceful_token,
                 crash_token,
@@ -444,6 +450,8 @@ impl SystemRef {
             }
             dashmap::Entry::Vacant(e) => {
                 e.insert(Box::new(actor_ref.clone()));
+                self.actor_types
+                    .insert(path.clone(), std::any::type_name::<A>());
             }
         }
         self.index_actor(&path);
@@ -558,6 +566,7 @@ impl SystemRef {
         if removed {
             self.deindex_actor(path);
         }
+        self.actor_types.remove(path);
         self.stop_senders.remove(path);
         // Eagerly drop names pointing at the terminated actor so a later
         // re-registration (e.g. after restart) never collides.
@@ -750,6 +759,42 @@ impl SystemRef {
             .get(path)
             .map(|children| children.iter().cloned().collect::<Vec<_>>())
             .unwrap_or_default()
+    }
+
+    /// Snapshots the live supervision forest for debugging: every actor
+    /// whose parent is not itself live becomes a root, so orphans show
+    /// up instead of silently vanishing from the view. Children are
+    /// sorted by path for stable output. Reads are lock-free but the
+    /// tree is a point-in-time view: actors may spawn or stop while it
+    /// is being built.
+    pub fn actor_tree(&self) -> Vec<crate::tree::ActorTreeNode> {
+        let mut roots: Vec<ActorPath> = self
+            .actors
+            .iter()
+            .map(|entry| entry.key().clone())
+            .filter(|path| !self.actors.contains_key(&path.parent()))
+            .collect();
+        roots.sort();
+        roots.iter().map(|path| self.subtree(path)).collect()
+    }
+
+    /// Concrete type name recorded when the actor at `path` spawned,
+    /// or `None` when it already stopped.
+    pub fn actor_type_of(&self, path: &ActorPath) -> Option<&'static str> {
+        self.actor_types.get(path).map(|entry| *entry.value())
+    }
+
+    fn subtree(&self, path: &ActorPath) -> crate::tree::ActorTreeNode {
+        let mut grown = self.children(path);
+        grown.sort();
+        crate::tree::ActorTreeNode {
+            path: path.to_string(),
+            actor_type: self
+                .actor_type_of(path)
+                .unwrap_or("unknown")
+                .to_owned(),
+            children: grown.iter().map(|child| self.subtree(child)).collect(),
+        }
     }
 
     /// Registers system-wide message middleware.
