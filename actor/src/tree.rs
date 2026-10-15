@@ -17,13 +17,13 @@ pub struct ActorTreeNode {
     /// `"unknown"` when the type entry is missing.
     pub actor_type: String,
     /// Direct children, sorted by path.
-    pub children: Vec<ActorTreeNode>,
+    pub children: Vec<Self>,
 }
 
 impl ActorTreeNode {
     /// Total nodes in this subtree, including `self`.
     pub fn size(&self) -> usize {
-        1 + self.children.iter().map(ActorTreeNode::size).sum::<usize>()
+        1 + self.children.iter().map(Self::size).sum::<usize>()
     }
 }
 

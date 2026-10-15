@@ -102,6 +102,7 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
                 ));
             }
         }
+        drop(data);
         Ok(())
     }
 }
