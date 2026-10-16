@@ -1,16 +1,17 @@
 //! Comprehensive edge case tests for Actor module to increase coverage
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, ChildAction,
-    CustomIntervalStrategy, Error, Event, Handler, IntervalStrategy, Message,
-    NoIntervalStrategy, Response, RetryActor, RetryMessage, RetryStrategy,
-    Strategy, SupervisionStrategy,
+    Actor, ActorContext, ActorPath, ChildAction, CustomIntervalStrategy, Error,
+    Event, Handler, IntervalStrategy, Message, NoIntervalStrategy, Response,
+    RetryActor, RetryMessage, RetryStrategy, Strategy, SupervisionStrategy,
+    TestSystem,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, time::Duration};
 use test_log::test;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
+
+mod helpers;
 
 // Test actors for edge cases
 #[derive(Debug, Clone)]
@@ -266,9 +267,8 @@ impl Handler<Self> for FailingActor {
 // Test supervision strategies
 #[test(tokio::test)]
 async fn test_actor_with_retry_supervision() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = EdgeCaseActor {
         fail_on_start: true,
@@ -282,24 +282,32 @@ async fn test_actor_with_retry_supervision() {
         .await
         .unwrap();
 
-    // Wait for retry to complete
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let response = actor_ref.ask(EdgeCaseCommand::GetValue).await.unwrap();
-    assert_eq!(response, EdgeCaseResponse::Value(42));
+    // Poll until the retry cycle revives the actor instead of a fixed sleep.
+    helpers::assert_eventually(
+        "actor recovers after start retry",
+        Duration::from_secs(5),
+        || async {
+            match actor_ref.ask(EdgeCaseCommand::GetValue).await {
+                Ok(EdgeCaseResponse::Value(42)) => Some(()),
+                _ => None,
+            }
+        },
+    )
+    .await;
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_actor_with_stop_supervision() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = FailingActor;
     let result = system.create_root_actor("failing_actor", actor).await;
 
     // Should fail to create due to Stop supervision
     assert!(result.is_err());
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
@@ -328,9 +336,8 @@ async fn test_no_interval_strategy() {
 
 #[test(tokio::test)]
 async fn test_actor_ref_operations() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = EdgeCaseActor {
         fail_on_start: false,
@@ -351,18 +358,26 @@ async fn test_actor_ref_operations() {
     // Test tell_stop
     actor_ref.tell_stop().await;
 
-    // Wait for stop
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Should be closed now
-    assert!(actor_ref.is_closed());
+    // Poll for closure instead of a fixed sleep.
+    helpers::assert_eventually(
+        "actor closes after tell_stop",
+        Duration::from_secs(2),
+        || async {
+            if actor_ref.is_closed() {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_child_actor_management() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent = EdgeCaseActor {
         fail_on_start: false,
@@ -375,7 +390,19 @@ async fn test_child_actor_management() {
 
     // Create child
     parent_ref.tell(EdgeCaseCommand::CreateChild).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    helpers::assert_eventually(
+        "child appears after CreateChild",
+        Duration::from_secs(2),
+        || async {
+            system
+                .get_actor::<EdgeCaseActor>(&ActorPath::from(
+                    "/user/parent/test_child",
+                ))
+                .await
+                .ok()
+        },
+    )
+    .await;
 
     // Verify child exists
     let child = system
@@ -389,13 +416,13 @@ async fn test_child_actor_management() {
             child_ref.ask(EdgeCaseCommand::TestParent).await.unwrap();
         assert_eq!(response, EdgeCaseResponse::Success);
     }
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_system_helpers() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     #[derive(Clone)]
     struct TestHelper {
@@ -403,22 +430,22 @@ async fn test_system_helpers() {
     }
 
     let helper = TestHelper { value: 123 };
-    system.add_helper("test", helper).await;
+    system.add_helper("test", helper);
 
-    let retrieved: Option<TestHelper> = system.get_helper("test").await;
+    let retrieved: Option<TestHelper> = system.get_helper("test");
     assert!(retrieved.is_some());
     assert_eq!(retrieved.unwrap().value, 123);
 
     // Test non-existent helper
-    let missing: Option<TestHelper> = system.get_helper("missing").await;
+    let missing: Option<TestHelper> = system.get_helper("missing");
     assert!(missing.is_none());
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_system_children_listing() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = EdgeCaseActor {
         fail_on_start: false,
@@ -434,19 +461,28 @@ async fn test_system_children_listing() {
 
     // Create multiple children
     parent_ref.tell(EdgeCaseCommand::CreateChild).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    helpers::assert_eventually(
+        "child appears for children listing",
+        Duration::from_secs(2),
+        || async {
+            let children =
+                system.children(&ActorPath::from("/user/parent_with_children"));
+            if children.is_empty() { None } else { Some(()) }
+        },
+    )
+    .await;
 
     // Test children listing
     let parent_path = ActorPath::from("/user/parent_with_children");
-    let children = system.children(&parent_path).await;
+    let children = system.children(&parent_path);
     assert!(!children.is_empty());
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_retry_actor_functionality() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     // Create target actor for retry
     let target = EdgeCaseActor {
@@ -468,19 +504,18 @@ async fn test_retry_actor_functionality() {
 
     // Start retry process
     retry_ref.tell(RetryMessage::Retry).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // RetryActor now auto-stops when the retry budget is exhausted.
     tokio::time::timeout(Duration::from_secs(1), retry_ref.closed())
         .await
         .expect("retry actor should stop after exhausting retries");
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_system_stop() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = EdgeCaseActor {
         fail_on_start: false,
@@ -492,14 +527,99 @@ async fn test_system_stop() {
     let _actor_ref =
         system.create_root_actor("stop_test", actor).await.unwrap();
 
-    // Stop system
-    system.stop_system();
+    // Stop system via harness shutdown; returning implies the runner
+    // finished.
+    harness.shutdown().await;
+}
 
-    // Wait for system to stop
-    tokio::time::sleep(Duration::from_millis(100)).await;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum PanicMsg {
+    Panic,
+    Ping,
+}
 
-    // Runner should have finished
-    let result =
-        tokio::time::timeout(Duration::from_millis(100), runner_handle).await;
-    assert!(result.is_ok());
+impl Message for PanicMsg {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum PanicResp {
+    Pong,
+}
+
+impl Response for PanicResp {}
+
+#[derive(Clone)]
+struct PanicActor;
+
+impl ave_actors_actor::NotPersistentActor for PanicActor {}
+
+#[async_trait]
+impl Actor for PanicActor {
+    type Message = PanicMsg;
+    type Response = PanicResp;
+    type Event = EdgeCaseEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("PanicActor", id = %id)
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for PanicActor {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: PanicMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<PanicResp, Error> {
+        match msg {
+            PanicMsg::Panic => panic!("intentional handler panic"),
+            PanicMsg::Ping => Ok(PanicResp::Pong),
+        }
+    }
+}
+
+#[test(tokio::test)]
+async fn test_handler_panic_answers_ask_and_keeps_actor_alive() {
+    let harness = TestSystem::start();
+    let system = harness.system();
+
+    let actor_ref = system
+        .create_root_actor("panicker", PanicActor)
+        .await
+        .unwrap();
+
+    // A panicking ask must resolve with an error, not hang: the task
+    // survives and the rsvp channel fires.
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        actor_ref.ask(PanicMsg::Panic),
+    )
+    .await
+    .expect("panicking ask must resolve");
+    assert!(
+        matches!(
+            result,
+            Err(Error::FunctionalCritical { ref description })
+                if description == "message handler panicked"
+        ),
+        "expected panic error, got {:?}",
+        result.as_ref().err()
+    );
+
+    // The actor is still alive and processes the next message.
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        actor_ref.ask(PanicMsg::Ping),
+    )
+    .await
+    .expect("actor must survive a handler panic");
+    assert_eq!(result.unwrap(), PanicResp::Pong);
+
+    harness.shutdown().await;
 }

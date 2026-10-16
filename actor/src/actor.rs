@@ -3,6 +3,7 @@
 use crate::{
     ActorPath, Error, ParentRef, TimerKey,
     handler::HandleHelper,
+    middleware::MessageMetadata,
     parent_ref::boxed_notifier,
     runner::{StopHandle, StopSender},
     sink::Sink,
@@ -54,6 +55,11 @@ pub struct ActorContext<A: Actor + Handler<A>> {
     /// when the actor stops so spawned work does not outlive the actor.
     spawned_tasks: Arc<Mutex<Vec<AbortHandle>>>,
 
+    /// Metadata of the message currently being handled, if any. Set by
+    /// the runner before each handler invocation; absent in `pre_start`
+    /// and other message-less hooks.
+    current_metadata: Option<MessageMetadata>,
+
     span: tracing::Span,
 }
 
@@ -88,6 +94,7 @@ where
             child_senders: HashMap::new(),
             sinks: params.sinks,
             spawned_tasks: params.spawned_tasks,
+            current_metadata: None,
         }
     }
 
@@ -111,6 +118,9 @@ where
     /// A `delay` of zero means the message is delivered as soon as the
     /// scheduler task runs. Returns a `TimerKey` that can be used to cancel
     /// the timer.
+    ///
+    /// If the scheduler is shutting down, the timer is ignored but a key is
+    /// still returned (cancelling it is a no-op).
     ///
     /// # Errors
     ///
@@ -153,7 +163,8 @@ where
     /// message that will be sent to this actor. It allows the watcher to model
     /// the notification with its own message type.
     ///
-    /// Returns `Error::ActorStopped` if `target` has already stopped.
+    /// Watching an already-stopped target succeeds and delivers the
+    /// termination message immediately (courtesy notification).
     pub async fn watch<B, F>(
         &self,
         target: &ActorRef<B>,
@@ -163,44 +174,53 @@ where
         B: Actor + Handler<B>,
         F: Fn(ActorPath) -> A::Message + Send + Sync + 'static,
     {
-        if target.is_closed() {
-            return Err(Error::ActorStopped);
-        }
-
         let watcher_ref = self.reference().await?;
         let watcher_path = self.path.clone();
         let factory = Arc::new(msg_factory);
 
-        let notify = Arc::new(move |terminated: ActorPath| {
-            let actor_ref = watcher_ref.clone();
-            let factory = Arc::clone(&factory);
-            let watcher = watcher_path.clone();
-            tokio::spawn(async move {
-                let msg = factory(terminated);
-                if let Err(err) = actor_ref.tell(msg).await {
-                    tracing::debug!(
-                        error = %err,
-                        watcher = %watcher,
-                        "Failed to deliver termination notification to watcher"
-                    );
-                }
-            });
-        });
+        let notify: Arc<dyn Fn(ActorPath) + Send + Sync> = Arc::new(
+            move |terminated: ActorPath| {
+                let actor_ref = watcher_ref.clone();
+                let factory = Arc::clone(&factory);
+                let watcher = watcher_path.clone();
+                tokio::spawn(async move {
+                    let msg = factory(terminated);
+                    if let Err(err) = actor_ref.tell(msg).await {
+                        tracing::debug!(
+                            error = %err,
+                            watcher = %watcher,
+                            "Failed to deliver termination notification to watcher"
+                        );
+                    }
+                });
+            },
+        );
 
+        // Register first, then re-check: if the target terminated between
+        // the two steps, `notify_watchers` either already fired our entry
+        // (removed: no courtesy needed) or ran before we registered (entry
+        // still present: deliver a courtesy notification). Taking our entry
+        // makes delivery exactly-once in every interleaving.
+        let target_path = target.path();
         self.system
-            .watch(target.path(), self.path.clone(), notify)
+            .watch(target_path.clone(), self.path.clone(), Arc::clone(&notify))
             .await?;
+        if target.is_closed()
+            && self.system.unwatch(target_path.clone(), self.path.clone())
+        {
+            notify(target_path);
+        }
         Ok(())
     }
 
     /// Stops watching `target` from this actor.
     ///
     /// If this actor was not watching `target`, this is a no-op.
-    pub async fn unwatch<B>(&self, target: &ActorRef<B>)
+    pub fn unwatch<B>(&self, target: &ActorRef<B>)
     where
         B: Actor + Handler<B>,
     {
-        self.system.unwatch(target.path(), self.path.clone()).await;
+        self.system.unwatch(target.path(), self.path.clone());
     }
 
     /// Spawns an asynchronous task whose lifetime is bound to this actor.
@@ -246,6 +266,30 @@ where
     /// Returns a reference to the actor system this actor belongs to.
     pub const fn system(&self) -> &SystemRef {
         &self.system
+    }
+
+    /// Metadata of the message currently being handled, if any.
+    ///
+    /// Set by the runner before each handler invocation; `None` in
+    /// `pre_start` and other message-less hooks.
+    pub const fn message_metadata(&self) -> Option<MessageMetadata> {
+        self.current_metadata
+    }
+
+    /// Correlation id of the message currently being handled, if any.
+    ///
+    /// Pass it to `tell_with` / `ask_with` to continue the causal
+    /// chain instead of starting a new one.
+    pub fn correlation_id(&self) -> Option<u64> {
+        self.current_metadata
+            .map(|metadata| metadata.correlation_id)
+    }
+
+    pub(crate) const fn set_current_metadata(
+        &mut self,
+        metadata: MessageMetadata,
+    ) {
+        self.current_metadata = Some(metadata);
     }
 
     /// Returns a typed handle to the parent actor, or an error if this is a root
@@ -322,13 +366,64 @@ where
 
     /// Register a named sink for this actor.
     ///
-    /// If a sink with the same name already exists it is replaced and the
-    /// previous sink is returned.
+    /// Creates a sink with the given name and concurrency limit, attaches the
+    /// actor's path and metrics collection, and inserts it into the actor's
+    /// sink map. If a sink with the same name already exists it is replaced;
+    /// the new sink is returned so callers can add subscribers. The previous
+    /// sink, if any, is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` is invalid.
     pub fn register_sink(
         &self,
-        sink: Sink<A::SinkEvent>,
-    ) -> Option<Sink<A::SinkEvent>> {
-        self.sinks.insert(sink.name().to_string(), sink)
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+    ) -> Result<Sink<A::SinkEvent>, Error> {
+        #[cfg(feature = "prometheus")]
+        let sink = Sink::new_with_metrics(
+            name,
+            max_concurrent,
+            self.path().clone(),
+            crate::runner::actor_type_name::<A>(),
+            A::detailed_metrics(),
+            self.system.actor_metrics(),
+        )?;
+        #[cfg(not(feature = "prometheus"))]
+        let sink = Sink::new(name, max_concurrent)?;
+        self.sinks.insert(sink.name().to_string(), sink.clone());
+        Ok(sink)
+    }
+
+    /// Register a named sink with a custom event buffer capacity.
+    ///
+    /// This is the same as [`ActorContext::register_sink`], but allows the
+    /// buffer capacity to be configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` or
+    /// `buffer_capacity` are invalid.
+    pub fn register_sink_with_buffer(
+        &self,
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+        buffer_capacity: usize,
+    ) -> Result<Sink<A::SinkEvent>, Error> {
+        #[cfg(feature = "prometheus")]
+        let sink = Sink::with_buffer_and_metrics(
+            name,
+            max_concurrent,
+            buffer_capacity,
+            self.path().clone(),
+            crate::runner::actor_type_name::<A>(),
+            A::detailed_metrics(),
+            self.system.actor_metrics(),
+        )?;
+        #[cfg(not(feature = "prometheus"))]
+        let sink = Sink::with_buffer(name, max_concurrent, buffer_capacity)?;
+        self.sinks.insert(sink.name().to_string(), sink.clone());
+        Ok(sink)
     }
 
     /// Remove the sink named `name` and return it, if present.
@@ -412,7 +507,7 @@ where
                     StopHandle::new(stop_sender.clone(), C::stop_timeout()),
                 );
                 let error_sender = self.error_sender.clone();
-                tokio::spawn(async move {
+                self.spawn(async move {
                     stop_sender.closed().await;
                     let _ = error_sender
                         .send(ChildError::ChildStopped(child_path))
@@ -670,14 +765,30 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
         std::time::Duration::from_secs(5)
     }
 
-    /// Maximum time to wait for `pre_start` to complete; `None` disables the startup timeout.
+    /// Maximum time to wait for `pre_start` to complete.
+    ///
+    /// Defaults to 5 seconds; `None` disables the timeout (waits forever).
+    /// Override per actor when startup legitimately takes longer.
     fn startup_timeout() -> Option<Duration> {
-        None
+        Some(Duration::from_secs(5))
     }
 
-    /// Maximum time a parent waits for this actor to acknowledge a stop request; `None` disables the stop timeout.
+    /// Maximum time a parent waits for this actor to acknowledge a stop request.
+    ///
+    /// Defaults to 5 seconds; `None` disables the timeout (waits forever).
+    /// Override per actor with slow shutdown sequences.
     fn stop_timeout() -> Option<Duration> {
-        None
+        Some(Duration::from_secs(5))
+    }
+
+    /// Enables per-actor-path metric series for this actor type.
+    ///
+    /// Aggregate metrics are always keyed by scope and actor type (bounded).
+    /// Returning `true` additionally records path-labeled detail series for
+    /// failures and mailbox events. Only opt in for small, fixed actor
+    /// sets: each distinct path creates permanent series.
+    fn detailed_metrics() -> bool {
+        false
     }
 
     /// Returns the supervision strategy applied when this actor fails at startup.
@@ -688,7 +799,8 @@ pub trait Actor: Send + Sync + Sized + 'static + Handler<Self> {
     /// Maximum number of pending timers this actor may have scheduled at once.
     ///
     /// Must be between [`MIN_MAX_TIMERS`] and [`MAX_MAX_TIMERS`] inclusive.
-    /// Timers created beyond this limit are ignored and logged as a warning.
+    /// Scheduling beyond this limit fails with
+    /// [`Error::InvalidConfiguration`].
     fn max_timers() -> usize {
         MAX_MAX_TIMERS
     }
@@ -764,6 +876,11 @@ pub trait Event:
 }
 
 /// Defines the type of value an actor receives as a message.
+///
+/// Messages are cloned once per delivery (the envelope retains ownership
+/// so a panicking handler cannot lose pending `ask` responses). Keep
+/// message types small and cheap to clone; wrap large payloads in
+/// [`Arc`](std::sync::Arc).
 pub trait Message: Clone + Send + Sync + 'static {
     /// Returns `true` if this message must be processed before the actor stops; defaults to `false`.
     fn is_critical(&self) -> bool {
@@ -849,13 +966,23 @@ where
     stop_sender: StopSender,
     /// Named sinks registered for this actor.
     sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
+    /// Optional Prometheus metrics collection shared by the actor system.
+    #[cfg(feature = "prometheus")]
+    metrics: Option<Arc<crate::metrics::ActorMetrics>>,
 }
 
 impl<A> ActorRef<A>
 where
     A: Actor + Handler<A>,
 {
-    pub const fn new(
+    /// Create a new actor reference.
+    ///
+    /// This constructor is internal to the actor runtime. Most callers should
+    /// obtain an `ActorRef` from
+    /// [`SystemRef::create_root_actor`](crate::SystemRef::create_root_actor)
+    /// or [`ActorContext::create_child`](crate::ActorContext::create_child).
+    #[cfg(not(feature = "prometheus"))]
+    pub(crate) const fn new(
         path: Arc<ActorPath>,
         sender: HandleHelper<A>,
         stop_sender: StopSender,
@@ -869,17 +996,67 @@ where
         }
     }
 
+    /// Create a new actor reference with metrics collection.
+    ///
+    /// This is the internal constructor used by the actor runtime when the
+    /// `prometheus` feature is enabled.
+    #[cfg(feature = "prometheus")]
+    pub(crate) const fn new_with_metrics(
+        path: Arc<ActorPath>,
+        sender: HandleHelper<A>,
+        stop_sender: StopSender,
+        sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
+        metrics: Option<Arc<crate::metrics::ActorMetrics>>,
+    ) -> Self {
+        Self {
+            path,
+            sender,
+            stop_sender,
+            sinks,
+            metrics,
+        }
+    }
+
     /// Sends a message to the actor without waiting for a response (fire-and-forget).
     pub async fn tell(&self, message: A::Message) -> Result<(), Error> {
         self.sender.tell(self.path(), message).await
+    }
+
+    /// Like [`tell`](Self::tell), but continues the `correlation_id`
+    /// chain (see [`MessageMetadata`](crate::MessageMetadata)) instead
+    /// of starting a new one.
+    pub async fn tell_with(
+        &self,
+        message: A::Message,
+        correlation_id: u64,
+    ) -> Result<(), Error> {
+        self.sender
+            .tell_with(self.path(), message, correlation_id)
+            .await
     }
 
     /// Sends `message` to the actor and waits for a response.
     ///
     /// Returns the actor's response on success, or an error if the actor has stopped
     /// or the message channel is full.
+    ///
+    /// If the handler never replies, this waits indefinitely; prefer
+    /// [`ActorRef::ask_timeout`] when the handler may hang.
     pub async fn ask(&self, message: A::Message) -> Result<A::Response, Error> {
         self.sender.ask(self.path(), message).await
+    }
+
+    /// Like [`ask`](Self::ask), but continues the `correlation_id`
+    /// chain (see [`MessageMetadata`](crate::MessageMetadata)) instead
+    /// of starting a new one.
+    pub async fn ask_with(
+        &self,
+        message: A::Message,
+        correlation_id: u64,
+    ) -> Result<A::Response, Error> {
+        self.sender
+            .ask_with(self.path(), message, correlation_id)
+            .await
     }
 
     /// Sends `message` and waits up to `timeout` for a response, returning
@@ -895,16 +1072,14 @@ where
         validate_timeout("ask_timeout", timeout)?;
         tokio::time::timeout(timeout, self.sender.ask(self.path(), message))
             .await
-            .map_err(|_| Error::Timeout {
-                ms: timeout.as_millis(),
-            })?
+            .map_err(|_| Error::Timeout { duration: timeout })?
     }
 
     /// Requests the actor to stop gracefully and waits for it to confirm shutdown.
     ///
     /// The actor will finish its current message, run `pre_stop` and `post_stop`,
-    /// and stop its children before terminating. Returns an error if the actor has
-    /// already stopped.
+    /// and stop its children before terminating. Returns `Ok(())` also when
+    /// the actor already stopped (there is nothing to wait for).
     pub async fn ask_stop(&self) -> Result<(), Error> {
         tracing::debug!("Stopping actor");
         let (response_sender, response_receiver) = oneshot::channel();
@@ -918,7 +1093,13 @@ where
             Ok(())
         } else {
             response_receiver.await.map_err(|error| {
-                tracing::error!(error = %error, "Failed to confirm actor stop");
+                // The actor stopped before confirming: a natural race
+                // when stopping an already-finished child, not an
+                // error — keep it out of error logs.
+                tracing::debug!(
+                    error = %error,
+                    "Actor stopped before confirming stop"
+                );
                 Error::Send {
                     reason: error.to_string(),
                 }
@@ -936,13 +1117,64 @@ where
 
     /// Register a sink from external code.
     ///
-    /// If a sink with the same name already exists it is replaced and the
-    /// previous sink is returned.
+    /// Creates a sink with the given name and concurrency limit, attaches the
+    /// actor's path and metrics collection, and inserts it into the actor's
+    /// sink map.  If a sink with the same name already exists it is replaced;
+    /// the new sink is returned so callers can add subscribers. The previous
+    /// sink, if any, is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` is invalid.
     pub fn register_sink(
         &self,
-        sink: Sink<A::SinkEvent>,
-    ) -> Option<Sink<A::SinkEvent>> {
-        self.sinks.insert(sink.name().to_string(), sink)
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+    ) -> Result<Sink<A::SinkEvent>, Error> {
+        #[cfg(feature = "prometheus")]
+        let sink = Sink::new_with_metrics(
+            name,
+            max_concurrent,
+            self.path(),
+            crate::runner::actor_type_name::<A>(),
+            A::detailed_metrics(),
+            self.metrics.clone(),
+        )?;
+        #[cfg(not(feature = "prometheus"))]
+        let sink = Sink::new(name, max_concurrent)?;
+        self.sinks.insert(sink.name().to_string(), sink.clone());
+        Ok(sink)
+    }
+
+    /// Register a named sink with a custom event buffer capacity.
+    ///
+    /// This is the same as [`ActorRef::register_sink`], but allows the buffer
+    /// capacity to be configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` or
+    /// `buffer_capacity` are invalid.
+    pub fn register_sink_with_buffer(
+        &self,
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+        buffer_capacity: usize,
+    ) -> Result<Sink<A::SinkEvent>, Error> {
+        #[cfg(feature = "prometheus")]
+        let sink = Sink::with_buffer_and_metrics(
+            name,
+            max_concurrent,
+            buffer_capacity,
+            self.path(),
+            crate::runner::actor_type_name::<A>(),
+            A::detailed_metrics(),
+            self.metrics.clone(),
+        )?;
+        #[cfg(not(feature = "prometheus"))]
+        let sink = Sink::with_buffer(name, max_concurrent, buffer_capacity)?;
+        self.sinks.insert(sink.name().to_string(), sink.clone());
+        Ok(sink)
     }
 
     /// Remove a sink from external code.
@@ -976,6 +1208,8 @@ where
             sender: self.sender.clone(),
             stop_sender: self.stop_sender.clone(),
             sinks: self.sinks.clone(),
+            #[cfg(feature = "prometheus")]
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -997,7 +1231,7 @@ mod test {
     use super::*;
     use test_log::test;
 
-    use crate::sink::{Sink, Subscriber};
+    use crate::sink::Subscriber;
     use crate::system::ActorSystemConfig;
 
     use serde::{Deserialize, Serialize};
@@ -1096,15 +1330,28 @@ mod test {
         let actor_ref = system.create_root_actor("test", actor).await.unwrap();
 
         let subscriber = TestSubscriber::new();
-        let mut sink = Sink::new("test_sink", None).expect("valid sink");
+        let sink = actor_ref
+            .register_sink("test_sink", None)
+            .expect("valid sink");
         sink.add("sub1", subscriber.clone());
-        actor_ref.register_sink(sink);
 
         actor_ref.tell(TestMessage(10)).await.unwrap();
         let response = actor_ref.ask(TestMessage(10)).await.unwrap();
         assert_eq!(response.0, 20);
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Poll for both sink events instead of a fixed sleep.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if subscriber.events.lock().await.len() == 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "sink did not deliver both events"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
 
         {
             let events = subscriber.events.lock().await;

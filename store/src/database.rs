@@ -12,6 +12,91 @@ pub type CollectionEntryResult = Result<CollectionEntry, Error>;
 pub type CollectionIter<'a> =
     Box<dyn Iterator<Item = CollectionEntryResult> + 'a>;
 
+/// Single write operation inside an atomic [`DbManager::write_batch`] call.
+///
+/// `collection` / `store` are backend collection/state names (e.g.
+/// `"store_events"`), `prefix` scoping is supplied separately to
+/// `write_batch`. Backends must apply the same key mapping as their
+/// [`Collection`] / [`State`] implementations.
+#[derive(Debug, Clone, Copy)]
+pub enum BatchOp<'a> {
+    /// Insert or replace an event under `key` in `collection`.
+    PutEvent {
+        /// Backend collection name.
+        collection: &'a str,
+        /// Event key (e.g. zero-padded sequence number).
+        key: &'a str,
+        /// Encoded event bytes.
+        data: &'a [u8],
+    },
+    /// Replace the single value held by state store `store`.
+    PutState {
+        /// Backend state name.
+        store: &'a str,
+        /// Encoded snapshot/metadata bytes.
+        data: &'a [u8],
+    },
+}
+
+/// One actor subtree wipe: every row under `prefix` in the event,
+/// snapshot and metadata stores named `store`.
+///
+/// Mirrors what [`Collection`]/[`State`] `purge` deletes for a single
+/// actor, across several at once. Fence rows are left alone, like
+/// `purge` does.
+#[derive(Debug, Clone, Copy)]
+pub struct PurgeScope<'a> {
+    /// Backend store base name (e.g. `"store"` for
+    /// `"store_events"`, `"store_states"`, `"store_metadata"`).
+    pub store: &'a str,
+    /// Key prefix scoping the actor subtree.
+    pub prefix: &'a str,
+}
+
+/// Validates a key prefix for backends that namespace keys.
+///
+/// Flat keyspaces join keys as `{prefix}.{key}`, so a `.` inside `prefix`
+/// aliases nested prefixes (`a` vs `a.b`) in range scans, purges and
+/// iterators. Backends must reject dotted prefixes in `create_collection`
+/// and `create_state`, even when their own layout (e.g. SQL columns) would
+/// tolerate them, to keep one uniform contract.
+pub fn validate_key_prefix(prefix: &str) -> Result<(), Error> {
+    if prefix.is_empty() {
+        return Err(Error::CreateStore {
+            reason: "backend prefix must not be empty".to_owned(),
+        });
+    }
+    if prefix.contains('.') {
+        return Err(Error::CreateStore {
+            reason: format!(
+                "backend prefix '{prefix}' must not contain '.': it aliases \
+                 nested prefixes in flat keyspaces"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Write durability contract for database backends.
+///
+/// A positional `bool` reads ambiguously at call sites (`new(&p, false,
+/// None)`); this enum forces every opener to state intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Durability {
+    /// Every write is synced before acknowledgement (durable, slower).
+    Sync,
+    /// Writes may sit in OS buffers briefly (faster, small window of loss
+    /// on power cut or crash).
+    Relaxed,
+}
+
+impl Durability {
+    /// Returns `true` for [`Durability::Sync`].
+    pub const fn is_sync(self) -> bool {
+        matches!(self, Self::Sync)
+    }
+}
+
 /// Factory for creating [`Collection`] and [`State`] storage backends.
 ///
 /// Implement this trait to plug in a custom database (SQLite, RocksDB, etc.).
@@ -45,6 +130,44 @@ where
     {
         Ok(())
     }
+
+    /// Returns an atomic multi-write handle for this backend, if supported.
+    ///
+    /// A returned handle guarantees all-or-nothing application of
+    /// [`BatchWrite::write_batch`], including across crashes. The default is
+    /// `None`; callers then apply multi-write operations sequentially and
+    /// compensate on error exactly as with individual writes.
+    fn batch_writer(&self) -> Option<Box<dyn BatchWrite>> {
+        None
+    }
+
+    /// Atomically wipes every listed actor subtree (all-or-nothing,
+    /// including across crashes).
+    ///
+    /// Same coverage as per-actor `purge`: event, snapshot and metadata
+    /// rows under each scope, fence rows untouched. Used when several
+    /// actors die together (e.g. governance deletion) so no crash
+    /// window leaves half of them wiped.
+    fn purge_scopes(&self, scopes: &[PurgeScope<'_>]) -> Result<(), Error>;
+}
+
+/// Atomic multi-write handle for one backend.
+///
+/// Returned by [`DbManager::batch_writer`]. A `Some` handle is a contract:
+/// [`BatchWrite::write_batch`] either applies every op durably or applies
+/// none (rolling back on failure), so callers must not compensate after an
+/// error beyond reporting it.
+pub trait BatchWrite: Sync + Send {
+    /// Applies `ops` scoped by `prefix` atomically (all-or-nothing).
+    ///
+    /// Key mapping must match the backend's [`Collection`] / [`State`]
+    /// implementations. Implementations must validate any interpolated
+    /// identifiers exactly as their handle constructors do.
+    fn write_batch(
+        &self,
+        prefix: &str,
+        ops: &[BatchOp<'_>],
+    ) -> Result<(), Error>;
 }
 
 /// Single-value storage used to persist actor state snapshots.
@@ -66,6 +189,11 @@ pub trait State: Sync + Send + 'static {
     /// Deletes the current value.
     ///
     /// Returns [`Error::EntryNotFound`] if there is nothing to delete.
+    /// Backends implement this as check-then-delete without a transaction
+    /// unless documented otherwise: under concurrent writers a delete may
+    /// remove a concurrently written value or report success for an
+    /// already-deleted one. The [`Store`](crate::store::Store) only deletes
+    /// during compensation and purge, never concurrently.
     fn del(&mut self) -> Result<(), Error>;
 
     /// Removes all data from this state store. Succeeds silently if the store is already empty.
@@ -91,7 +219,9 @@ pub trait Collection: Sync + Send + 'static {
 
     /// Removes the entry for `key`.
     ///
-    /// Returns [`Error::EntryNotFound`] if the key does not exist.
+    /// Returns [`Error::EntryNotFound`] if the key does not exist. Same
+    /// check-then-delete caveat as [`State::del`](State::del) under
+    /// concurrent writers.
     fn del(&mut self, key: &str) -> Result<(), Error>;
 
     /// Returns the last key-value pair in insertion/sort order, or `None` if the collection is empty.
@@ -102,6 +232,8 @@ pub trait Collection: Sync + Send + 'static {
 
     /// Removes all entries whose keys fall within the inclusive range
     /// `[start, end]`.
+    ///
+    /// An inverted range (`start > end`) matches nothing and succeeds.
     ///
     /// The default implementation iterates over the range (via
     /// [`iter_range`](Collection::iter_range)) and deletes each entry
@@ -150,7 +282,7 @@ pub trait Collection: Sync + Send + 'static {
         })))
     }
 
-    /// Returns at most `quantity.abs()` values, optionally starting after `from`.
+    /// Returns at most `quantity` values in magnitude, optionally starting after `from`.
     ///
     /// If `from` is `Some(key)`, iteration begins at the entry immediately after `key`.
     /// A positive `quantity` iterates forward; negative iterates in reverse.
@@ -160,6 +292,8 @@ pub trait Collection: Sync + Send + 'static {
         from: Option<&str>,
         quantity: isize,
     ) -> Result<Vec<Vec<u8>>, Error> {
+        // `unsigned_abs` (not `abs`): `isize::MIN.abs()` panics in debug
+        // and wraps in release.
         let (mut iter, quantity) = match from {
             Some(key) => {
                 // Find the key
@@ -185,13 +319,16 @@ pub trait Collection: Sync + Send + 'static {
                     iter.next();
                 }
                 iter.next(); // Exclusive From
-                (Box::new(iter) as CollectionIter<'_>, quantity.abs())
+                (
+                    Box::new(iter) as CollectionIter<'_>,
+                    quantity.unsigned_abs(),
+                )
             }
             None => {
                 if quantity >= 0 {
-                    (self.iter(false)?, quantity)
+                    (self.iter(false)?, quantity as usize)
                 } else {
-                    (self.iter(true)?, quantity.abs())
+                    (self.iter(true)?, quantity.unsigned_abs())
                 }
             }
         };
@@ -262,12 +399,10 @@ macro_rules! test_store_trait {
                     manager.create_collection("test", "test").unwrap();
                 Collection::put(&mut store, "key", b"value").unwrap();
                 Collection::del(&mut store, "key").unwrap();
-                assert_eq!(
+                assert!(matches!(
                     Collection::get(&store, "key"),
-                    Err(Error::EntryNotFound {
-                        key: "test.key".to_owned()
-                    })
-                );
+                    Err(Error::EntryNotFound { key }) if key == "test.key"
+                ));
                 assert!(manager.stop().is_ok())
             }
 
@@ -278,12 +413,10 @@ macro_rules! test_store_trait {
                     manager.create_state("test", "test").unwrap();
                 State::put(&mut store, b"value").unwrap();
                 State::del(&mut store).unwrap();
-                assert_eq!(
+                assert!(matches!(
                     State::get(&store),
-                    Err(Error::EntryNotFound {
-                        key: "test".to_owned()
-                    })
-                );
+                    Err(Error::EntryNotFound { key }) if key == "test"
+                ));
                 assert!(manager.stop().is_ok())
             }
 
@@ -427,22 +560,15 @@ macro_rules! test_store_trait {
                 Collection::put(&mut store, "key2", b"value2").unwrap();
                 Collection::put(&mut store, "key3", b"value3").unwrap();
                 Collection::del_range(&mut store, "key1", "key2").unwrap();
-                assert_eq!(
+                assert!(matches!(
                     Collection::get(&store, "key1"),
-                    Err(Error::EntryNotFound {
-                        key: "test.key1".to_owned()
-                    })
-                );
-                assert_eq!(
+                    Err(Error::EntryNotFound { key }) if key == "test.key1"
+                ));
+                assert!(matches!(
                     Collection::get(&store, "key2"),
-                    Err(Error::EntryNotFound {
-                        key: "test.key2".to_owned()
-                    })
-                );
-                assert_eq!(
-                    Collection::get(&store, "key3"),
-                    Ok(b"value3".to_vec())
-                );
+                    Err(Error::EntryNotFound { key }) if key == "test.key2"
+                ));
+                assert_eq!(Collection::get(&store, "key3").unwrap(), b"value3".to_vec());
                 assert!(manager.stop().is_ok())
             }
 
@@ -454,37 +580,22 @@ macro_rules! test_store_trait {
                 Collection::put(&mut store, "key1", b"value1").unwrap();
                 Collection::put(&mut store, "key2", b"value2").unwrap();
                 Collection::put(&mut store, "key3", b"value3").unwrap();
-                assert_eq!(
-                    Collection::get(&store, "key1"),
-                    Ok(b"value1".to_vec())
-                );
-                assert_eq!(
-                    Collection::get(&store, "key2"),
-                    Ok(b"value2".to_vec())
-                );
-                assert_eq!(
-                    Collection::get(&store, "key3"),
-                    Ok(b"value3".to_vec())
-                );
+                assert_eq!(Collection::get(&store, "key1").unwrap(), b"value1".to_vec());
+                assert_eq!(Collection::get(&store, "key2").unwrap(), b"value2".to_vec());
+                assert_eq!(Collection::get(&store, "key3").unwrap(), b"value3".to_vec());
                 Collection::purge(&mut store).unwrap();
-                assert_eq!(
+                assert!(matches!(
                     Collection::get(&store, "key1"),
-                    Err(Error::EntryNotFound {
-                        key: "test.key1".to_owned()
-                    })
-                );
-                assert_eq!(
+                    Err(Error::EntryNotFound { key }) if key == "test.key1"
+                ));
+                assert!(matches!(
                     Collection::get(&store, "key2"),
-                    Err(Error::EntryNotFound {
-                        key: "test.key2".to_owned()
-                    })
-                );
-                assert_eq!(
+                    Err(Error::EntryNotFound { key }) if key == "test.key2"
+                ));
+                assert!(matches!(
                     Collection::get(&store, "key3"),
-                    Err(Error::EntryNotFound {
-                        key: "test.key3".to_owned()
-                    })
-                );
+                    Err(Error::EntryNotFound { key }) if key == "test.key3"
+                ));
                 assert!(manager.stop().is_ok())
             }
 
@@ -494,24 +605,20 @@ macro_rules! test_store_trait {
                 let mut store: $type2 =
                     manager.create_state("test", "test").unwrap();
                 State::put(&mut store, b"value1").unwrap();
-                assert_eq!(State::get(&store), Ok(b"value1".to_vec()));
+                assert_eq!(State::get(&store).unwrap(), b"value1".to_vec());
                 State::purge(&mut store).unwrap();
-                assert_eq!(
+                assert!(matches!(
                     State::get(&store),
-                    Err(Error::EntryNotFound {
-                        key: "test".to_owned()
-                    })
-                );
+                    Err(Error::EntryNotFound { key }) if key == "test"
+                ));
 
                 State::put(&mut store, b"value2").unwrap();
-                assert_eq!(State::get(&store), Ok(b"value2".to_vec()));
+                assert_eq!(State::get(&store).unwrap(), b"value2".to_vec());
                 State::purge(&mut store).unwrap();
-                assert_eq!(
+                assert!(matches!(
                     State::get(&store),
-                    Err(Error::EntryNotFound {
-                        key: "test".to_owned()
-                    })
-                );
+                    Err(Error::EntryNotFound { key }) if key == "test"
+                ));
                 assert!(manager.stop().is_ok())
             }
         }
@@ -637,12 +744,10 @@ mod tests {
         let mock = GetByRangeMock {
             items: vec![("a".to_string(), b"1".to_vec())],
         };
-        assert_eq!(
+        assert!(matches!(
             mock.get_by_range(Some("z"), 1),
-            Err(Error::EntryNotFound {
-                key: "z".to_string()
-            })
-        );
+            Err(Error::EntryNotFound { key }) if key == "z"
+        ));
     }
 
     #[test]

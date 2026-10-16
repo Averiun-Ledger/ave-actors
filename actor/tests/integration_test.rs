@@ -2,15 +2,15 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
-    Event, Handler, Message, Response, Sink, Subscriber,
+    Actor, ActorContext, ActorPath, ActorRef, ChildAction, Error, Event,
+    Handler, Message, Response, TestProbe, TestSystem,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::time::Duration;
 use test_log::test;
-use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
+
+mod helpers;
 
 // Defines parent actor
 #[derive(Debug, Clone)]
@@ -47,6 +47,7 @@ pub struct TestEvent(usize);
 
 // Implements event for parent event.
 impl Event for TestEvent {}
+impl Message for TestEvent {}
 
 // Implements actor for parent actor.
 #[async_trait]
@@ -117,12 +118,11 @@ impl Handler<Self> for TestActor {
         error: Error,
         ctx: &mut ActorContext<Self>,
     ) {
-        assert_eq!(
+        assert!(matches!(
             error,
-            Error::Functional {
-                description: "Value is too high".to_owned()
-            }
-        );
+            Error::Functional { ref description }
+                if description == "Value is too high"
+        ));
         ctx.publish_all(TestEvent(0));
     }
 
@@ -132,12 +132,11 @@ impl Handler<Self> for TestActor {
         error: Error,
         ctx: &mut ActorContext<Self>,
     ) -> ChildAction {
-        assert_eq!(
+        assert!(matches!(
             error,
-            Error::Functional {
-                description: "Value produces a fault".to_owned()
-            }
-        );
+            Error::Functional { ref description }
+                if description == "Value produces a fault"
+        ));
         ctx.publish_all(TestEvent(100));
         ChildAction::Stop
     }
@@ -177,6 +176,7 @@ pub struct ChildEvent(usize);
 
 // Implements event for child event.
 impl Event for ChildEvent {}
+impl Message for ChildEvent {}
 
 // Implements actor for child actor.
 #[async_trait]
@@ -234,83 +234,47 @@ impl Handler<Self> for ChildActor {
     }
 }
 
-#[derive(Clone)]
-struct CollectingChildSubscriber {
-    events: Arc<Mutex<Vec<ChildEvent>>>,
-}
-
-impl CollectingChildSubscriber {
-    fn new() -> Self {
-        Self {
-            events: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
-
-#[async_trait]
-impl Subscriber<ChildEvent> for CollectingChildSubscriber {
-    async fn notify(&self, event: Arc<ChildEvent>) -> Result<(), Error> {
-        self.events.lock().await.push((*event).clone());
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct CollectingParentSubscriber {
-    events: Arc<Mutex<Vec<TestEvent>>>,
-}
-
-impl CollectingParentSubscriber {
-    fn new() -> Self {
-        Self {
-            events: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
-
-#[async_trait]
-impl Subscriber<TestEvent> for CollectingParentSubscriber {
-    async fn notify(&self, event: Arc<TestEvent>) -> Result<(), Error> {
-        self.events.lock().await.push((*event).clone());
-        Ok(())
-    }
-}
-
 #[test(tokio::test)]
 async fn test_actor() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move {
-        runner.run().await;
-    });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent = TestActor { state: 0 };
     let parent_ref = system.create_root_actor("parent", parent).await.unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    // Poll until pre_start has created the child instead of a fixed sleep.
+    helpers::assert_eventually(
+        "child created by parent pre_start",
+        Duration::from_secs(2),
+        || async {
+            system
+                .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
+                .await
+                .ok()
+        },
+    )
+    .await;
 
     let child_actor = system
         .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
         .await
         .unwrap();
 
-    let child_sub = CollectingChildSubscriber::new();
-    let mut sink = Sink::new("child_events", None).expect("valid sink");
-    sink.add("sub1", child_sub.clone());
-    child_actor.register_sink(sink);
+    let child_probe = TestProbe::<ChildEvent>::new();
+    let sink = child_actor
+        .register_sink("child_events", None)
+        .expect("valid sink");
+    sink.add("sub1", child_probe.clone());
 
     parent_ref.tell(TestCommand::Increment(10)).await.unwrap();
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
     assert_eq!(response, TestResponse::State(10));
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    {
-        let events = child_sub.events.lock().await;
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, 10);
-        drop(events);
-    }
+    let first = child_probe
+        .expect_msg(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(first.0, 10);
     let response = child_actor.ask(ChildCommand::GetState).await.unwrap();
     assert_eq!(response, ChildResponse::State(10));
 
@@ -318,84 +282,102 @@ async fn test_actor() {
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
     assert_eq!(response, TestResponse::State(8));
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    {
-        let events = child_sub.events.lock().await;
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[1].0, 8);
-        drop(events);
-    }
+    let second = child_probe
+        .expect_msg(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(second.0, 8);
     let response = child_actor.ask(ChildCommand::GetState).await.unwrap();
     assert_eq!(response, ChildResponse::State(8));
+
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_actor_error() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move {
-        runner.run().await;
-    });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent = TestActor { state: 0 };
     let parent_ref = system.create_root_actor("parent", parent).await.unwrap();
 
-    let parent_sub = CollectingParentSubscriber::new();
-    let mut sink = Sink::new("parent_events", None).expect("valid sink");
-    sink.add("sub1", parent_sub.clone());
-    parent_ref.register_sink(sink);
+    let parent_probe = TestProbe::<TestEvent>::new();
+    let sink = parent_ref
+        .register_sink("parent_events", None)
+        .expect("valid sink");
+    sink.add("sub1", parent_probe.clone());
 
     parent_ref.tell(TestCommand::Increment(50)).await.unwrap();
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
     assert_eq!(response, TestResponse::State(50));
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let evt = parent_probe
+        .expect_msg(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(evt.0, 0);
 
-    {
-        let events = parent_sub.events.lock().await;
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, 0);
-        drop(events);
-    }
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_actor_fault() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move {
-        runner.run().await;
-    });
+    let harness = TestSystem::start();
+    let system = harness.system();
     let parent = TestActor { state: 0 };
     let parent_ref = system.create_root_actor("parent", parent).await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    helpers::assert_eventually(
+        "child created by parent pre_start",
+        Duration::from_secs(2),
+        || async {
+            system
+                .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
+                .await
+                .ok()
+        },
+    )
+    .await;
     let child_ref = system
         .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
         .await;
     assert!(child_ref.is_ok());
 
-    let parent_sub = CollectingParentSubscriber::new();
-    let mut sink = Sink::new("parent_events", None).expect("valid sink");
-    sink.add("sub1", parent_sub.clone());
-    parent_ref.register_sink(sink);
+    let parent_probe = TestProbe::<TestEvent>::new();
+    let sink = parent_ref
+        .register_sink("parent_events", None)
+        .expect("valid sink");
+    sink.add("sub1", parent_probe.clone());
 
     parent_ref.tell(TestCommand::Increment(110)).await.unwrap();
     let response = parent_ref.ask(TestCommand::GetState).await.unwrap();
     assert_eq!(response, TestResponse::State(110));
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let evt = parent_probe
+        .expect_msg(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(evt.0, 100);
 
-    {
-        let events = parent_sub.events.lock().await;
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, 100);
-        drop(events);
-    }
-
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    helpers::assert_eventually(
+        "faulted child is removed",
+        Duration::from_secs(2),
+        || async {
+            if system
+                .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
+                .await
+                .is_err()
+            {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
     let child_ref = system
         .get_actor::<ChildActor>(&ActorPath::from("/user/parent/child"))
         .await;
     assert!(child_ref.is_err());
+
+    harness.shutdown().await;
 }

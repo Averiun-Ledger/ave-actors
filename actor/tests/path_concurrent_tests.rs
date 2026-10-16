@@ -2,14 +2,13 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler,
-    Message, Response,
+    Actor, ActorContext, ActorPath, Error, Event, Handler, Message, Response,
+    TestSystem,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use test_log::test;
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 // Test ActorPath edge cases
@@ -240,9 +239,8 @@ impl Handler<Self> for ConcurrentActor {
 // Test concurrent message handling
 #[test(tokio::test)]
 async fn test_concurrent_message_handling() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = ConcurrentActor::new();
     let actor_ref =
@@ -274,8 +272,8 @@ async fn test_concurrent_message_handling() {
         handle.await.unwrap();
     }
 
-    // Give time for all messages to be processed
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // The `ask` below is queued after all tells (FIFO mailbox), so it
+    // synchronizes with their processing: no sleep needed.
 
     // The counter should be 0 (5 increments - 5 decrements)
     let response = actor_ref.ask(ConcurrentMessage::GetCounter).await.unwrap();
@@ -284,14 +282,14 @@ async fn test_concurrent_message_handling() {
     } else {
         panic!("Expected counter response");
     }
+    harness.shutdown().await;
 }
 
 // Test multiple actors communicating
 #[test(tokio::test)]
 async fn test_multiple_actor_communication() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     // Create parent actor
     let parent = ConcurrentActor::new();
@@ -307,8 +305,8 @@ async fn test_multiple_actor_communication() {
         .await
         .unwrap();
 
-    // Wait for children to be created
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    // Both creates above used `ask`, which already synchronizes with child
+    // creation: no sleep needed.
 
     // Send messages to children through parent
     parent_ref
@@ -352,6 +350,7 @@ async fn test_multiple_actor_communication() {
             assert!(messages.contains(&"Hello child2".to_string()));
         }
     }
+    harness.shutdown().await;
 }
 
 // Test event subscription with multiple subscribers
@@ -359,9 +358,8 @@ async fn test_multiple_actor_communication() {
 // Test actor lifecycle with rapid creation/destruction
 #[test(tokio::test)]
 async fn test_rapid_actor_lifecycle() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     // Rapidly create and destroy actors
     for i in 0..10 {
@@ -373,11 +371,8 @@ async fn test_rapid_actor_lifecycle() {
         // Send a message to ensure it's fully initialized
         actor_ref.ask(ConcurrentMessage::GetCounter).await.unwrap();
 
-        // Stop the actor
+        // Stop the actor (`ask_stop` waits for shutdown confirmation).
         actor_ref.ask_stop().await.unwrap();
-
-        // Small delay to allow cleanup
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
     // System should still be functional
@@ -391,14 +386,14 @@ async fn test_rapid_actor_lifecycle() {
     if let ConcurrentResponse::Counter(count) = response {
         assert_eq!(count, 0);
     }
+    harness.shutdown().await;
 }
 
 // Test error handling in concurrent scenarios
 #[test(tokio::test)]
 async fn test_concurrent_error_handling() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent = ConcurrentActor::new();
     let parent_ref = system
@@ -421,14 +416,14 @@ async fn test_concurrent_error_handling() {
     } else {
         panic!("Expected functional error");
     }
+    harness.shutdown().await;
 }
 
 // Test system shutdown with active actors
 #[test(tokio::test)]
 async fn test_system_shutdown_with_active_actors() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     // Create multiple actors
     let mut actor_refs = Vec::new();
@@ -446,15 +441,9 @@ async fn test_system_shutdown_with_active_actors() {
         actor_ref.tell(ConcurrentMessage::Increment).await.unwrap();
     }
 
-    // Wait a bit for messages to be processed
+    // timing: pacing pause so the actors pick up their messages and are
+    // busy when the system shutdown runs through them.
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-    // Stop the system
-    system.stop_system();
-
-    // Wait for runner to finish
-    tokio::time::timeout(tokio::time::Duration::from_secs(5), runner_handle)
-        .await
-        .expect("System should shutdown within timeout")
-        .expect("Runner should complete successfully");
+    harness.shutdown().await;
 }

@@ -3,9 +3,9 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error, Event, Handler,
-    Message, Response, Sink, SinkEntry, Strategy, Subscriber,
-    SupervisionStrategy,
+    Actor, ActorContext, ActorPath, Error, Event, Handler, Message, Response,
+    RetryPolicy, SinkEntry, Strategy, Subscriber, SupervisionStrategy,
+    TestProbe, TestSystem,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -13,8 +13,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use test_log::test;
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
+
+mod helpers;
 
 // ============================================================================
 // Helpers
@@ -26,6 +27,7 @@ struct TestEvent {
 }
 
 impl Event for TestEvent {}
+impl Message for TestEvent {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum TestMsg {
@@ -83,36 +85,6 @@ impl Handler<Self> for EmitterActor {
 }
 
 #[derive(Clone)]
-struct CollectingSubscriber {
-    events: Arc<Mutex<Vec<TestEvent>>>,
-}
-
-impl CollectingSubscriber {
-    fn new() -> Self {
-        Self {
-            events: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    async fn drain(&self) -> Vec<TestEvent> {
-        let mut lock = self.events.lock().await;
-        std::mem::take(&mut *lock)
-    }
-
-    async fn clone_events(&self) -> Vec<TestEvent> {
-        self.events.lock().await.clone()
-    }
-}
-
-#[async_trait]
-impl Subscriber<TestEvent> for CollectingSubscriber {
-    async fn notify(&self, event: Arc<TestEvent>) -> Result<(), Error> {
-        self.events.lock().await.push((*event).clone());
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
 struct SlowSubscriber {
     delay_ms: u64,
 }
@@ -120,6 +92,7 @@ struct SlowSubscriber {
 #[async_trait]
 impl Subscriber<TestEvent> for SlowSubscriber {
     async fn notify(&self, _event: Arc<TestEvent>) -> Result<(), Error> {
+        // timing: simulates a slow subscriber for the parallel-dispatch test.
         tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
         Ok(())
     }
@@ -160,34 +133,26 @@ impl Subscriber<TestEvent> for FailingThenOkSubscriber {
 
 #[test(tokio::test)]
 async fn test_external_sink_registration() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("emitter", EmitterActor)
         .await
         .unwrap();
 
-    let subscriber = CollectingSubscriber::new();
-    let mut sink = Sink::new("ext_sink", None).expect("valid sink");
-    sink.add("sub1", subscriber.clone());
-    actor_ref.register_sink(sink);
+    let probe = TestProbe::<TestEvent>::new();
+    let sink = actor_ref
+        .register_sink("ext_sink", None)
+        .expect("valid sink");
+    sink.add("sub1", probe.clone());
 
     actor_ref.tell(TestMsg::Emit(42)).await.unwrap();
 
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let evts = subscriber.drain().await;
-            if !evts.is_empty() {
-                assert_eq!(evts[0].id, 42);
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("subscriber should receive event");
+    let evt = probe.expect_msg(Duration::from_secs(2)).await.unwrap();
+    assert_eq!(evt.id, 42);
+
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
@@ -243,63 +208,54 @@ async fn test_sink_survives_restart() {
         }
     }
 
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("failing_emitter", FailingEmitter)
         .await
         .unwrap();
 
-    let subscriber = CollectingSubscriber::new();
-    let mut sink = Sink::new("survivor", None).expect("valid sink");
-    sink.add("sub1", subscriber.clone());
-    actor_ref.register_sink(sink);
+    let probe = TestProbe::<TestEvent>::new();
+    let sink = actor_ref
+        .register_sink("survivor", None)
+        .expect("valid sink");
+    sink.add("sub1", probe.clone());
 
     // First message triggers a failure, actor restarts.
     let _ = actor_ref.tell(TestMsg::Emit(1)).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Second message should still reach the *same* sink.
     let _ = actor_ref.tell(TestMsg::Emit(2)).await;
 
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let evts = subscriber.clone_events().await;
-            if evts.len() >= 2 {
-                assert_eq!(evts[0].id, 1);
-                assert_eq!(evts[1].id, 2);
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("both events should be received across restart");
+    let evts = probe.expect_count(2, Duration::from_secs(2)).await.unwrap();
+    assert_eq!(evts[0].id, 1);
+    assert_eq!(evts[1].id, 2);
+
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_parallel_dispatch() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("parallel", EmitterActor)
         .await
         .unwrap();
 
-    let mut sink = Sink::new("parallel_sink", None).expect("valid sink");
+    let sink = actor_ref
+        .register_sink("parallel_sink", None)
+        .expect("valid sink");
     sink.add("slow1", SlowSubscriber { delay_ms: 200 });
     sink.add("slow2", SlowSubscriber { delay_ms: 200 });
     sink.add("slow3", SlowSubscriber { delay_ms: 200 });
-    actor_ref.register_sink(sink);
 
     let start = Instant::now();
     actor_ref.tell(TestMsg::Emit(1)).await.unwrap();
 
-    // Wait a bit for dispatch to complete.
+    // timing: fixed wait to measure wall-clock parallel dispatch speed.
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     let elapsed = start.elapsed();
@@ -308,6 +264,8 @@ async fn test_parallel_dispatch() {
         "parallel dispatch should be faster than sequential ({:?})",
         elapsed
     );
+
+    harness.shutdown().await;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -355,36 +313,42 @@ impl Handler<Self> for FilteredActor {
 
 #[test(tokio::test)]
 async fn test_publish_filtered() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("filtered", FilteredActor)
         .await
         .unwrap();
 
-    let audit_sub = CollectingSubscriber::new();
-    let metrics_sub = CollectingSubscriber::new();
+    let audit_probe = TestProbe::<TestEvent>::new();
+    let metrics_probe = TestProbe::<TestEvent>::new();
 
-    let mut audit_sink = Sink::new("audit", None).expect("valid sink");
-    audit_sink.add("sub1", audit_sub.clone());
-    actor_ref.register_sink(audit_sink);
+    let audit_sink =
+        actor_ref.register_sink("audit", None).expect("valid sink");
+    audit_sink.add("sub1", audit_probe.clone());
 
-    let mut metrics_sink = Sink::new("metrics", None).expect("valid sink");
-    metrics_sink.add("sub1", metrics_sub.clone());
-    actor_ref.register_sink(metrics_sink);
+    let metrics_sink = actor_ref
+        .register_sink("metrics", None)
+        .expect("valid sink");
+    metrics_sink.add("sub1", metrics_probe.clone());
 
     actor_ref.tell(FilteredMsg).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let audit_evts = audit_sub.drain().await;
-    let metrics_evts = metrics_sub.drain().await;
+    let audit_evts = audit_probe
+        .expect_count(1, Duration::from_secs(2))
+        .await
+        .unwrap();
 
     assert_eq!(audit_evts.len(), 1);
     assert_eq!(audit_evts[0].id, 99);
-    assert!(metrics_evts.is_empty());
+    metrics_probe
+        .expect_no_msg(Duration::from_millis(200))
+        .await
+        .unwrap();
+    assert!(metrics_probe.drain().is_empty());
+
+    harness.shutdown().await;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,85 +394,95 @@ impl Handler<Self> for NoopActor {
 
 #[test(tokio::test)]
 async fn test_publish_to_missing_sink_is_noop() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system.create_root_actor("noop", NoopActor).await.unwrap();
 
-    actor_ref.tell(NoopMsg).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // `ask` already synchronizes with message processing, no sleep needed.
+    actor_ref.ask(NoopMsg).await.unwrap();
 
     // Should not panic or error.
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_sink_entry_filter() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("filter", EmitterActor)
         .await
         .unwrap();
 
-    let all_sub = CollectingSubscriber::new();
-    let high_sub = CollectingSubscriber::new();
+    let all_probe = TestProbe::<TestEvent>::new();
+    let high_probe = TestProbe::<TestEvent>::new();
 
-    let mut sink = Sink::new("filter_sink", None).expect("valid sink");
-    sink.add("all", all_sub.clone());
+    let sink = actor_ref
+        .register_sink("filter_sink", None)
+        .expect("valid sink");
+    sink.add("all", all_probe.clone());
     sink.add_entry(
-        SinkEntry::new("high", high_sub.clone())
+        SinkEntry::new("high", high_probe.clone())
             .filter(|e: &TestEvent| e.id > 5),
     );
-    actor_ref.register_sink(sink);
 
     actor_ref.tell(TestMsg::Emit(3)).await.unwrap();
     actor_ref.tell(TestMsg::Emit(7)).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let all_evts = all_sub.drain().await;
-    let high_evts = high_sub.drain().await;
+    let all_evts = all_probe
+        .expect_count(2, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let high_evts = high_probe
+        .expect_count(1, Duration::from_secs(2))
+        .await
+        .unwrap();
 
     assert_eq!(all_evts.len(), 2);
     assert_eq!(high_evts.len(), 1);
     assert_eq!(high_evts[0].id, 7);
+
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_remove_sink() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("removable", EmitterActor)
         .await
         .unwrap();
 
-    let subscriber = CollectingSubscriber::new();
-    let mut sink = Sink::new("tmp", None).expect("valid sink");
-    sink.add("sub1", subscriber.clone());
-    actor_ref.register_sink(sink);
+    let probe = TestProbe::<TestEvent>::new();
+    let sink = actor_ref.register_sink("tmp", None).expect("valid sink");
+    sink.add("sub1", probe.clone());
 
     actor_ref.tell(TestMsg::Emit(1)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(subscriber.drain().await.len(), 1);
+    let first = probe.expect_count(1, Duration::from_secs(2)).await.unwrap();
+    assert_eq!(first.len(), 1);
 
     actor_ref.remove_sink("tmp");
 
-    actor_ref.tell(TestMsg::Emit(2)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(subscriber.drain().await.is_empty());
+    // `ask` synchronizes with processing of Emit(2); the removed sink must
+    // then stay empty without any extra sleep.
+    actor_ref.ask(TestMsg::Emit(2)).await.unwrap();
+    probe
+        .expect_no_msg(Duration::from_millis(200))
+        .await
+        .unwrap();
+    assert!(probe.drain().is_empty());
+
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
 async fn test_retry_policy_delivers_after_failures() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("retry", EmitterActor)
@@ -516,7 +490,9 @@ async fn test_retry_policy_delivers_after_failures() {
         .unwrap();
 
     let subscriber = FailingThenOkSubscriber::new(2);
-    let mut sink = Sink::new("retry_sink", None).expect("valid sink");
+    let sink = actor_ref
+        .register_sink("retry_sink", None)
+        .expect("valid sink");
     sink.add_entry(
         SinkEntry::new("fragile", subscriber.clone())
             .retry(ave_actors_actor::RetryPolicy::AtMost {
@@ -525,15 +501,24 @@ async fn test_retry_policy_delivers_after_failures() {
             })
             .expect("valid retry policy"),
     );
-    actor_ref.register_sink(sink);
 
     actor_ref.tell(TestMsg::Emit(100)).await.unwrap();
 
-    // Wait for retries (2 failures * 10ms + margin).
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Poll the retry counter instead of waiting a fixed 100ms.
+    helpers::assert_eventually(
+        "subscriber succeeds after retries",
+        Duration::from_secs(2),
+        || async {
+            if subscriber.fail_count.load(Ordering::SeqCst) == 3 {
+                Some(())
+            } else {
+                None
+            }
+        },
+    )
+    .await;
 
-    // The subscriber should have succeeded on the 3rd attempt.
-    assert_eq!(subscriber.fail_count.load(Ordering::SeqCst), 3);
+    harness.shutdown().await;
 }
 
 // ============================================================================
@@ -585,25 +570,22 @@ impl Handler<Self> for RoutingActor {
 
 #[test(tokio::test)]
 async fn test_actor_routes_to_named_sink() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("router", RoutingActor)
         .await
         .unwrap();
 
-    let sink_a_sub = CollectingSubscriber::new();
-    let sink_b_sub = CollectingSubscriber::new();
+    let sink_a_probe = TestProbe::<TestEvent>::new();
+    let sink_b_probe = TestProbe::<TestEvent>::new();
 
-    let mut sink_a = Sink::new("sink_a", None).expect("valid sink");
-    sink_a.add("sub", sink_a_sub.clone());
-    actor_ref.register_sink(sink_a);
+    let sink_a = actor_ref.register_sink("sink_a", None).expect("valid sink");
+    sink_a.add("sub", sink_a_probe.clone());
 
-    let mut sink_b = Sink::new("sink_b", None).expect("valid sink");
-    sink_b.add("sub", sink_b_sub.clone());
-    actor_ref.register_sink(sink_b);
+    let sink_b = actor_ref.register_sink("sink_b", None).expect("valid sink");
+    sink_b.add("sub", sink_b_probe.clone());
 
     actor_ref
         .tell(RouteMsg {
@@ -613,14 +595,20 @@ async fn test_actor_routes_to_named_sink() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let a_evts = sink_a_sub.drain().await;
-    let b_evts = sink_b_sub.drain().await;
+    let a_evts = sink_a_probe
+        .expect_count(1, Duration::from_secs(2))
+        .await
+        .unwrap();
 
     assert_eq!(a_evts.len(), 1);
     assert_eq!(a_evts[0].id, 42);
-    assert!(b_evts.is_empty());
+    sink_b_probe
+        .expect_no_msg(Duration::from_millis(200))
+        .await
+        .unwrap();
+    assert!(sink_b_probe.drain().is_empty());
+
+    harness.shutdown().await;
 }
 
 #[derive(Clone)]
@@ -637,65 +625,315 @@ impl Subscriber<TestEvent> for FailingSubscriber {
 
 #[test(tokio::test)]
 async fn test_one_subscriber_fails_others_ok() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor("fanout", EmitterActor)
         .await
         .unwrap();
 
-    let ok_sub_a = CollectingSubscriber::new();
-    let ok_sub_b = CollectingSubscriber::new();
-    let failing_sub = CollectingSubscriber::new();
+    let ok_probe_a = TestProbe::<TestEvent>::new();
+    let ok_probe_b = TestProbe::<TestEvent>::new();
 
-    let mut sink = Sink::new("fanout_sink", None).expect("valid sink");
-    sink.add("ok_a", ok_sub_a.clone());
+    let sink = actor_ref
+        .register_sink("fanout_sink", None)
+        .expect("valid sink");
+    sink.add("ok_a", ok_probe_a.clone());
     sink.add("failing", FailingSubscriber);
-    sink.add("ok_b", ok_sub_b.clone());
-    actor_ref.register_sink(sink);
+    sink.add("ok_b", ok_probe_b.clone());
 
     actor_ref.tell(TestMsg::Emit(77)).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     // Both ok subscribers should have received the event.
-    assert_eq!(ok_sub_a.drain().await.len(), 1);
-    assert_eq!(ok_sub_b.drain().await.len(), 1);
-    // The failing subscriber never stores anything (it errors immediately).
-    assert!(failing_sub.drain().await.is_empty());
+    let a_evts = ok_probe_a
+        .expect_count(1, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let b_evts = ok_probe_b
+        .expect_count(1, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(a_evts.len(), 1);
+    assert_eq!(b_evts.len(), 1);
+
+    harness.shutdown().await;
 }
 
 #[test(tokio::test)]
-async fn test_sink_entry_remove_and_clear() {
-    let sub_a = CollectingSubscriber::new();
-    let sub_b = CollectingSubscriber::new();
-    let sub_c = CollectingSubscriber::new();
+async fn test_register_sink_with_buffer_delivers_events() {
+    let harness = TestSystem::start();
+    let system = harness.system();
 
-    let mut sink = Sink::new("mutable_sink", None).expect("valid sink");
-    sink.add("a", sub_a.clone());
-    sink.add("b", sub_b.clone());
-    sink.add("c", sub_c.clone());
+    let actor_ref = system
+        .create_root_actor("buffered_emitter", EmitterActor)
+        .await
+        .unwrap();
 
-    // Remove entry "b".
-    let removed = sink.remove_entry("b");
-    assert!(removed.is_some());
-    assert_eq!(removed.unwrap().id, "b");
-    assert!(sink.remove_entry("b").is_none());
+    let probe = TestProbe::<TestEvent>::new();
+    let sink = actor_ref
+        .register_sink_with_buffer("buffered_sink", None, 8)
+        .expect("valid sink");
+    sink.add("sub1", probe.clone());
 
-    sink.send(Arc::new(TestEvent { id: 1 }));
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    actor_ref.tell(TestMsg::Emit(7)).await.unwrap();
 
-    assert_eq!(sub_a.drain().await.len(), 1);
-    assert_eq!(sub_b.drain().await.len(), 0); // removed
-    assert_eq!(sub_c.drain().await.len(), 1);
+    let evt = probe.expect_msg(Duration::from_secs(2)).await.unwrap();
+    assert_eq!(evt.id, 7);
 
-    // Clear all remaining entries.
-    sink.clear();
-    sink.send(Arc::new(TestEvent { id: 2 }));
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    harness.shutdown().await;
+}
 
-    assert_eq!(sub_a.drain().await.len(), 0);
-    assert_eq!(sub_c.drain().await.len(), 0);
+#[test(tokio::test)]
+async fn test_register_sink_with_buffer_rejects_zero_capacity() {
+    let harness = TestSystem::start();
+    let system = harness.system();
+
+    let actor_ref = system
+        .create_root_actor("buffered_emitter_zero", EmitterActor)
+        .await
+        .unwrap();
+
+    // A zero-capacity buffer is an invalid configuration.
+    let result = actor_ref.register_sink_with_buffer("bad_sink", None, 0);
+    assert!(matches!(result, Err(Error::InvalidConfiguration { .. })));
+
+    harness.shutdown().await;
+}
+
+#[test(tokio::test)]
+async fn test_panicking_filter_does_not_kill_sink() {
+    use ave_actors_actor::SinkEntry;
+
+    let harness = TestSystem::start();
+    let system = harness.system();
+
+    let actor_ref = system
+        .create_root_actor("panic_filter", EmitterActor)
+        .await
+        .unwrap();
+
+    let ok_probe = TestProbe::<TestEvent>::new();
+    let panicker_probe = TestProbe::<TestEvent>::new();
+    let sink = actor_ref
+        .register_sink("panic_sink", None)
+        .expect("valid sink");
+    sink.add("ok", ok_probe.clone());
+    sink.add_entry(
+        SinkEntry::new("panicker", panicker_probe.clone())
+            .filter(|_: &TestEvent| panic!("intentional filter panic")),
+    );
+
+    actor_ref.tell(TestMsg::Emit(1)).await.unwrap();
+    actor_ref.tell(TestMsg::Emit(2)).await.unwrap();
+
+    let evts = ok_probe
+        .expect_count(2, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(evts.len(), 2);
+
+    harness.shutdown().await;
+}
+
+#[derive(Clone)]
+struct BlockedSubscriber {
+    release: Arc<tokio::sync::Notify>,
+    armed: Arc<AtomicU32>,
+}
+
+#[async_trait]
+impl Subscriber<TestEvent> for BlockedSubscriber {
+    async fn notify(&self, _event: Arc<TestEvent>) -> Result<(), Error> {
+        // Block exactly once (first event); later events pass through so
+        // shutdown drains promptly after a single release.
+        if self.armed.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
+#[test(tokio::test)]
+async fn test_slow_subscriber_does_not_block_fast_subscriber() {
+    let harness = TestSystem::start();
+    let system = harness.system();
+
+    let actor_ref = system
+        .create_root_actor("holb_emitter", EmitterActor)
+        .await
+        .unwrap();
+
+    let fast_probe = TestProbe::<TestEvent>::new();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let sink = actor_ref
+        .register_sink("holb_sink", None)
+        .expect("valid sink");
+    sink.add(
+        "blocked",
+        BlockedSubscriber {
+            release: Arc::clone(&release),
+            armed: Arc::new(AtomicU32::new(0)),
+        },
+    );
+    sink.add("fast", fast_probe.clone());
+
+    // The blocked subscriber never finishes event 1 during the test; the
+    // fast subscriber must still receive every event (no head-of-line
+    // blocking across subscribers).
+    actor_ref.tell(TestMsg::Emit(1)).await.unwrap();
+    actor_ref.tell(TestMsg::Emit(2)).await.unwrap();
+    actor_ref.tell(TestMsg::Emit(3)).await.unwrap();
+
+    let evts = fast_probe
+        .expect_count(3, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(evts.len(), 3);
+
+    release.notify_waiters();
+    actor_ref.ask_stop().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[test(tokio::test)]
+async fn test_retry_preserves_per_subscriber_order() {
+    #[derive(Clone)]
+    struct FlakyRecorder {
+        events: Arc<Mutex<Vec<u32>>>,
+        fails_left: Arc<AtomicU32>,
+    }
+
+    #[async_trait]
+    impl Subscriber<TestEvent> for FlakyRecorder {
+        async fn notify(&self, event: Arc<TestEvent>) -> Result<(), Error> {
+            // The pump delivers sequentially per subscriber, so a plain
+            // load/sub pair is race-free here.
+            if self.fails_left.load(Ordering::SeqCst) > 0 {
+                self.fails_left.fetch_sub(1, Ordering::SeqCst);
+                return Err(Error::Functional {
+                    description: "flaky failure".to_owned(),
+                });
+            }
+            self.events.lock().await.push(event.id);
+            Ok(())
+        }
+    }
+
+    let harness = TestSystem::start();
+    let system = harness.system();
+
+    let actor_ref = system
+        .create_root_actor("order_emitter", EmitterActor)
+        .await
+        .unwrap();
+
+    // Fails the first 2 deliveries, then records: event 1 needs retries
+    // while events 2-3 wait behind it in the same pump. Order must hold.
+    let recorder = FlakyRecorder {
+        events: Arc::new(Mutex::new(Vec::new())),
+        fails_left: Arc::new(AtomicU32::new(2)),
+    };
+    let sink = actor_ref
+        .register_sink("order_sink", None)
+        .expect("valid sink");
+    sink.add_entry(
+        SinkEntry::new("flaky", recorder.clone())
+            .retry(RetryPolicy::AtMost {
+                max: 2,
+                backoff: Duration::from_millis(10),
+            })
+            .expect("valid retry policy"),
+    );
+
+    actor_ref.tell(TestMsg::Emit(1)).await.unwrap();
+    actor_ref.tell(TestMsg::Emit(2)).await.unwrap();
+    actor_ref.tell(TestMsg::Emit(3)).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let ids = recorder.events.lock().await.clone();
+            if ids.len() >= 3 {
+                assert_eq!(ids, vec![1, 2, 3]);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("subscriber must receive retried events in order");
+
+    actor_ref.ask_stop().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_add_remove_during_slow_filter() {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let entered = Arc::new(AtomicBool::new(false));
+
+    let harness = TestSystem::start();
+    let system = harness.system();
+
+    let actor_ref = system
+        .create_root_actor("filter_block", EmitterActor)
+        .await
+        .unwrap();
+
+    let mut sink = actor_ref
+        .register_sink("filter_sink", None)
+        .expect("valid sink");
+    {
+        let entered_filter = Arc::clone(&entered);
+        let release_filter = Arc::clone(&release_rx);
+        let slow_probe = TestProbe::<TestEvent>::new();
+        sink.add_entry(SinkEntry::new("slow_filter", slow_probe).filter(
+            move |_: &TestEvent| {
+                entered_filter.store(true, Ordering::SeqCst);
+                // Park the dispatcher inside user filter code.
+                // timing: busy-park keeps the dispatcher inside the
+                // filter so add/remove must proceed concurrently.
+                while release_filter.lock().unwrap().try_recv().is_err() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                true
+            },
+        ));
+    }
+
+    actor_ref.tell(TestMsg::Emit(1)).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !entered.load(Ordering::SeqCst) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "dispatcher never reached the filter"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // timing: brief pacing pause so the dispatcher parks inside the slow
+    // filter before management ops run against it.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Management operations must not block behind user filter code.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::task::spawn_blocking(move || {
+            sink.add("late", TestProbe::<TestEvent>::new());
+            sink.remove_entry("slow_filter");
+        })
+        .await
+        .expect("management ops must not block on a slow filter");
+    })
+    .await
+    .expect("add/remove must complete while a filter is slow");
+
+    let _ = release_tx.send(());
+    actor_ref.ask_stop().await.unwrap();
+    harness.shutdown().await;
 }

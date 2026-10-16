@@ -4,7 +4,7 @@ version = "0.5.0"
 edition.workspace = true
 authors.workspace = true
 description.workspace = true
-readme = "README.md"
+readme.workspace = true
 homepage.workspace = true
 repository.workspace = true
 license.workspace = true
@@ -12,14 +12,20 @@ keywords.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-rocksdb = { version = "0.24.0", features = ["multi-threaded-cf"] }
 ave-actors-store = { workspace = true }
-tracing = {workspace = true }
+rocksdb = { version = "0.25.0", features = ["multi-threaded-cf"], optional = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
-ave-actors-rocksdb = { path = ".", features = ["rocksdb"]}
-tempfile = {workspace = true }
+ave-actors-rocksdb = { path = ".", features = ["rocksdb"] }
+ave-actors-store = { workspace = true }
+criterion = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "backend"
+harness = false
 
 [features]
-rocksdb = []
-export-rocksdb = []
+rocksdb = ["dep:rocksdb"]
+export-rocksdb = ["rocksdb"]

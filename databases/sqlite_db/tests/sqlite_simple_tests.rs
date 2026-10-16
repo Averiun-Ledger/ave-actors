@@ -3,7 +3,7 @@
 use ave_actors_sqlite::SqliteManager;
 use ave_actors_store::{
     Error,
-    database::{Collection, DbManager, State},
+    database::{Collection, DbManager, Durability, State},
 };
 use rusqlite::Connection;
 use tempfile::tempdir;
@@ -12,7 +12,8 @@ use tempfile::tempdir;
 fn test_sqlite_manager_edge_cases() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test");
-    let manager = SqliteManager::new(&db_path, false, None).unwrap();
+    let manager =
+        SqliteManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     // Test collection operations
     let mut collection = manager.create_collection("test", "prefix").unwrap();
@@ -34,30 +35,27 @@ fn test_sqlite_manager_edge_cases() {
     assert!(result.is_err());
 
     let result = Collection::del(&mut collection, "non-existent");
-    assert_eq!(
+    assert!(matches!(
         result,
-        Err(Error::EntryNotFound {
-            key: "prefix.non-existent".to_owned(),
-        })
-    );
+        Err(Error::EntryNotFound { key }) if key == "prefix.non-existent"
+    ));
 }
 
 #[test]
 fn test_sqlite_state_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("state_test");
-    let manager = SqliteManager::new(&db_path, false, None).unwrap();
+    let manager =
+        SqliteManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     let mut state = manager.create_state("state", "prefix").unwrap();
 
     // Test get empty state
     let result = State::get(&state);
-    assert_eq!(
+    assert!(matches!(
         result,
-        Err(Error::EntryNotFound {
-            key: "prefix".to_owned(),
-        })
-    );
+        Err(Error::EntryNotFound { key }) if key == "prefix"
+    ));
 
     // Test put/get
     State::put(&mut state, b"state_data").unwrap();
@@ -67,27 +65,24 @@ fn test_sqlite_state_operations() {
     // Test delete
     State::del(&mut state).unwrap();
     let result = State::get(&state);
-    assert_eq!(
+    assert!(matches!(
         result,
-        Err(Error::EntryNotFound {
-            key: "prefix".to_owned(),
-        })
-    );
+        Err(Error::EntryNotFound { key }) if key == "prefix"
+    ));
 
     let result = State::del(&mut state);
-    assert_eq!(
+    assert!(matches!(
         result,
-        Err(Error::EntryNotFound {
-            key: "prefix".to_owned(),
-        })
-    );
+        Err(Error::EntryNotFound { key }) if key == "prefix"
+    ));
 }
 
 #[test]
 fn test_sqlite_iteration() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("iteration");
-    let manager = SqliteManager::new(&db_path, false, None).unwrap();
+    let manager =
+        SqliteManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     let mut collection = manager.create_collection("iter", "prefix").unwrap();
 
@@ -125,7 +120,8 @@ fn test_sqlite_iteration() {
 fn test_sqlite_get_preserves_operational_errors() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("broken_get");
-    let manager = SqliteManager::new(&db_path, false, None).unwrap();
+    let manager =
+        SqliteManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     let state = manager.create_state("state_table", "prefix").unwrap();
     let collection = manager
@@ -154,24 +150,24 @@ fn test_sqlite_get_preserves_operational_errors() {
 fn test_sqlite_collection_get_reports_requested_key() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("missing_collection_key");
-    let manager = SqliteManager::new(&db_path, false, None).unwrap();
+    let manager =
+        SqliteManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     let collection = manager.create_collection("test", "prefix").unwrap();
     let result = Collection::get(&collection, "missing");
 
-    assert_eq!(
+    assert!(matches!(
         result,
-        Err(Error::EntryNotFound {
-            key: "prefix.missing".to_owned(),
-        })
-    );
+        Err(Error::EntryNotFound { key }) if key == "prefix.missing"
+    ));
 }
 
 #[test]
 fn test_sqlite_identifier_validation() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("identifier_validation");
-    let manager = SqliteManager::new(&db_path, false, None).unwrap();
+    let manager =
+        SqliteManager::new(&db_path, Durability::Relaxed, None).unwrap();
 
     manager
         .create_collection("valid_name_42", "prefix")

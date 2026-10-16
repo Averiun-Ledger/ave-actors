@@ -9,9 +9,6 @@ use thiserror::Error;
 pub enum StoreOperation {
     StoreInit,
     Persist,
-    PersistLight,
-    PersistFull,
-    PersistBatch,
     Snapshot,
     Recover,
     ApplyEvent,
@@ -19,18 +16,17 @@ pub enum StoreOperation {
     GetEventsRange,
     GetLatestEvents,
     ParseEventKey,
-    EmitPreStopError,
     EncodeEvent,
-    RollbackPersistLight,
     DecodeEvent,
     DecodeState,
+    EncodeMetadata,
+    DecodeMetadata,
     EncodeActor,
     ValidateKeyLength,
     EncryptData,
     DecryptKey,
     ValidateCiphertext,
     DecryptData,
-    Compact,
     LastEvent,
     Purge,
     Delete,
@@ -45,9 +41,10 @@ pub enum StoreOperation {
     ListCf,
     ColumnAccess,
     RocksdbOperation,
+    /// Failure creating a collection (event log) handle in a backend.
     CreateCollection,
+    /// Failure creating a state (snapshot) handle in a backend.
     CreateState,
-    Test,
 }
 
 impl fmt::Display for StoreOperation {
@@ -55,9 +52,6 @@ impl fmt::Display for StoreOperation {
         let value = match self {
             Self::StoreInit => "store_init",
             Self::Persist => "persist",
-            Self::PersistLight => "persist_light",
-            Self::PersistFull => "persist_full",
-            Self::PersistBatch => "persist_batch",
             Self::Snapshot => "snapshot",
             Self::Recover => "recover",
             Self::ApplyEvent => "apply_event",
@@ -65,18 +59,17 @@ impl fmt::Display for StoreOperation {
             Self::GetEventsRange => "get_events_range",
             Self::GetLatestEvents => "get_latest_events",
             Self::ParseEventKey => "parse_event_key",
-            Self::EmitPreStopError => "emit_prestop_error",
             Self::EncodeEvent => "encode_event",
-            Self::RollbackPersistLight => "rollback_persist_light",
             Self::DecodeEvent => "decode_event",
             Self::DecodeState => "decode_state",
+            Self::EncodeMetadata => "encode_metadata",
+            Self::DecodeMetadata => "decode_metadata",
             Self::EncodeActor => "encode_actor",
             Self::ValidateKeyLength => "validate_key_length",
             Self::EncryptData => "encrypt_data",
             Self::DecryptKey => "decrypt_key",
             Self::ValidateCiphertext => "validate_ciphertext",
             Self::DecryptData => "decrypt_data",
-            Self::Compact => "compact",
             Self::LastEvent => "last_event",
             Self::Purge => "purge",
             Self::Delete => "delete",
@@ -93,14 +86,17 @@ impl fmt::Display for StoreOperation {
             Self::RocksdbOperation => "rocksdb_operation",
             Self::CreateCollection => "create_collection",
             Self::CreateState => "create_state",
-            Self::Test => "test",
         };
         f.write_str(value)
     }
 }
 
 /// Error type for the store system.
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
+///
+/// Equality is intentionally not implemented: variants carry free-text
+/// reasons, so structural equality would be fragile. Match on variants
+/// with `matches!` instead.
+#[derive(Clone, Debug, Error)]
 pub enum Error {
     /// The store could not be created or initialized.
     ///
@@ -125,11 +121,17 @@ pub enum Error {
     /// `reason` contains the underlying error message.
     /// `source` optionally holds the original [`ActorError`] when the failure
     /// originated in actor logic (e.g. during recovery replay).
+    /// `code` carries an optional backend-specific numeric code (e.g. the
+    /// SQLite result code) so callers can distinguish transient failures
+    /// (retry) from corruption (abort) without parsing `reason`. It is `None`
+    /// when the backend provides no code or when the error originates above
+    /// the backend layer.
     #[error("store operation failed: {operation} - {reason}")]
     Store {
         operation: StoreOperation,
         reason: String,
         source: Option<ActorError>,
+        code: Option<i32>,
     },
 
     /// Invalid store or database configuration supplied by the user.

@@ -5,16 +5,22 @@
 //! then explicitly sends events to a sink by name and the sink distributes
 //! the event to every subscriber whose filter accepts it.
 
-use crate::{Error, Event};
+use crate::{ActorPath, Error, Event};
+
+#[cfg(feature = "prometheus")]
+use crate::metrics::{
+    SinkDetailLabels, SinkDropDetailLabels, SinkDropLabels, SinkLabels,
+};
+#[cfg(feature = "prometheus")]
+use prometheus_client::metrics::counter::Counter;
 
 use async_trait::async_trait;
 use std::{
-    sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
+use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 use tracing::{error, warn};
 
 /// Default number of subscribers notified concurrently by a [`Sink`].
@@ -168,10 +174,152 @@ impl<E: Event> SinkEntry<E> {
 
 struct SinkInner<E: Event> {
     name: String,
-    entries: RwLock<Vec<SinkEntry<E>>>,
-    max_concurrent: AtomicUsize,
+    #[cfg(feature = "prometheus")]
+    dropped_full_counter: Option<Counter>,
+    #[cfg(feature = "prometheus")]
+    dropped_closed_counter: Option<Counter>,
+    #[cfg(feature = "prometheus")]
+    delivery_failure_counter: Option<Counter>,
+    #[cfg(feature = "prometheus")]
+    dropped_full_detail: Option<Counter>,
+    #[cfg(feature = "prometheus")]
+    dropped_closed_detail: Option<Counter>,
+    #[cfg(feature = "prometheus")]
+    delivery_failure_detail: Option<Counter>,
+    entries: RwLock<Vec<ActiveSub<E>>>,
+    /// Shared cap on concurrent subscriber deliveries. Swapped wholesale
+    /// by `set_max_concurrent` so in-flight deliveries keep their permit.
+    semaphore: RwLock<Arc<Semaphore>>,
+    /// Per-channel buffer capacity: the dispatcher channel plus one queue
+    /// per subscriber pump. Queues hold `Arc<E>` (8 bytes each), so the
+    /// per-subscriber memory overhead is ~`capacity` pointers.
+    buffer_capacity: usize,
     sender: Mutex<Option<tokio::sync::mpsc::Sender<Arc<E>>>>,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// A subscriber entry with its dedicated delivery pump.
+///
+/// The pump owns the receiving end of a bounded queue and notifies its
+/// subscriber sequentially (preserving per-subscriber event order). A slow
+/// subscriber only fills its own queue; other pumps are unaffected, which
+/// removes the head-of-line blocking of a single shared worker.
+struct ActiveSub<E: Event> {
+    entry: SinkEntry<E>,
+    sender: tokio::sync::mpsc::Sender<Arc<E>>,
+    handle: JoinHandle<()>,
+}
+
+impl<E: Event> SinkInner<E> {
+    #[cfg(feature = "prometheus")]
+    fn inc_dropped_full(&self) {
+        if let Some(c) = &self.dropped_full_counter {
+            c.inc();
+        }
+        if let Some(c) = &self.dropped_full_detail {
+            c.inc();
+        }
+    }
+
+    #[cfg(feature = "prometheus")]
+    fn inc_dropped_closed(&self) {
+        if let Some(c) = &self.dropped_closed_counter {
+            c.inc();
+        }
+        if let Some(c) = &self.dropped_closed_detail {
+            c.inc();
+        }
+    }
+
+    #[cfg(feature = "prometheus")]
+    fn inc_delivery_failure(&self) {
+        if let Some(c) = &self.delivery_failure_counter {
+            c.inc();
+        }
+        if let Some(c) = &self.delivery_failure_detail {
+            c.inc();
+        }
+    }
+
+    #[cfg(not(feature = "prometheus"))]
+    const fn inc_dropped_full(&self) {}
+
+    #[cfg(not(feature = "prometheus"))]
+    const fn inc_dropped_closed(&self) {}
+
+    #[cfg(not(feature = "prometheus"))]
+    const fn inc_delivery_failure(&self) {}
+}
+
+/// Spawns the delivery pump for one subscriber.
+///
+/// The pump holds only a [`std::sync::Weak`] reference to the sink: when
+/// the sink is gone it drains nothing and exits, so pumps never keep a
+/// dropped sink alive.
+fn spawn_pump<E: Event>(
+    weak: std::sync::Weak<SinkInner<E>>,
+    mut receiver: tokio::sync::mpsc::Receiver<Arc<E>>,
+    entry: SinkEntry<E>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = receiver.recv().await {
+            let Some(inner) = weak.upgrade() else {
+                break;
+            };
+            let semaphore = inner
+                .semaphore
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let Ok(permit) = semaphore.acquire_owned().await else {
+                continue;
+            };
+            let _permit = permit;
+            let subscriber = entry.subscriber.clone();
+            let id = entry.id.clone();
+            let retry = entry.retry;
+            match retry {
+                RetryPolicy::None => {
+                    if let Err(err) = subscriber.notify(event).await {
+                        error!(
+                            subscriber = %id,
+                            sink = %inner.name,
+                            error = %err,
+                            "Subscriber failed"
+                        );
+                        inner.inc_delivery_failure();
+                    }
+                }
+                RetryPolicy::AtMost { max, backoff } => {
+                    for attempt in 0..=max {
+                        match subscriber.notify(Arc::clone(&event)).await {
+                            Ok(()) => break,
+                            Err(err) => {
+                                if attempt == max {
+                                    error!(
+                                        subscriber = %id,
+                                        sink = %inner.name,
+                                        error = %err,
+                                        attempts = max + 1,
+                                        "Subscriber exhausted retries"
+                                    );
+                                    inner.inc_delivery_failure();
+                                } else {
+                                    warn!(
+                                        subscriber = %id,
+                                        sink = %inner.name,
+                                        attempt = attempt + 1,
+                                        "Subscriber failed, retrying"
+                                    );
+                                    tokio::time::sleep(backoff).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Named sink that routes events to filtered subscribers.
@@ -203,32 +351,126 @@ impl<E: Event> Sink<E> {
     /// used. The internal event buffer uses [`DEFAULT_SINK_BUFFER_CAPACITY`]
     /// slots.
     ///
+    /// Sinks created directly through this constructor do not report
+    /// Prometheus metrics. Actors should use
+    /// [`ActorContext::register_sink`](crate::ActorContext::register_sink)
+    /// or [`crate::ActorRef::register_sink`] when metrics collection is required.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` is
     /// `Some(0)` or exceeds [`MAX_SINK_CONCURRENCY`].
-    pub fn new(
+    #[cfg(not(feature = "prometheus"))]
+    pub(crate) fn new(
         name: impl Into<String>,
         max_concurrent: Option<usize>,
     ) -> Result<Self, Error> {
-        Self::with_buffer(name, max_concurrent, DEFAULT_SINK_BUFFER_CAPACITY)
+        Self::with_buffer_inner(
+            name,
+            max_concurrent,
+            DEFAULT_SINK_BUFFER_CAPACITY,
+            None,
+            #[cfg(feature = "prometheus")]
+            None,
+        )
     }
 
     /// Create a new sink with the given name and event buffer capacity.
     ///
-    /// `max_concurrent` controls how many subscribers are notified
-    /// concurrently for a single event. If `None`, a default of 10 is used.
-    /// `buffer_capacity` sets the size of the internal bounded channel; it
-    /// must be between 1 and [`MAX_SINK_BUFFER_CAPACITY`].
+    /// `max_concurrent` caps concurrent subscriber deliveries across the
+    /// sink. If `None`, a default of 10 is used. `buffer_capacity` sizes
+    /// the dispatcher queue and every subscriber pump queue (each holds
+    /// `Arc` events, ~8 bytes per slot); it must be between 1 and
+    /// [`MAX_SINK_BUFFER_CAPACITY`]. A slow subscriber only fills its own
+    /// queue; other subscribers are unaffected.
+    ///
+    /// Sinks created directly through this constructor do not report
+    /// Prometheus metrics. Actors should use
+    /// [`ActorContext::register_sink_with_buffer`](crate::ActorContext::register_sink_with_buffer)
+    /// or [`crate::ActorRef::register_sink_with_buffer`] when metrics collection
+    /// is required.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfiguration`] if `max_concurrent` or
     /// `buffer_capacity` are out of range.
-    pub fn with_buffer(
+    #[cfg(not(feature = "prometheus"))]
+    pub(crate) fn with_buffer(
         name: impl Into<String>,
         max_concurrent: Option<usize>,
         buffer_capacity: usize,
+    ) -> Result<Self, Error> {
+        Self::with_buffer_inner(
+            name,
+            max_concurrent,
+            buffer_capacity,
+            None,
+            #[cfg(feature = "prometheus")]
+            None,
+        )
+    }
+
+    /// Create a new sink with metrics collection.
+    ///
+    /// This is the internal constructor used by the actor runtime when the
+    /// `prometheus` feature is enabled. External callers should use
+    /// [`Sink::new`] and register the sink through an actor handle or context
+    /// to obtain metrics.
+    #[cfg(feature = "prometheus")]
+    pub(crate) fn new_with_metrics(
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+        path: ActorPath,
+        actor_type: Arc<str>,
+        detailed: bool,
+        metrics: Option<Arc<crate::metrics::ActorMetrics>>,
+    ) -> Result<Self, Error> {
+        Self::with_buffer_inner(
+            name,
+            max_concurrent,
+            DEFAULT_SINK_BUFFER_CAPACITY,
+            Some(path),
+            actor_type,
+            detailed,
+            metrics,
+        )
+    }
+
+    /// Create a new sink with a custom buffer capacity and metrics collection.
+    ///
+    /// This is the internal constructor used by the actor runtime when the
+    /// `prometheus` feature is enabled.
+    #[cfg(feature = "prometheus")]
+    pub(crate) fn with_buffer_and_metrics(
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+        buffer_capacity: usize,
+        path: ActorPath,
+        actor_type: Arc<str>,
+        detailed: bool,
+        metrics: Option<Arc<crate::metrics::ActorMetrics>>,
+    ) -> Result<Self, Error> {
+        Self::with_buffer_inner(
+            name,
+            max_concurrent,
+            buffer_capacity,
+            Some(path),
+            actor_type,
+            detailed,
+            metrics,
+        )
+    }
+
+    fn with_buffer_inner(
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+        buffer_capacity: usize,
+        _path: Option<ActorPath>,
+        #[cfg(feature = "prometheus")] actor_type: Arc<str>,
+        #[cfg(feature = "prometheus")] detailed: bool,
+        #[cfg(feature = "prometheus")] metrics: Option<
+            Arc<crate::metrics::ActorMetrics>,
+        >,
     ) -> Result<Self, Error> {
         let name = name.into();
         let max_concurrent = max_concurrent.unwrap_or(DEFAULT_SINK_CONCURRENCY);
@@ -262,107 +504,205 @@ impl<E: Event> Sink<E> {
                 ),
             });
         }
+        #[cfg(feature = "prometheus")]
+        let scope = _path.as_ref().map(|p| Arc::from(p.scope_key()));
+        #[cfg(feature = "prometheus")]
+        let actor_path_str: Option<Arc<str>> =
+            _path.as_ref().map(|p| Arc::from(p.to_string()));
+
+        #[cfg(feature = "prometheus")]
+        let sink_name = name;
+        #[cfg(feature = "prometheus")]
+        let (
+            dropped_full_counter,
+            dropped_closed_counter,
+            delivery_failure_counter,
+            dropped_full_detail,
+            dropped_closed_detail,
+            delivery_failure_detail,
+        ) = if let (Some(m), Some(scope)) = (metrics.as_ref(), scope) {
+            let dropped_full = m
+                .sink_events_dropped_total
+                .get_or_create(&SinkDropLabels {
+                    scope: Arc::clone(&scope),
+                    actor_type: Arc::clone(&actor_type),
+                    sink_name: sink_name.clone(),
+                    reason: "buffer_full",
+                })
+                .clone();
+            let dropped_closed = m
+                .sink_events_dropped_total
+                .get_or_create(&SinkDropLabels {
+                    scope: Arc::clone(&scope),
+                    actor_type: Arc::clone(&actor_type),
+                    sink_name: sink_name.clone(),
+                    reason: "closed",
+                })
+                .clone();
+            let delivery_failure = m
+                .sink_delivery_failures_total
+                .get_or_create(&SinkLabels {
+                    scope: Arc::clone(&scope),
+                    actor_type: Arc::clone(&actor_type),
+                    sink_name: sink_name.clone(),
+                })
+                .clone();
+            // Per-actor detail series, pre-created once: only for actors
+            // opting in, so the path dimension stays operator-bounded.
+            let detail: Option<(Counter, Counter, Counter)> = if detailed {
+                actor_path_str.as_ref().map(|actor_path| {
+                    let full = m
+                        .sink_events_dropped_detail_total
+                        .get_or_create(&SinkDropDetailLabels {
+                            path: actor_path.to_string(),
+                            sink_name: sink_name.clone(),
+                            reason: "buffer_full",
+                        })
+                        .clone();
+                    let closed = m
+                        .sink_events_dropped_detail_total
+                        .get_or_create(&SinkDropDetailLabels {
+                            path: actor_path.to_string(),
+                            sink_name: sink_name.clone(),
+                            reason: "closed",
+                        })
+                        .clone();
+                    let failure = m
+                        .sink_delivery_failures_detail_total
+                        .get_or_create(&SinkDetailLabels {
+                            path: actor_path.to_string(),
+                            sink_name: sink_name.clone(),
+                        })
+                        .clone();
+                    (full, closed, failure)
+                })
+            } else {
+                None
+            };
+            let (
+                dropped_full_detail,
+                dropped_closed_detail,
+                delivery_failure_detail,
+            ): (Option<Counter>, Option<Counter>, Option<Counter>) = detail
+                .map(|(full, closed, failure)| {
+                    (Some(full), Some(closed), Some(failure))
+                })
+                .unwrap_or((None, None, None));
+            (
+                Some(dropped_full),
+                Some(dropped_closed),
+                Some(delivery_failure),
+                dropped_full_detail,
+                dropped_closed_detail,
+                delivery_failure_detail,
+            )
+        } else {
+            (None, None, None, None, None, None)
+        };
+
         let (sender, mut receiver) =
             tokio::sync::mpsc::channel::<Arc<E>>(buffer_capacity);
 
         let inner = Arc::new_cyclic(|weak: &std::sync::Weak<SinkInner<E>>| {
-            let worker_name = name.clone();
             let weak = weak.clone();
+            // Dispatcher: filters each event and forwards it to matching
+            // subscriber pumps without waiting. A slow pump only fills its
+            // own queue; the dispatcher never blocks on delivery.
             let handle = tokio::spawn(async move {
                 while let Some(event) = receiver.recv().await {
                     let Some(inner) = weak.upgrade() else {
                         break;
                     };
-                    let limit =
-                        inner.max_concurrent.load(Ordering::Relaxed).max(1);
-                    let to_notify: Vec<SinkEntry<E>> = {
+                    // Snapshot the subscriber list first: filters are
+                    // user code and must not run under the entries lock.
+                    let snapshot: Vec<(
+                        SinkEntry<E>,
+                        tokio::sync::mpsc::Sender<Arc<E>>,
+                    )> = {
                         let entries = inner
                             .entries
                             .read()
                             .unwrap_or_else(|e| e.into_inner());
                         entries
                             .iter()
-                            .filter(|e| (e.filter)(&event))
-                            .cloned()
+                            .map(|s| (s.entry.clone(), s.sender.clone()))
                             .collect()
                     };
-                    drop(inner);
+                    let targets: Vec<(
+                        tokio::sync::mpsc::Sender<Arc<E>>,
+                        String,
+                    )> = snapshot
+                        .into_iter()
+                        .filter(|(entry, _)| {
+                            std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(|| {
+                                    (entry.filter)(&event)
+                                }),
+                            )
+                            .unwrap_or_else(|_| {
+                                error!(
+                                    sink = %inner.name,
+                                    subscriber = %entry.id,
+                                    "Subscriber filter panicked; skipping \
+                                     event for this subscriber"
+                                );
+                                inner.inc_delivery_failure();
+                                false
+                            })
+                        })
+                        .map(|(entry, sender)| (sender, entry.id))
+                        .collect();
 
-                    let semaphore =
-                        Arc::new(tokio::sync::Semaphore::new(limit));
-                    let mut set = tokio::task::JoinSet::new();
-
-                    for entry in to_notify {
-                        let Ok(permit) =
-                            semaphore.clone().acquire_owned().await
-                        else {
-                            continue;
-                        };
-                        let subscriber = entry.subscriber;
-                        let id = entry.id;
-                        let retry = entry.retry;
-                        let event = Arc::clone(&event);
-                        let sink_name = worker_name.clone();
-
-                        set.spawn(async move {
-                            let _permit = permit;
-                            match retry {
-                                RetryPolicy::None => {
-                                    if let Err(err) =
-                                        subscriber.notify(event).await
-                                    {
-                                        error!(
-                                            subscriber = %id,
-                                            sink = %sink_name,
-                                            error = %err,
-                                            "Subscriber failed"
-                                        );
-                                    }
+                    for (sender, id) in targets {
+                        if let Err(send_err) =
+                            sender.try_send(Arc::clone(&event))
+                        {
+                            use tokio::sync::mpsc::error::TrySendError;
+                            match send_err {
+                                TrySendError::Full(_) => {
+                                    inner.inc_dropped_full();
+                                    warn!(
+                                        sink = %inner.name,
+                                        subscriber = %id,
+                                        "Subscriber queue full, event dropped"
+                                    );
                                 }
-                                RetryPolicy::AtMost { max, backoff } => {
-                                    for attempt in 0..=max {
-                                        match subscriber
-                                            .notify(Arc::clone(&event))
-                                            .await
-                                        {
-                                            Ok(()) => break,
-                                            Err(err) => {
-                                                if attempt == max {
-                                                    error!(
-                                                        subscriber = %id,
-                                                        sink = %sink_name,
-                                                        error = %err,
-                                                        attempts = max + 1,
-                                                        "Subscriber exhausted retries"
-                                                    );
-                                                } else {
-                                                    warn!(
-                                                        subscriber = %id,
-                                                        sink = %sink_name,
-                                                        attempt = attempt + 1,
-                                                        "Subscriber failed, retrying"
-                                                    );
-                                                    tokio::time::sleep(
-                                                        backoff,
-                                                    )
-                                                    .await;
-                                                }
-                                            }
-                                        }
-                                    }
+                                TrySendError::Closed(_) => {
+                                    inner.inc_dropped_closed();
+                                    warn!(
+                                        sink = %inner.name,
+                                        subscriber = %id,
+                                        "Subscriber pump closed, event dropped"
+                                    );
                                 }
                             }
-                        });
+                        }
                     }
-
-                    while set.join_next().await.is_some() {}
                 }
             });
 
             SinkInner {
+                #[cfg(feature = "prometheus")]
+                name: sink_name,
+                #[cfg(not(feature = "prometheus"))]
                 name,
+                #[cfg(feature = "prometheus")]
+                dropped_full_counter,
+                #[cfg(feature = "prometheus")]
+                dropped_closed_counter,
+                #[cfg(feature = "prometheus")]
+                delivery_failure_counter,
+                #[cfg(feature = "prometheus")]
+                dropped_full_detail,
+                #[cfg(feature = "prometheus")]
+                dropped_closed_detail,
+                #[cfg(feature = "prometheus")]
+                delivery_failure_detail,
                 entries: RwLock::new(Vec::new()),
-                max_concurrent: AtomicUsize::new(max_concurrent),
+                semaphore: RwLock::new(Arc::new(Semaphore::new(
+                    max_concurrent,
+                ))),
+                buffer_capacity,
                 sender: Mutex::new(Some(sender)),
                 worker: Mutex::new(Some(handle)),
             }
@@ -376,7 +716,11 @@ impl<E: Event> Sink<E> {
         &self.inner.name
     }
 
-    /// Update the maximum number of concurrent subscriber notifications.
+    /// Update the maximum number of concurrent subscriber deliveries.
+    ///
+    /// Deliveries across subscribers run concurrently up to this limit;
+    /// each subscriber still processes its own events one at a time, in
+    /// order. In-flight deliveries keep the previous limit.
     ///
     /// # Errors
     ///
@@ -398,41 +742,57 @@ impl<E: Event> Sink<E> {
                 ),
             });
         }
-        self.inner.max_concurrent.store(limit, Ordering::Relaxed);
+        *self
+            .inner
+            .semaphore
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Arc::new(Semaphore::new(limit));
         Ok(())
     }
 
-    /// Add a subscriber entry to this sink.
-    pub fn add(
-        &mut self,
-        id: impl Into<String>,
-        subscriber: impl Subscriber<E>,
-    ) {
+    /// Spawns the delivery pump for `entry` and registers both.
+    fn push_entry(&self, entry: SinkEntry<E>) {
+        let (sender, receiver) =
+            tokio::sync::mpsc::channel::<Arc<E>>(self.inner.buffer_capacity);
+        let handle =
+            spawn_pump(Arc::downgrade(&self.inner), receiver, entry.clone());
         self.inner
             .entries
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .push(SinkEntry::new(id, subscriber));
+            .push(ActiveSub {
+                entry,
+                sender,
+                handle,
+            });
+    }
+
+    /// Add a subscriber entry to this sink.
+    pub fn add(&self, id: impl Into<String>, subscriber: impl Subscriber<E>) {
+        self.push_entry(SinkEntry::new(id, subscriber));
     }
 
     /// Add a pre-built [`SinkEntry`] to this sink.
-    pub fn add_entry(&mut self, entry: SinkEntry<E>) {
-        self.inner
-            .entries
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(entry);
+    pub fn add_entry(&self, entry: SinkEntry<E>) {
+        self.push_entry(entry);
     }
 
     /// Remove the subscriber entry with `id` and return it, if present.
+    ///
+    /// Its delivery pump is aborted, cancelling any in-flight delivery to
+    /// that subscriber.
     pub fn remove_entry(&mut self, id: &str) -> Option<SinkEntry<E>> {
         let mut entries = self
             .inner
             .entries
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        let pos = entries.iter().position(|e| e.id == id)?;
-        Some(entries.remove(pos))
+        let pos = entries.iter().position(|s| s.entry.id == id)?;
+        let active = entries.remove(pos);
+        drop(entries);
+        active.handle.abort();
+        Some(active.entry)
     }
 
     /// Returns the number of subscriber entries in this sink.
@@ -453,20 +813,26 @@ impl<E: Event> Sink<E> {
             .is_empty()
     }
 
-    /// Remove all subscriber entries from this sink.
+    /// Remove all subscriber entries from this sink, aborting their pumps.
     pub fn clear(&mut self) {
-        self.inner
+        let drained: Vec<ActiveSub<E>> = self
+            .inner
             .entries
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .clear();
+            .drain(..)
+            .collect();
+        for active in drained {
+            active.handle.abort();
+        }
     }
 
     /// Send `event` to every subscriber whose filter accepts it.
     ///
-    /// The event is placed on a bounded channel and processed by a
-    /// persistent worker task so the caller never blocks. If the channel is
-    /// full the event is dropped and a warning is logged.
+    /// The event is placed on a bounded dispatcher queue and forwarded to
+    /// matching subscriber pumps without blocking the caller. If the
+    /// dispatcher queue is full the event is dropped with a warning; if an
+    /// individual subscriber pump is full only that subscriber drops it.
     pub fn send(&self, event: Arc<E>) {
         if let Some(sender) = self
             .inner
@@ -478,12 +844,14 @@ impl<E: Event> Sink<E> {
             match sender.try_send(event) {
                 Ok(()) => {}
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    self.inner.inc_dropped_full();
                     warn!(
                         sink = %self.inner.name,
                         "Sink buffer full, event dropped"
                     );
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    self.inner.inc_dropped_closed();
                     warn!(
                         sink = %self.inner.name,
                         "Sink is closed, event dropped"
@@ -491,6 +859,7 @@ impl<E: Event> Sink<E> {
                 }
             }
         } else {
+            self.inner.inc_dropped_closed();
             warn!(
                 sink = %self.inner.name,
                 "Sink is closed, event dropped"
@@ -500,12 +869,14 @@ impl<E: Event> Sink<E> {
 
     /// Gracefully shut down the sink.
     ///
-    /// Closes the channel so no new events are accepted, then waits up to
-    /// `deadline` for the worker to finish processing pending events.
-    /// Returns `true` if the worker finished cleanly, `false` if it was
-    /// aborted.
+    /// Closes the dispatcher channel, waits for forwarded events to reach
+    /// the subscriber pumps, then waits up to `deadline` (total) for the
+    /// pumps to drain. Pumps still busy afterwards are aborted.
+    /// Returns `true` if everything finished cleanly, `false` if anything
+    /// was aborted.
     pub async fn shutdown(&self, deadline: Instant) -> bool {
-        // Close the channel: drop the sender so the worker sees None.
+        // Close the dispatcher channel: drop the sender so the dispatcher
+        // forwards whatever is queued and then exits.
         drop(
             self.inner
                 .sender
@@ -520,32 +891,109 @@ impl<E: Event> Sink<E> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        let mut handle = match worker {
-            Some(h) => h,
-            None => return true,
-        };
 
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            handle.abort();
-            return false;
-        }
-
-        match tokio::time::timeout(remaining, &mut handle).await {
-            Ok(_) => true,
-            Err(_) => {
+        let mut clean = true;
+        if let Some(mut handle) = worker {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 handle.abort();
-                false
+                clean = false;
+            } else {
+                match tokio::time::timeout(remaining, &mut handle).await {
+                    Ok(_) => {}
+                    Err(_) => {
+                        handle.abort();
+                        clean = false;
+                    }
+                }
             }
         }
+
+        // The dispatcher is done: every accepted event reached a pump
+        // queue (or was dropped full). Close the pumps by dropping their
+        // senders, then drain them within the remaining deadline.
+        let drained: Vec<ActiveSub<E>> = self
+            .inner
+            .entries
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
+        for active in drained {
+            drop(active.sender);
+            let mut handle = active.handle;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                handle.abort();
+                clean = false;
+                continue;
+            }
+            match tokio::time::timeout(remaining, &mut handle).await {
+                Ok(_) => {}
+                Err(_) => {
+                    handle.abort();
+                    clean = false;
+                }
+            }
+        }
+        clean
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
+    use tokio::sync::Mutex;
+
+    /// Constructs a [`Sink`] for unit tests, selecting the constructor that
+    /// is available in the current feature configuration.
+    fn test_sink_new<E: Event>(
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+    ) -> Result<Sink<E>, Error> {
+        #[cfg(feature = "prometheus")]
+        {
+            Sink::new_with_metrics(
+                name,
+                max_concurrent,
+                ActorPath::from("/user/test"),
+                Arc::from("TestSink"),
+                false,
+                None,
+            )
+        }
+        #[cfg(not(feature = "prometheus"))]
+        {
+            Sink::new(name, max_concurrent)
+        }
+    }
+
+    /// Constructs a [`Sink`] with a custom buffer for unit tests, selecting
+    /// the constructor that is available in the current feature configuration.
+    fn test_sink_with_buffer<E: Event>(
+        name: impl Into<String>,
+        max_concurrent: Option<usize>,
+        buffer_capacity: usize,
+    ) -> Result<Sink<E>, Error> {
+        #[cfg(feature = "prometheus")]
+        {
+            Sink::with_buffer_and_metrics(
+                name,
+                max_concurrent,
+                buffer_capacity,
+                ActorPath::from("/user/test"),
+                Arc::from("TestSink"),
+                false,
+                None,
+            )
+        }
+        #[cfg(not(feature = "prometheus"))]
+        {
+            Sink::with_buffer(name, max_concurrent, buffer_capacity)
+        }
+    }
 
     struct SleepSubscriber {
         millis: u64,
@@ -555,6 +1003,7 @@ mod tests {
     #[async_trait]
     impl Subscriber<()> for SleepSubscriber {
         async fn notify(&self, _event: Arc<()>) -> Result<(), Error> {
+            // timing: simulated work delay to exercise concurrency limits.
             tokio::time::sleep(Duration::from_millis(self.millis)).await;
             self.done.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -575,7 +1024,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_concurrency_limit() {
-        let mut sink = Sink::new("test", Some(2)).expect("valid concurrency");
+        let sink = test_sink_new("test", Some(2)).expect("valid concurrency");
         let done = Arc::new(AtomicUsize::new(0));
         for i in 0..5 {
             sink.add(
@@ -603,7 +1052,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_hot_reload_max_concurrent() {
-        let mut sink = Sink::new("test", Some(1)).expect("valid concurrency");
+        let sink = test_sink_new("test", Some(1)).expect("valid concurrency");
         let done = Arc::new(AtomicUsize::new(0));
         for i in 0..5 {
             sink.add(
@@ -652,7 +1101,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_no_event_loss() {
-        let mut sink = Sink::new("test", None).expect("valid concurrency");
+        let sink = test_sink_new("test", None).expect("valid concurrency");
         let count = Arc::new(AtomicUsize::new(0));
         sink.add(
             "counter",
@@ -674,7 +1123,7 @@ mod tests {
 
     #[test]
     fn test_sink_new_rejects_zero_concurrency() {
-        let err = Sink::<()>::new("test", Some(0))
+        let err = test_sink_new::<()>("test", Some(0))
             .expect_err("zero concurrency should be rejected");
         assert!(
             matches!(err, Error::InvalidConfiguration { component, .. } if component == "Sink")
@@ -683,7 +1132,7 @@ mod tests {
 
     #[test]
     fn test_sink_new_rejects_excessive_concurrency() {
-        let err = Sink::<()>::new("test", Some(MAX_SINK_CONCURRENCY + 1))
+        let err = test_sink_new::<()>("test", Some(MAX_SINK_CONCURRENCY + 1))
             .expect_err("excessive concurrency should be rejected");
         assert!(
             matches!(err, Error::InvalidConfiguration { component, .. } if component == "Sink")
@@ -692,7 +1141,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_set_max_concurrent_rejects_zero() {
-        let sink = Sink::<()>::new("test", Some(1)).expect("valid concurrency");
+        let sink =
+            test_sink_new::<()>("test", Some(1)).expect("valid concurrency");
         let err = sink
             .set_max_concurrent(0)
             .expect_err("zero concurrency should be rejected");
@@ -703,7 +1153,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_with_buffer_accepts_valid_capacity() {
-        let result = Sink::<()>::with_buffer("test", None, 1);
+        let result = test_sink_with_buffer::<()>("test", None, 1);
         let Ok(sink) = result else {
             panic!("buffer capacity of 1 should be valid");
         };
@@ -712,7 +1162,7 @@ mod tests {
 
     #[test]
     fn test_sink_with_buffer_rejects_zero_capacity() {
-        let result = Sink::<()>::with_buffer("test", None, 0);
+        let result = test_sink_with_buffer::<()>("test", None, 0);
         let Err(err) = result else {
             panic!("zero buffer capacity should be rejected");
         };
@@ -723,14 +1173,94 @@ mod tests {
 
     #[test]
     fn test_sink_with_buffer_rejects_excessive_capacity() {
-        let result =
-            Sink::<()>::with_buffer("test", None, MAX_SINK_BUFFER_CAPACITY + 1);
+        let result = test_sink_with_buffer::<()>(
+            "test",
+            None,
+            MAX_SINK_BUFFER_CAPACITY + 1,
+        );
         let Err(err) = result else {
             panic!("excessive buffer capacity should be rejected");
         };
         assert!(
             matches!(err, Error::InvalidConfiguration { component, .. } if component == "Sink")
         );
+    }
+
+    #[derive(Clone)]
+    struct CollectingSubscriber {
+        events: Arc<Mutex<Vec<()>>>,
+    }
+
+    impl CollectingSubscriber {
+        fn new() -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        async fn drain(&self) -> Vec<()> {
+            let mut lock = self.events.lock().await;
+            std::mem::take(&mut *lock)
+        }
+    }
+
+    #[async_trait]
+    impl Subscriber<()> for CollectingSubscriber {
+        async fn notify(&self, _event: Arc<()>) -> Result<(), Error> {
+            self.events.lock().await.push(());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sink_entry_remove_and_clear() {
+        let sub_a = CollectingSubscriber::new();
+        let sub_b = CollectingSubscriber::new();
+        let sub_c = CollectingSubscriber::new();
+
+        let mut sink =
+            test_sink_new::<()>("mutable_sink", None).expect("valid sink");
+        sink.add("a", sub_a.clone());
+        sink.add("b", sub_b.clone());
+        sink.add("c", sub_c.clone());
+
+        let removed = sink.remove_entry("b");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().id, "b");
+        assert!(sink.remove_entry("b").is_none());
+
+        sink.send(Arc::new(()));
+        // Poll for delivery instead of a fixed sleep.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if sub_a.events.lock().await.len() == 1
+                && sub_c.events.lock().await.len() == 1
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "sink did not deliver to remaining subscribers"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(sub_a.drain().await.len(), 1);
+        assert_eq!(sub_b.drain().await.len(), 0); // removed
+        assert_eq!(sub_c.drain().await.len(), 1);
+
+        sink.clear();
+        sink.send(Arc::new(()));
+        // Poll to confirm nothing is delivered after clear.
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < deadline {
+            assert!(
+                sub_a.events.lock().await.is_empty()
+                    && sub_c.events.lock().await.is_empty(),
+                "cleared sink must not deliver"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[test]
@@ -802,5 +1332,136 @@ mod tests {
         assert!(
             matches!(err, Error::InvalidConfiguration { component, .. } if component == "RetryPolicy::AtMost")
         );
+    }
+}
+
+#[cfg(all(test, feature = "prometheus"))]
+mod prometheus_tests {
+    use super::*;
+    use crate::ActorPath;
+    use crate::metrics::{ActorMetrics, SinkDropLabels, SinkLabels};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct FailingSubscriber;
+
+    #[async_trait]
+    impl Subscriber<()> for FailingSubscriber {
+        async fn notify(&self, _event: Arc<()>) -> Result<(), Error> {
+            Err(Error::Functional {
+                description: "intentional failure".to_owned(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sink_events_dropped_metric() {
+        let metrics = Arc::new(ActorMetrics::new());
+        let sink = Sink::with_buffer_and_metrics(
+            "full",
+            None,
+            2,
+            ActorPath::from("/user/test"),
+            Arc::from("TestSink"),
+            false,
+            Some(Arc::clone(&metrics)),
+        )
+        .expect("valid sink");
+
+        // Flood the channel before the worker task is scheduled.
+        for _ in 0..10 {
+            sink.send(Arc::new(()));
+        }
+
+        let dropped = metrics
+            .sink_events_dropped_total
+            .get_or_create(&SinkDropLabels {
+                scope: Arc::from("user"),
+                actor_type: Arc::from("TestSink"),
+                sink_name: "full".to_owned(),
+                reason: "buffer_full",
+            })
+            .get();
+        assert!(dropped > 0, "expected some events to be dropped");
+    }
+
+    #[tokio::test]
+    async fn test_sink_delivery_failures_metric() {
+        let metrics = Arc::new(ActorMetrics::new());
+        let sink = Sink::new_with_metrics(
+            "fail",
+            None,
+            ActorPath::from("/user/test"),
+            Arc::from("TestSink"),
+            false,
+            Some(Arc::clone(&metrics)),
+        )
+        .expect("valid sink");
+
+        sink.add("failing", FailingSubscriber);
+        sink.send(Arc::new(()));
+
+        // Poll the metric instead of a fixed sleep.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let count = metrics
+                .sink_delivery_failures_total
+                .get_or_create(&SinkLabels {
+                    scope: Arc::from("user"),
+                    actor_type: Arc::from("TestSink"),
+                    sink_name: "fail".to_owned(),
+                })
+                .get();
+            if count == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "delivery failure was never recorded"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sink_detail_counters_recorded_when_opted_in() {
+        use crate::metrics::SinkDetailLabels;
+
+        let metrics = Arc::new(ActorMetrics::new());
+        let sink = Sink::new_with_metrics(
+            "detail",
+            None,
+            ActorPath::from("/user/test"),
+            Arc::from("TestSink"),
+            true,
+            Some(Arc::clone(&metrics)),
+        )
+        .expect("valid sink");
+        sink.add("failing", FailingSubscriber);
+
+        sink.send(Arc::new(()));
+
+        // The opt-in detail series must appear; aggregate delivery
+        // failures are covered by the sibling test above.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let count = metrics
+                .sink_delivery_failures_detail_total
+                .get_or_create(&SinkDetailLabels {
+                    path: "/user/test".to_owned(),
+                    sink_name: "detail".to_owned(),
+                })
+                .get();
+            if count == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detail delivery failure was never recorded"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 }

@@ -1,30 +1,20 @@
-//! Test that demonstrates the duplication bug in Light persistence mode.
+//! Regression test for persistence state duplication on restart.
 //!
-//! When an actor with Light persistence receives an event:
-//! 1. The event is applied to the actor's state
-//! 2. Both the event AND the modified state are persisted
-//!
-//! When the actor is stopped and restarted:
-//! 1. The state snapshot is loaded (which already has the event applied)
-//! 2. The event is replayed and applied AGAIN
-//! 3. This causes duplication
-//!
-//! Expected: vector [3]
-//! Actual: vector [3, 3] after restart
+//! Guarantees that an actor does not re-apply already-applied
+//! events when recovering from a snapshot after a restart.
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorSystem, Error as ActorError, Event,
-    Handler, Message, Response,
+    Actor, ActorContext, ActorPath, Error as ActorError, Event, Handler,
+    Message, Response, TestSystem,
 };
 use ave_actors_store::memory::MemoryManager;
-use ave_actors_store::store::{LightPersistence, PersistentActor};
+use ave_actors_store::store::PersistentActor;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use test_log::test;
 use tokio::sync::Mutex as TokioMutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 // Shared manager for testing
@@ -33,14 +23,14 @@ static SHARED_MANAGER: OnceLock<Arc<TokioMutex<MemoryManager>>> =
 
 // State struct
 #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
-struct VectorActorState {
+struct VectorActorStandardState {
     numbers: Vec<i32>,
 }
 
-// Actor with a vector that accumulates numbers
+// Actor with a vector that accumulates numbers (version)
 #[derive(Debug)]
 struct VectorActor {
-    state_ptr: Arc<VectorActorState>,
+    state_ptr: Arc<VectorActorStandardState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +72,6 @@ impl Actor for VectorActor {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        // Get or initialize the shared manager
         let manager_ref = SHARED_MANAGER.get_or_init(|| {
             Arc::new(TokioMutex::new(MemoryManager::default()))
         });
@@ -104,7 +93,6 @@ impl Handler<Self> for VectorActor {
     ) -> Result<VectorResponse, ActorError> {
         match msg {
             VectorMessage::Add(number) => {
-                // Persist the event (this will apply it AND save the state)
                 self.persist(NumberAdded(number), ctx).await?;
                 Ok(VectorResponse {
                     numbers: self.state_ptr.numbers.clone(),
@@ -119,13 +107,12 @@ impl Handler<Self> for VectorActor {
 
 #[async_trait]
 impl PersistentActor for VectorActor {
-    type Persistence = LightPersistence;
     type InitParams = ();
-    type State = VectorActorState;
+    type State = VectorActorStandardState;
 
     fn create_initial(_params: ()) -> Self {
         Self {
-            state_ptr: Arc::new(VectorActorState::default()),
+            state_ptr: Arc::new(VectorActorStandardState::default()),
         }
     }
 
@@ -148,50 +135,36 @@ impl PersistentActor for VectorActor {
 }
 
 #[test(tokio::test)]
-async fn test_light_persistence_duplicates_data_on_restart() {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+async fn test_persistence_duplication_on_restart() {
+    let harness = TestSystem::start();
+    let system = harness.system();
 
-    // Create and start the actor (pre_start will initialize with shared manager)
     let actor_ref = system
         .create_root_actor("vector_actor", VectorActor::initial(()))
         .await
         .unwrap();
 
-    // Add number 3
-    let response = actor_ref.ask(VectorMessage::Add(3)).await.unwrap();
+    // Add number 5
+    let response = actor_ref.ask(VectorMessage::Add(5)).await.unwrap();
 
-    println!("After adding 3: {:?}", response.numbers);
-    assert_eq!(response.numbers, vec![3], "Should have [3] after adding 3");
+    assert_eq!(response.numbers, vec![5], "Should have [5] after adding 5");
 
-    // Stop the actor (this will trigger snapshot in pre_stop)
+    // Stop the actor (it will create snapshot on stop if there are events)
     actor_ref.ask_stop().await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    // Create a NEW actor with the same name (simulating restart)
-    // It will use the SAME shared MemoryManager via pre_start
+    // Restart
     let actor_ref2 = system
         .create_root_actor("vector_actor", VectorActor::initial(()))
         .await
         .unwrap();
 
-    // Get the numbers after restart
     let response = actor_ref2.ask(VectorMessage::Get).await.unwrap();
 
-    println!("After restart: {:?}", response.numbers);
-
-    // THIS IS THE BUG: The number 3 appears twice!
-    // Expected: [3]
-    // Actual: [3, 3]
-    //
-    // Why? Because:
-    // 1. When we persisted with LightPersistence, we saved BOTH the event AND the state (which already had 3 applied)
-    // 2. On recovery, we load the state (with 3) and then replay the event (adding 3 again)
     assert_eq!(
         response.numbers,
-        vec![3],
-        "BUG: Should have [3] after restart, but has {:?} due to event replay on already-applied state",
+        vec![5],
+        "Should have [5] after restart, but has {:?}",
         response.numbers
     );
+    harness.shutdown().await;
 }

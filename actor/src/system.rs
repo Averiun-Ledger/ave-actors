@@ -2,7 +2,8 @@
 
 use crate::{
     Actor, ActorPath, ActorRef, Error, Handler,
-    runner::{ActorRunner, StopHandle, StopSender},
+    runner::{ActorRunner, StopHandle, StopSender, StopSignal},
+    selection::ActorSelection,
 };
 
 use tokio::sync::{RwLock, broadcast, oneshot};
@@ -126,6 +127,11 @@ impl ActorSystem {
     /// shutdown (exit code 1); the reason is reflected in [`SystemRunner::run`]'s return value.
     ///
     /// Uses [`ActorSystemConfig::default`] for the system configuration.
+    ///
+    /// # Panics
+    ///
+    /// Requires an active Tokio runtime (spawns internal tasks); calling
+    /// outside a runtime panics.
     pub fn create(
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
@@ -154,6 +160,27 @@ impl ActorSystem {
             SystemRunner::new(graceful_token, crash_token, shutdown_complete);
         Ok((system, runner))
     }
+
+    /// Creates the actor system and registers actor metrics in the supplied
+    /// Prometheus registry.
+    ///
+    /// This is only available when the `prometheus` feature is enabled.
+    #[cfg(feature = "prometheus")]
+    pub fn create_with_registry(
+        graceful_token: CancellationToken,
+        crash_token: CancellationToken,
+        registry: &mut prometheus_client::registry::Registry,
+    ) -> (SystemRef, SystemRunner) {
+        let config = ActorSystemConfig::default();
+        let metrics = Arc::new(crate::metrics::ActorMetrics::new());
+        metrics.register_into(registry);
+        let (mut system, shutdown_complete) =
+            SystemRef::new(config, graceful_token.clone(), crash_token.clone());
+        system.actor_metrics = Some(metrics);
+        let runner =
+            SystemRunner::new(graceful_token, crash_token, shutdown_complete);
+        (system, runner)
+    }
 }
 
 /// System-level events broadcast on the observable system event channel.
@@ -175,6 +202,10 @@ pub struct SystemRef {
     actors: Arc<DashMap<ActorPath, Box<dyn Any + Send + Sync + 'static>>>,
     /// Direct-children index to avoid scanning the full actor registry on lookups.
     child_index: Arc<DashMap<ActorPath, HashSet<ActorPath>>>,
+    /// Actor type name per live path (`std::any::type_name`). The
+    /// registry itself is type-erased, so this side index is what
+    /// makes the supervision tree printable for debugging.
+    actor_types: Arc<DashMap<ActorPath, &'static str>>,
 
     /// Registry of helper objects that can be shared across actors.
     /// Helpers can be any type (database connections, configurations, etc.).
@@ -183,11 +214,20 @@ pub struct SystemRef {
     /// Stop senders for root-level actors to enable coordinated shutdown.
     /// Kept as RwLock<HashMap> because shutdown needs `std::mem::take` of the whole map.
     root_senders: Arc<RwLock<HashMap<ActorPath, StopHandle>>>,
+    /// Type-erased stop senders for every live actor, keyed by path.
+    /// Lets the system stop actors (e.g. orphaned descendants of a failed
+    /// init) without knowing their message types.
+    stop_senders: Arc<DashMap<ActorPath, StopSender>>,
     /// Broadcast bus for observable system-level events such as root actor errors.
     system_event_sender: broadcast::Sender<SystemEvent>,
     /// Inverse index: for each target actor path, the list of watchers that
     /// should receive a termination notification.
     watchers: Arc<DashMap<ActorPath, Vec<WatchEntry>>>,
+    /// Global name registry: operator-chosen names (`"pagos"`) pointing at
+    /// live actor paths. Names are unique; re-registering after a restart
+    /// re-points the name. Stale entries are pruned lazily on resolve and
+    /// eagerly when actors are removed.
+    names: Arc<DashMap<String, ActorPath>>,
 
     /// System configuration validated at creation time.
     config: ActorSystemConfig,
@@ -198,6 +238,14 @@ pub struct SystemRef {
     crash_token: CancellationToken,
     /// Set as soon as shutdown begins; blocks creation of new actors.
     shutting_down: Arc<AtomicBool>,
+    /// Optional Prometheus metrics collection shared by all actors in the
+    /// system.  Only present when the `prometheus` feature is enabled.
+    #[cfg(feature = "prometheus")]
+    pub(crate) actor_metrics: Option<Arc<crate::metrics::ActorMetrics>>,
+    /// System-wide message middleware. Actors snapshot this registry at
+    /// spawn; interceptors registered afterwards do not apply to them.
+    interceptors:
+        Arc<std::sync::RwLock<Vec<Arc<dyn crate::middleware::Interceptor>>>>,
 }
 
 impl SystemRef {
@@ -209,6 +257,7 @@ impl SystemRef {
         let root_senders =
             Arc::new(RwLock::new(HashMap::<ActorPath, StopHandle>::new()));
         let child_index = Arc::new(DashMap::new());
+        let actor_types = Arc::new(DashMap::new());
         let watchers = Arc::new(DashMap::new());
         let (system_event_sender, _) =
             broadcast::channel::<SystemEvent>(config.system_event_buffer_size);
@@ -278,14 +327,20 @@ impl SystemRef {
             Self {
                 actors: Arc::new(DashMap::new()),
                 child_index,
+                actor_types,
                 helpers: Arc::new(DashMap::new()),
                 graceful_token,
                 crash_token,
                 root_senders,
+                stop_senders: Arc::new(DashMap::new()),
                 system_event_sender,
                 watchers,
+                names: Arc::new(DashMap::new()),
                 config,
                 shutting_down,
+                #[cfg(feature = "prometheus")]
+                actor_metrics: None,
+                interceptors: Arc::new(std::sync::RwLock::new(Vec::new())),
             },
             shutdown_complete_rx,
         )
@@ -295,6 +350,24 @@ impl SystemRef {
         self.shutting_down.load(Ordering::SeqCst)
             || self.graceful_token.is_cancelled()
             || self.crash_token.is_cancelled()
+    }
+
+    /// Returns the shared actor metrics collection, if Prometheus support is
+    /// enabled and a registry was provided at system creation.
+    #[cfg(feature = "prometheus")]
+    pub(crate) fn actor_metrics(
+        &self,
+    ) -> Option<Arc<crate::metrics::ActorMetrics>> {
+        self.actor_metrics.clone()
+    }
+
+    /// Sets the shared actor metrics collection.
+    #[cfg(feature = "prometheus")]
+    pub fn set_actor_metrics(
+        &mut self,
+        metrics: Option<Arc<crate::metrics::ActorMetrics>>,
+    ) {
+        self.actor_metrics = metrics;
     }
 
     /// Returns a broadcast receiver for system-level events such as root actor errors and shutdown.
@@ -322,6 +395,10 @@ impl SystemRef {
     }
 
     /// Returns the `ActorRef` for the actor at `path`, or `Error::NotFound` if no actor is registered there.
+    ///
+    /// A path holding an actor of a different type also yields
+    /// `Error::NotFound`: the registry is type-erased and cannot
+    /// distinguish "absent" from "wrong type".
     pub async fn get_actor<A>(
         &self,
         path: &ActorPath,
@@ -360,6 +437,8 @@ impl SystemRef {
             actor,
             parent_info,
             self.config.actor_stop_channel_size,
+            #[cfg(feature = "prometheus")]
+            self.actor_metrics(),
         )?;
 
         // Atomically check+insert to avoid concurrent duplicate creations
@@ -371,9 +450,12 @@ impl SystemRef {
             }
             dashmap::Entry::Vacant(e) => {
                 e.insert(Box::new(actor_ref.clone()));
+                self.actor_types
+                    .insert(path.clone(), std::any::type_name::<A>());
             }
         }
         self.index_actor(&path);
+        self.stop_senders.insert(path.clone(), stop_sender.clone());
 
         if is_root {
             let mut root_senders = self.root_senders.write().await;
@@ -429,9 +511,7 @@ impl SystemRef {
             Err(timeout) => {
                 init_handle.abort();
                 self.cleanup_failed_actor_init(&path, is_root).await;
-                Err(Error::Timeout {
-                    ms: timeout.as_millis(),
-                })
+                Err(Error::Timeout { duration: timeout })
             }
         }
     }
@@ -486,6 +566,90 @@ impl SystemRef {
         if removed {
             self.deindex_actor(path);
         }
+        self.actor_types.remove(path);
+        self.stop_senders.remove(path);
+        // Eagerly drop names pointing at the terminated actor so a later
+        // re-registration (e.g. after restart) never collides.
+        self.names.retain(|_, registered| registered != path);
+    }
+
+    /// Validates a registry name: same charset as path segments plus a
+    /// 256-character cap, so names stay backend- and log-safe.
+    fn validate_registry_name(name: &str) -> Result<(), Error> {
+        ActorPath::validate_segment(name).map_err(|_| {
+            Error::InvalidConfiguration {
+                component: "actor registry name".to_owned(),
+                reason: format!(
+                    "invalid registry name '{name}': allowed pattern is \
+                     [A-Za-z0-9_-] up to 256 chars"
+                ),
+            }
+        })
+    }
+
+    /// Registers `name` pointing at the actor's path.
+    ///
+    /// Names are process-global and unique: registering an already-taken
+    /// name fails with [`Error::Exists`] instead of hijacking it. Actors
+    /// that restart re-register their name (typically in `pre_start`),
+    /// which is why termination prunes stale entries automatically.
+    pub fn register_name(
+        &self,
+        name: impl Into<String>,
+        path: ActorPath,
+    ) -> Result<(), Error> {
+        let name = name.into();
+        Self::validate_registry_name(&name)?;
+        match self.names.entry(name) {
+            dashmap::Entry::Occupied(_) => Err(Error::Exists { path }),
+            dashmap::Entry::Vacant(entry) => {
+                entry.insert(path);
+                Ok(())
+            }
+        }
+    }
+
+    /// Removes the registry entry `name`. No-op when absent.
+    pub fn unregister_name(&self, name: &str) {
+        self.names.remove(name);
+    }
+
+    /// Selects the actor registered under `name`.
+    ///
+    /// Resolution is lazy: every send re-resolves through the live
+    /// registry, so restarts that re-register the name stay reachable.
+    pub fn select_name(&self, name: impl Into<String>) -> ActorSelection {
+        ActorSelection::by_name(self.clone(), name.into())
+    }
+
+    /// Selects all actors whose path matches `pattern` (`/user/pagos-*`).
+    ///
+    /// Each `/`-separated segment matches exactly or with `*` wildcards;
+    /// the segment count must agree. Like [`SystemRef::select_name`],
+    /// resolution happens on every send.
+    pub fn select_pattern(&self, pattern: impl Into<String>) -> ActorSelection {
+        ActorSelection::by_pattern(self.clone(), pattern.into())
+    }
+
+    /// Returns the paths of all live actors matching `pattern`.
+    pub(crate) fn matching_paths(&self, pattern: &str) -> Vec<ActorPath> {
+        self.actors
+            .iter()
+            .map(|entry| entry.key().clone())
+            .filter(|path| crate::selection::path_matches(pattern, path))
+            .collect()
+    }
+
+    /// Resolves a registry name to its current path, pruning the entry
+    /// when the actor is gone.
+    pub(crate) fn resolve_name(&self, name: &str) -> Option<ActorPath> {
+        let path = self.names.get(name).map(|entry| entry.clone())?;
+        if self.actors.contains_key(&path) {
+            Some(path)
+        } else {
+            self.names.remove(name);
+            None
+        }
     }
 
     /// Registers a watcher for the actor at `target_path`.
@@ -528,15 +692,19 @@ impl SystemRef {
 
     /// Removes all watch entries from `target` to `watcher_path`.
     ///
-    /// If no such entry exists, this is a no-op.
-    pub(crate) async fn unwatch(
+    /// Returns `true` when an entry was present and removed. If no such
+    /// entry exists, this is a no-op returning `false`.
+    pub(crate) fn unwatch(
         &self,
         target: ActorPath,
         watcher_path: ActorPath,
-    ) {
+    ) -> bool {
         if let Some(mut entries) = self.watchers.get_mut(&target) {
+            let before = entries.len();
             entries.retain(|entry| entry.watcher_path != watcher_path);
+            return entries.len() != before;
         }
+        false
     }
 
     /// Notifies every watcher of `target` that it has terminated.
@@ -552,9 +720,24 @@ impl SystemRef {
     }
 
     async fn cleanup_failed_actor_init(&self, path: &ActorPath, is_root: bool) {
+        // Collect descendants first: children created before the failure
+        // (e.g. an aborted `pre_start`) are live but parented to a dead
+        // path, so stop them explicitly instead of leaking their tasks.
+        let mut stack = self.children(path);
+        let mut descendants = Vec::new();
+        while let Some(child) = stack.pop() {
+            stack.extend(self.children(&child));
+            descendants.push(child);
+        }
         self.remove_actor(path).await;
         if is_root {
             self.root_senders.write().await.remove(path);
+        }
+        for descendant in &descendants {
+            if let Some((_, sender)) = self.stop_senders.remove(descendant) {
+                let _ = sender.send(StopSignal::Stop(None)).await;
+            }
+            self.remove_actor(descendant).await;
         }
     }
 
@@ -571,15 +754,77 @@ impl SystemRef {
     }
 
     /// Returns the paths of all currently registered direct children of the actor at `path`.
-    pub async fn children(&self, path: &ActorPath) -> Vec<ActorPath> {
+    pub fn children(&self, path: &ActorPath) -> Vec<ActorPath> {
         self.child_index
             .get(path)
             .map(|children| children.iter().cloned().collect::<Vec<_>>())
             .unwrap_or_default()
     }
 
-    /// Stores a shared resource (e.g. a database pool or config object) under `name` for retrieval by any actor.
-    pub async fn add_helper<H>(&self, name: &str, helper: H)
+    /// Snapshots the live supervision forest for debugging: every actor
+    /// whose parent is not itself live becomes a root, so orphans show
+    /// up instead of silently vanishing from the view. Children are
+    /// sorted by path for stable output. Reads are lock-free but the
+    /// tree is a point-in-time view: actors may spawn or stop while it
+    /// is being built.
+    pub fn actor_tree(&self) -> Vec<crate::tree::ActorTreeNode> {
+        let mut roots: Vec<ActorPath> = self
+            .actors
+            .iter()
+            .map(|entry| entry.key().clone())
+            .filter(|path| !self.actors.contains_key(&path.parent()))
+            .collect();
+        roots.sort();
+        roots.iter().map(|path| self.subtree(path)).collect()
+    }
+
+    /// Concrete type name recorded when the actor at `path` spawned,
+    /// or `None` when it already stopped.
+    pub fn actor_type_of(&self, path: &ActorPath) -> Option<&'static str> {
+        self.actor_types.get(path).map(|entry| *entry.value())
+    }
+
+    fn subtree(&self, path: &ActorPath) -> crate::tree::ActorTreeNode {
+        let mut grown = self.children(path);
+        grown.sort();
+        crate::tree::ActorTreeNode {
+            path: path.to_string(),
+            actor_type: self
+                .actor_type_of(path)
+                .unwrap_or("unknown")
+                .to_owned(),
+            children: grown.iter().map(|child| self.subtree(child)).collect(),
+        }
+    }
+
+    /// Registers system-wide message middleware.
+    ///
+    /// Each actor snapshots the registry at spawn, so register
+    /// interceptors before spawning the actors they must observe.
+    /// With no interceptors registered, the per-message cost is a
+    /// single empty check.
+    pub fn add_interceptor(
+        &self,
+        interceptor: impl crate::middleware::Interceptor,
+    ) {
+        self.interceptors
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Arc::new(interceptor));
+    }
+
+    pub(crate) fn interceptors_snapshot(
+        &self,
+    ) -> Vec<Arc<dyn crate::middleware::Interceptor>> {
+        self.interceptors
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Stores a shared resource (e.g. a database pool or config object) under
+    /// `name` for retrieval by any actor.
+    pub fn add_helper<H>(&self, name: &str, helper: H)
     where
         H: Any + Send + Sync + Clone + 'static,
     {
@@ -587,7 +832,7 @@ impl SystemRef {
     }
 
     /// Returns the helper stored under `name`, or `None` if not found or if the type does not match.
-    pub async fn get_helper<H>(&self, name: &str) -> Option<H>
+    pub fn get_helper<H>(&self, name: &str) -> Option<H>
     where
         H: Any + Send + Sync + Clone + 'static,
     {
@@ -598,7 +843,7 @@ impl SystemRef {
 
     /// Removes the helper stored under `name` and returns it, or `None` if not
     /// found or if the type does not match.
-    pub async fn remove_helper<H>(&self, name: &str) -> Option<H>
+    pub fn remove_helper<H>(&self, name: &str) -> Option<H>
     where
         H: Any + Send + Sync + 'static,
     {
@@ -668,8 +913,8 @@ mod tests {
             CancellationToken::new(),
         );
         let helper = TestHelper { value: 42 };
-        system.add_helper("test", helper).await;
-        let helper: Option<TestHelper> = system.get_helper("test").await;
+        system.add_helper("test", helper);
+        let helper: Option<TestHelper> = system.get_helper("test");
         assert_eq!(helper, Some(TestHelper { value: 42 }));
     }
 

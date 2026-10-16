@@ -1,7 +1,13 @@
 use crate::{
     ActorPath, Error, OverflowStrategy,
     actor::{Actor, ActorContext, Handler, Message},
+    middleware::MessageMetadata,
 };
+
+#[cfg(feature = "prometheus")]
+use std::sync::Arc;
+#[cfg(feature = "prometheus")]
+use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -18,6 +24,11 @@ pub enum Envelope<A: Actor + Handler<A>> {
         message: A::Message,
         /// The path of the actor that sent this message.
         sender: ActorPath,
+        /// Time when the envelope was placed in the mailbox.
+        #[cfg(feature = "prometheus")]
+        queued_at: Instant,
+        /// Envelope metadata: unique id, correlation chain, send time.
+        metadata: MessageMetadata,
     },
     /// Request-response message.
     Ask {
@@ -27,23 +38,60 @@ pub enum Envelope<A: Actor + Handler<A>> {
         sender: ActorPath,
         /// Response channel for the ask pattern.
         rsvp: Option<oneshot::Sender<Result<A::Response, Error>>>,
+        /// Time when the envelope was placed in the mailbox.
+        #[cfg(feature = "prometheus")]
+        queued_at: Instant,
+        /// Envelope metadata: unique id, correlation chain, send time.
+        metadata: MessageMetadata,
     },
 }
 
 impl<A: Actor + Handler<A>> Envelope<A> {
-    pub const fn tell(message: A::Message, sender: ActorPath) -> Self {
-        Self::Tell { message, sender }
+    pub const fn tell(
+        message: A::Message,
+        sender: ActorPath,
+        metadata: MessageMetadata,
+    ) -> Self {
+        Self::Tell {
+            message,
+            sender,
+            #[cfg(feature = "prometheus")]
+            queued_at: metadata.sent_at,
+            metadata,
+        }
     }
 
     pub const fn ask(
         message: A::Message,
         sender: ActorPath,
         rsvp: oneshot::Sender<Result<A::Response, Error>>,
+        metadata: MessageMetadata,
     ) -> Self {
         Self::Ask {
             message,
             sender,
             rsvp: Some(rsvp),
+            #[cfg(feature = "prometheus")]
+            queued_at: metadata.sent_at,
+            metadata,
+        }
+    }
+
+    /// Envelope metadata (id, correlation chain, send time).
+    pub const fn metadata(&self) -> MessageMetadata {
+        match self {
+            Self::Tell { metadata, .. } | Self::Ask { metadata, .. } => {
+                *metadata
+            }
+        }
+    }
+
+    #[cfg(feature = "prometheus")]
+    pub const fn queued_at(&self) -> Instant {
+        match self {
+            Self::Tell { queued_at, .. } | Self::Ask { queued_at, .. } => {
+                *queued_at
+            }
         }
     }
 
@@ -66,29 +114,80 @@ impl<A: Actor + Handler<A>> Envelope<A> {
         }
     }
 
-    pub async fn handle(&mut self, actor: &mut A, ctx: &mut ActorContext<A>) {
+    /// Answers a pending `ask` with `err`, if this envelope holds one.
+    ///
+    /// Used when the handler panicked: the `rsvp` channel never fires on
+    /// its own, so without this the caller would hang forever.
+    pub(crate) fn respond_error(&mut self, err: Error) {
+        if let Self::Ask { rsvp, .. } = self
+            && let Some(r) = rsvp.take()
+            && r.send(Err(err)).is_err()
+        {
+            error!("Failed to send error response back to caller");
+        }
+    }
+
+    pub async fn handle(
+        &mut self,
+        actor: &mut A,
+        ctx: &mut ActorContext<A>,
+    ) -> Result<(), Error> {
         match self {
-            Self::Tell { message, sender } => {
+            Self::Tell {
+                message, sender, ..
+            } => {
                 let message = message.clone();
                 let sender = sender.clone();
-                let _ = actor.handle_message(sender, message, ctx).await;
+                actor.handle_message(sender, message, ctx).await.map(|_| ())
             }
             Self::Ask {
                 message,
                 sender,
                 rsvp,
+                ..
             } => {
                 let message = message.clone();
                 let sender = sender.clone();
                 let result = actor.handle_message(sender, message, ctx).await;
+                let outcome =
+                    result.as_ref().map(|_| ()).map_err(|err| err.clone());
                 if let Some(r) = rsvp.take()
                     && r.send(result).is_err()
                 {
                     error!("Failed to send response back to caller");
                 }
+                outcome
             }
         }
     }
+}
+
+/// Runs `future` to completion, converting a panic into `Err(payload)`
+/// instead of killing the calling task.
+///
+/// Actor handlers execute user code; without this boundary a single
+/// panicking message ends the whole actor task with pending asks hanging
+/// and watchers unnotified. Implemented over [`std::future::poll_fn`] so
+/// no extra dependency or nightly feature is needed.
+pub async fn catch_panic<F, T>(
+    future: F,
+) -> Result<T, Box<dyn std::any::Any + Send>>
+where
+    F: std::future::Future<Output = T>,
+{
+    use std::future::poll_fn;
+    use std::task::Poll;
+    let mut future = Box::pin(future);
+    poll_fn(|cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future.as_mut().poll(cx)
+        })) {
+            Ok(Poll::Ready(output)) => Poll::Ready(Ok(output)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
+    })
+    .await
 }
 
 /// Mailbox receiver side for consuming messages from the actor's queue.
@@ -117,6 +216,18 @@ where
     sender: MailboxSender<A>,
     /// Strategy to apply when the mailbox is full.
     strategy: OverflowStrategy,
+    /// The path of the actor this helper targets.
+    #[cfg(feature = "prometheus")]
+    path: ActorPath,
+    /// Cached root scope used as a Prometheus label.
+    #[cfg(feature = "prometheus")]
+    scope: Arc<str>,
+    /// Actor type name used as a Prometheus label.
+    #[cfg(feature = "prometheus")]
+    actor_type: Arc<str>,
+    /// Optional Prometheus metrics collection shared by the actor system.
+    #[cfg(feature = "prometheus")]
+    metrics: Option<Arc<crate::metrics::ActorMetrics>>,
 }
 
 impl<A> HandleHelper<A>
@@ -126,8 +237,25 @@ where
     pub(crate) const fn new(
         sender: MailboxSender<A>,
         strategy: OverflowStrategy,
+        #[cfg(feature = "prometheus")] path: ActorPath,
+        #[cfg(feature = "prometheus")] scope: Arc<str>,
+        #[cfg(feature = "prometheus")] actor_type: Arc<str>,
+        #[cfg(feature = "prometheus")] metrics: Option<
+            Arc<crate::metrics::ActorMetrics>,
+        >,
     ) -> Self {
-        Self { sender, strategy }
+        Self {
+            sender,
+            strategy,
+            #[cfg(feature = "prometheus")]
+            path,
+            #[cfg(feature = "prometheus")]
+            scope,
+            #[cfg(feature = "prometheus")]
+            actor_type,
+            #[cfg(feature = "prometheus")]
+            metrics,
+        }
     }
 
     /// Sends a message to the actor without expecting a response
@@ -137,16 +265,59 @@ where
         sender: ActorPath,
         message: A::Message,
     ) -> Result<(), Error> {
+        self.tell_inner(sender, message, MessageMetadata::root())
+            .await
+    }
+
+    /// Like [`tell`](Self::tell), but continues the `correlation_id`
+    /// chain instead of starting a new one.
+    pub(crate) async fn tell_with(
+        &self,
+        sender: ActorPath,
+        message: A::Message,
+        correlation_id: u64,
+    ) -> Result<(), Error> {
+        self.tell_inner(
+            sender,
+            message,
+            MessageMetadata::correlated(correlation_id),
+        )
+        .await
+    }
+
+    async fn tell_inner(
+        &self,
+        sender: ActorPath,
+        message: A::Message,
+        metadata: MessageMetadata,
+    ) -> Result<(), Error> {
         match self.strategy {
             OverflowStrategy::Backpressure => self
                 .sender
-                .send(Envelope::tell(message, sender))
+                .send(Envelope::tell(message, sender, metadata))
                 .await
                 .map_err(|_| Error::ActorStopped),
             OverflowStrategy::DropNewest => {
-                match self.sender.try_send(Envelope::tell(message, sender)) {
+                match self
+                    .sender
+                    .try_send(Envelope::tell(message, sender, metadata))
+                {
                     Ok(()) => Ok(()),
                     Err(mpsc::error::TrySendError::Full(_)) => {
+                        #[cfg(feature = "prometheus")]
+                        if let Some(m) = &self.metrics {
+                            m.inc_mailbox_dropped(
+                                Arc::clone(&self.scope),
+                                Arc::clone(&self.actor_type),
+                                "overflow_drop",
+                            );
+                            if A::detailed_metrics() {
+                                m.inc_mailbox_dropped_detailed(
+                                    &self.path,
+                                    "overflow_drop",
+                                );
+                            }
+                        }
                         tracing::debug!(
                             strategy = ?self.strategy,
                             "Mailbox full, dropping message"
@@ -154,17 +325,56 @@ where
                         Ok(())
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
+                        #[cfg(feature = "prometheus")]
+                        if let Some(m) = &self.metrics {
+                            m.inc_mailbox_dropped(
+                                Arc::clone(&self.scope),
+                                Arc::clone(&self.actor_type),
+                                "closed",
+                            );
+                            if A::detailed_metrics() {
+                                m.inc_mailbox_dropped_detailed(
+                                    &self.path, "closed",
+                                );
+                            }
+                        }
                         Err(Error::ActorStopped)
                     }
                 }
             }
             OverflowStrategy::Fail => {
-                match self.sender.try_send(Envelope::tell(message, sender)) {
+                match self
+                    .sender
+                    .try_send(Envelope::tell(message, sender, metadata))
+                {
                     Ok(()) => Ok(()),
                     Err(mpsc::error::TrySendError::Full(_)) => {
+                        #[cfg(feature = "prometheus")]
+                        if let Some(m) = &self.metrics {
+                            m.inc_mailbox_full(
+                                Arc::clone(&self.scope),
+                                Arc::clone(&self.actor_type),
+                            );
+                            if A::detailed_metrics() {
+                                m.inc_mailbox_full_detailed(&self.path);
+                            }
+                        }
                         Err(Error::MailboxFull)
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
+                        #[cfg(feature = "prometheus")]
+                        if let Some(m) = &self.metrics {
+                            m.inc_mailbox_dropped(
+                                Arc::clone(&self.scope),
+                                Arc::clone(&self.actor_type),
+                                "closed",
+                            );
+                            if A::detailed_metrics() {
+                                m.inc_mailbox_dropped_detailed(
+                                    &self.path, "closed",
+                                );
+                            }
+                        }
                         Err(Error::ActorStopped)
                     }
                 }
@@ -179,28 +389,100 @@ where
         sender: ActorPath,
         message: A::Message,
     ) -> Result<A::Response, Error> {
+        self.ask_inner(sender, message, MessageMetadata::root())
+            .await
+    }
+
+    /// Like [`ask`](Self::ask), but continues the `correlation_id`
+    /// chain instead of starting a new one.
+    pub(crate) async fn ask_with(
+        &self,
+        sender: ActorPath,
+        message: A::Message,
+        correlation_id: u64,
+    ) -> Result<A::Response, Error> {
+        self.ask_inner(
+            sender,
+            message,
+            MessageMetadata::correlated(correlation_id),
+        )
+        .await
+    }
+
+    async fn ask_inner(
+        &self,
+        sender: ActorPath,
+        message: A::Message,
+        metadata: MessageMetadata,
+    ) -> Result<A::Response, Error> {
         // Ask requires a response, so `DropNewest` cannot silently discard the
         // message. Use backpressure for asks under `DropNewest`; only `Fail`
         // returns `MailboxFull` immediately.
         let (response_sender, response_receiver) = oneshot::channel();
         match self.strategy {
             OverflowStrategy::Backpressure | OverflowStrategy::DropNewest => {
-                self.sender
-                    .send(Envelope::ask(message, sender, response_sender))
+                if self
+                    .sender
+                    .send(Envelope::ask(
+                        message,
+                        sender,
+                        response_sender,
+                        metadata,
+                    ))
                     .await
-                    .map_err(|_| Error::ActorStopped)?;
+                    .is_err()
+                {
+                    #[cfg(feature = "prometheus")]
+                    if let Some(m) = &self.metrics {
+                        m.inc_mailbox_dropped(
+                            Arc::clone(&self.scope),
+                            Arc::clone(&self.actor_type),
+                            "closed",
+                        );
+                        if A::detailed_metrics() {
+                            m.inc_mailbox_dropped_detailed(
+                                &self.path, "closed",
+                            );
+                        }
+                    }
+                    return Err(Error::ActorStopped);
+                }
             }
             OverflowStrategy::Fail => {
                 match self.sender.try_send(Envelope::ask(
                     message,
                     sender,
                     response_sender,
+                    metadata,
                 )) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
+                        #[cfg(feature = "prometheus")]
+                        if let Some(m) = &self.metrics {
+                            m.inc_mailbox_full(
+                                Arc::clone(&self.scope),
+                                Arc::clone(&self.actor_type),
+                            );
+                            if A::detailed_metrics() {
+                                m.inc_mailbox_full_detailed(&self.path);
+                            }
+                        }
                         return Err(Error::MailboxFull);
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
+                        #[cfg(feature = "prometheus")]
+                        if let Some(m) = &self.metrics {
+                            m.inc_mailbox_dropped(
+                                Arc::clone(&self.scope),
+                                Arc::clone(&self.actor_type),
+                                "closed",
+                            );
+                            if A::detailed_metrics() {
+                                m.inc_mailbox_dropped_detailed(
+                                    &self.path, "closed",
+                                );
+                            }
+                        }
                         return Err(Error::ActorStopped);
                     }
                 }
@@ -228,6 +510,214 @@ where
         Self {
             sender: self.sender.clone(),
             strategy: self.strategy,
+            #[cfg(feature = "prometheus")]
+            path: self.path.clone(),
+            #[cfg(feature = "prometheus")]
+            scope: Arc::clone(&self.scope),
+            #[cfg(feature = "prometheus")]
+            actor_type: Arc::clone(&self.actor_type),
+            #[cfg(feature = "prometheus")]
+            metrics: self.metrics.clone(),
         }
+    }
+}
+
+#[cfg(all(test, feature = "prometheus"))]
+mod prometheus_tests {
+    use super::*;
+    use crate::{Actor, Handler, NotPersistentActor, metrics::ActorMetrics};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use test_log::test;
+    use tracing::info_span;
+
+    #[derive(Debug, Clone)]
+    struct MetricsTestActor;
+
+    impl NotPersistentActor for MetricsTestActor {}
+
+    #[async_trait]
+    impl Actor for MetricsTestActor {
+        type Message = ();
+        type Event = ();
+        type SinkEvent = ();
+        type Response = ();
+        type ChildError = Error;
+        type ChildFault = Error;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("MetricsTestActor", id = %id)
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Self> for MetricsTestActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    fn helper_with_strategy(
+        strategy: OverflowStrategy,
+        metrics: Option<Arc<ActorMetrics>>,
+    ) -> (
+        HandleHelper<MetricsTestActor>,
+        MailboxReceiver<MetricsTestActor>,
+    ) {
+        let (sender, receiver) = mailbox(1);
+        let helper = HandleHelper::new(
+            sender,
+            strategy,
+            ActorPath::from("/test"),
+            Arc::from("test"),
+            Arc::from("MetricsTestActor"),
+            metrics,
+        );
+        (helper, receiver)
+    }
+
+    #[test(tokio::test)]
+    async fn tell_fail_increments_mailbox_full_total() {
+        let metrics = Arc::new(ActorMetrics::new());
+        let (helper, _receiver) =
+            helper_with_strategy(OverflowStrategy::Fail, Some(metrics.clone()));
+
+        // Fill the single-slot mailbox.
+        assert!(helper.tell(ActorPath::from("/sender"), ()).await.is_ok());
+
+        // The next tell sees a full mailbox.
+        let result = helper.tell(ActorPath::from("/sender"), ()).await;
+
+        assert!(matches!(result, Err(Error::MailboxFull)));
+        assert_eq!(metrics.mailbox_full_count("test", "MetricsTestActor"), 1);
+        assert_eq!(
+            metrics.mailbox_dropped_count("test", "MetricsTestActor", "closed"),
+            0
+        );
+    }
+
+    #[test(tokio::test)]
+    async fn tell_drop_newest_increments_mailbox_dropped_total() {
+        let metrics = Arc::new(ActorMetrics::new());
+        let (helper, _receiver) = helper_with_strategy(
+            OverflowStrategy::DropNewest,
+            Some(metrics.clone()),
+        );
+
+        // Fill the single-slot mailbox.
+        assert!(helper.tell(ActorPath::from("/sender"), ()).await.is_ok());
+
+        // The next tell is silently dropped.
+        let result = helper.tell(ActorPath::from("/sender"), ()).await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            metrics.mailbox_dropped_count(
+                "test",
+                "MetricsTestActor",
+                "overflow_drop"
+            ),
+            1
+        );
+        assert_eq!(
+            metrics.mailbox_dropped_count("test", "MetricsTestActor", "closed"),
+            0
+        );
+    }
+
+    #[test(tokio::test)]
+    async fn ask_fail_increments_mailbox_full_total() {
+        let metrics = Arc::new(ActorMetrics::new());
+        let (helper, _receiver) =
+            helper_with_strategy(OverflowStrategy::Fail, Some(metrics.clone()));
+
+        // Fill the single-slot mailbox with a tell.
+        assert!(helper.tell(ActorPath::from("/sender"), ()).await.is_ok());
+
+        // The ask sees a full mailbox and returns immediately.
+        let result = helper.ask(ActorPath::from("/sender"), ()).await;
+
+        assert!(matches!(result, Err(Error::MailboxFull)));
+        assert_eq!(metrics.mailbox_full_count("test", "MetricsTestActor"), 1);
+    }
+
+    #[test(tokio::test)]
+    async fn tell_fail_closed_increments_mailbox_dropped_total() {
+        let metrics = Arc::new(ActorMetrics::new());
+        let (helper, receiver) =
+            helper_with_strategy(OverflowStrategy::Fail, Some(metrics.clone()));
+
+        drop(receiver);
+
+        let result = helper.tell(ActorPath::from("/sender"), ()).await;
+
+        assert!(matches!(result, Err(Error::ActorStopped)));
+        assert_eq!(
+            metrics.mailbox_dropped_count("test", "MetricsTestActor", "closed"),
+            1
+        );
+    }
+
+    #[test(tokio::test)]
+    async fn tell_drop_newest_closed_increments_mailbox_dropped_total() {
+        let metrics = Arc::new(ActorMetrics::new());
+        let (helper, receiver) = helper_with_strategy(
+            OverflowStrategy::DropNewest,
+            Some(metrics.clone()),
+        );
+
+        drop(receiver);
+
+        let result = helper.tell(ActorPath::from("/sender"), ()).await;
+
+        assert!(matches!(result, Err(Error::ActorStopped)));
+        assert_eq!(
+            metrics.mailbox_dropped_count("test", "MetricsTestActor", "closed"),
+            1
+        );
+    }
+
+    #[test(tokio::test)]
+    async fn ask_fail_closed_increments_mailbox_dropped_total() {
+        let metrics = Arc::new(ActorMetrics::new());
+        let (helper, receiver) =
+            helper_with_strategy(OverflowStrategy::Fail, Some(metrics.clone()));
+
+        drop(receiver);
+
+        let result = helper.ask(ActorPath::from("/sender"), ()).await;
+
+        assert!(matches!(result, Err(Error::ActorStopped)));
+        assert_eq!(
+            metrics.mailbox_dropped_count("test", "MetricsTestActor", "closed"),
+            1
+        );
+    }
+
+    #[test(tokio::test)]
+    async fn ask_backpressure_closed_increments_mailbox_dropped_total() {
+        let metrics = Arc::new(ActorMetrics::new());
+        let (helper, receiver) = helper_with_strategy(
+            OverflowStrategy::Backpressure,
+            Some(metrics.clone()),
+        );
+
+        drop(receiver);
+
+        let result = helper.ask(ActorPath::from("/sender"), ()).await;
+
+        assert!(matches!(result, Err(Error::ActorStopped)));
+        assert_eq!(
+            metrics.mailbox_dropped_count("test", "MetricsTestActor", "closed"),
+            1
+        );
     }
 }

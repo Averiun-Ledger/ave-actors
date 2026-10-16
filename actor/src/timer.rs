@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 use tokio::time::Instant;
-use tracing::debug;
+use tracing::{debug, error};
 
 use crate::{Actor, ActorPath, Error, Handler, SystemRef};
 
@@ -133,6 +133,12 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
     /// first scheduled timer, so actors that never use timers do not pay the
     /// cost of an extra Tokio task.
     pub fn new(system: SystemRef, path: ActorPath, max_timers: usize) -> Self {
+        // Internal invariant: the runner validates `Actor::max_timers`
+        // before constructing; this type is not nameable outside the crate.
+        debug_assert!(
+            max_timers > 0,
+            "TimerScheduler requires max_timers >= 1"
+        );
         let running = Arc::new(AtomicBool::new(true));
         let accepting = Arc::new(AtomicBool::new(false));
         let epoch = Arc::new(AtomicU64::new(0));
@@ -162,15 +168,17 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
     }
 
     fn lock_heap(&self) -> MutexGuard<'_, BinaryHeap<TimerEntry<A>>> {
-        self.heap
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.heap.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("Timer heap lock poisoned; recovering state");
+            poisoned.into_inner()
+        })
     }
 
     fn lock_cancelled(&self) -> MutexGuard<'_, HashSet<TimerKey>> {
-        self.cancelled
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.cancelled.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("Timer cancelled-set lock poisoned; recovering");
+            poisoned.into_inner()
+        })
     }
 
     /// Starts the background timer task if it has not been started yet and the
@@ -310,7 +318,19 @@ impl<A: Actor + Handler<A>> TimerScheduler<A> {
     /// Marks a timer as cancelled. The entry will be discarded when it reaches
     /// the top of the heap.
     pub(crate) fn cancel(&self, key: TimerKey) {
-        self.lock_cancelled().insert(key);
+        // Heap before cancelled: every other site takes them in this order.
+        let heap = self.lock_heap();
+        let mut cancelled = self.lock_cancelled();
+        cancelled.insert(key);
+        // Keys for already-fired timers never reach the top again, so
+        // without this the set would grow without bound on churn.
+        if cancelled.len() > 1024 && cancelled.len() > heap.len() * 2 {
+            let live: HashSet<TimerKey> =
+                heap.iter().map(|entry| entry.key).collect();
+            cancelled.retain(|key| live.contains(key));
+        }
+        drop(heap);
+        drop(cancelled);
         self.notify.notify_one();
     }
 
@@ -349,7 +369,10 @@ async fn timer_loop<A: Actor + Handler<A>>(state: TimerLoopState<A>) {
         let next_deadline = state
             .heap
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| {
+                error!("Timer heap lock poisoned; recovering state");
+                poisoned.into_inner()
+            })
             .peek()
             .map(|entry| entry.deadline);
 
@@ -360,14 +383,7 @@ async fn timer_loop<A: Actor + Handler<A>>(state: TimerLoopState<A>) {
                     _ = sleep => {
                         let current_epoch =
                             state.epoch.load(AtomicOrdering::SeqCst);
-                        fire_expired_timers(
-                            &state.system,
-                            &state.path,
-                            current_epoch,
-                            &state.heap,
-                            &state.cancelled,
-                        )
-                        .await;
+                        fire_expired_timers(&state, current_epoch).await;
                     }
                     _ = state.notify.notified() => {}
                 }
@@ -380,18 +396,17 @@ async fn timer_loop<A: Actor + Handler<A>>(state: TimerLoopState<A>) {
 }
 
 async fn fire_expired_timers<A: Actor + Handler<A>>(
-    system: &SystemRef,
-    path: &ActorPath,
+    state: &TimerLoopState<A>,
     current_epoch: u64,
-    heap: &Arc<Mutex<BinaryHeap<TimerEntry<A>>>>,
-    cancelled: &Arc<Mutex<HashSet<TimerKey>>>,
 ) {
     let now = Instant::now();
     let mut to_fire = Vec::new();
 
     {
-        let mut heap =
-            heap.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut heap = state.heap.lock().unwrap_or_else(|poisoned| {
+            error!("Timer heap lock poisoned; recovering state");
+            poisoned.into_inner()
+        });
 
         while let Some(entry) = heap.pop() {
             if entry.deadline > now {
@@ -401,20 +416,30 @@ async fn fire_expired_timers<A: Actor + Handler<A>>(
                 break;
             }
 
-            let was_cancelled = cancelled
+            let was_cancelled = state
+                .cancelled
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(|poisoned| {
+                    error!("Timer cancelled-set lock poisoned; recovering");
+                    poisoned.into_inner()
+                })
                 .remove(&entry.key);
 
             let active = !was_cancelled && entry.epoch == current_epoch;
 
             // Re-insert periodic timers with their next deadline. Periodic
             // timers created in an older epoch are discarded on this firing.
+            // Coalesce stalls: if the system lagged more than one period,
+            // schedule from now instead of chaining missed deadlines
+            // (which would busy-loop firing expired timers back-to-back).
             if let Some(period) = entry.period
                 && active
             {
+                let now = tokio::time::Instant::now();
+                let next = entry.deadline + period;
+                let deadline = if next <= now { now + period } else { next };
                 heap.push(TimerEntry {
-                    deadline: entry.deadline + period,
+                    deadline,
                     key: entry.key,
                     msg: entry.msg.clone(),
                     period: entry.period,
@@ -431,21 +456,84 @@ async fn fire_expired_timers<A: Actor + Handler<A>>(
     }
 
     for entry in to_fire {
-        match system.get_actor::<A>(path).await {
+        match state.system.get_actor::<A>(&state.path).await {
             Ok(actor_ref) => {
                 if actor_ref.tell(entry.msg).await.is_err() {
                     debug!(
-                        path = %path,
+                        path = %state.path,
                         "Timer message could not be delivered; actor stopped"
                     );
                 }
             }
             Err(_) => {
                 debug!(
-                    path = %path,
+                    path = %state.path,
                     "Timer target actor not found; discarding timer message"
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ActorSystem;
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Clone)]
+    struct TimerTestActor;
+
+    impl crate::NotPersistentActor for TimerTestActor {}
+
+    #[async_trait::async_trait]
+    impl crate::actor::Actor for TimerTestActor {
+        type Message = ();
+        type Response = ();
+        type Event = ();
+        type SinkEvent = ();
+        type ChildError = crate::Error;
+        type ChildFault = crate::Error;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            tracing::info_span!("TimerTestActor", id = %id)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::actor::Handler<Self> for TimerTestActor {
+        async fn handle_message(
+            &mut self,
+            _sender: crate::ActorPath,
+            _msg: (),
+            _ctx: &mut crate::ActorContext<Self>,
+        ) -> Result<(), crate::Error> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_set_stays_bounded_without_heap_entries() {
+        let (system, _runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let path = crate::ActorPath::from("/user/timers");
+        let scheduler =
+            TimerScheduler::<TimerTestActor>::new(system, path, 100000);
+
+        // Cancel keys that were never scheduled: without sweeping, all
+        // 5000 would accumulate forever; the sweep bounds the set.
+        for id in 0..5000u64 {
+            scheduler.cancel(TimerKey::new(id));
+        }
+
+        assert!(
+            scheduler.lock_cancelled().len() <= 1024,
+            "stale cancelled keys must be swept"
+        );
     }
 }

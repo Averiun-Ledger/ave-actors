@@ -9,7 +9,7 @@ use crate::{
         validate_mailbox_capacity, validate_max_timers,
         validate_optional_timeout, validate_timeout,
     },
-    handler::{Envelope, HandleHelper, MailboxReceiver, mailbox},
+    handler::{Envelope, HandleHelper, MailboxReceiver, catch_panic, mailbox},
     sink::Sink,
     supervision::{RetryStrategy, SupervisionStrategy},
     system::SystemRef,
@@ -26,6 +26,32 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 use tracing::{debug, error, warn};
+
+#[cfg(feature = "prometheus")]
+pub fn actor_type_name<A: Actor>() -> Arc<str> {
+    let full = std::any::type_name::<A>();
+    let short = full
+        .rsplit("::")
+        .next()
+        .unwrap_or(full)
+        .split('<')
+        .next()
+        .unwrap_or(full);
+    Arc::from(short)
+}
+
+#[cfg(feature = "prometheus")]
+const fn strategy_label(strategy: &SupervisionStrategy) -> &'static str {
+    match strategy {
+        SupervisionStrategy::Stop => "Stop",
+        SupervisionStrategy::Retry(strategy) => match strategy {
+            crate::supervision::Strategy::NoInterval(_) => "NoInterval",
+            crate::supervision::Strategy::Interval(_) => "Interval",
+            crate::supervision::Strategy::Exponential(_) => "Exponential",
+            crate::supervision::Strategy::CustomIntervalStrategy(_) => "Custom",
+        },
+    }
+}
 
 /// Signal received through the actor's stop channel.
 pub enum StopSignal {
@@ -85,6 +111,21 @@ pub struct ActorRunner<A: Actor> {
 
     stop_signal: bool,
     sinks: Arc<DashMap<String, Sink<A::SinkEvent>>>,
+    /// Middleware snapshotted from the system at init. Empty in the
+    /// common case, when the hot path below skips every hook.
+    interceptors: Vec<Arc<dyn crate::middleware::Interceptor>>,
+    /// Optional Prometheus metrics collection shared by the actor system.
+    #[cfg(feature = "prometheus")]
+    metrics: Option<Arc<crate::metrics::ActorMetrics>>,
+    /// Cached short actor type name used as a Prometheus label.
+    #[cfg(feature = "prometheus")]
+    actor_type: Arc<str>,
+    /// Cached root scope used as a Prometheus label.
+    #[cfg(feature = "prometheus")]
+    scope: Arc<str>,
+    /// Pre-created per-message metric handles (hot path without lookups).
+    #[cfg(feature = "prometheus")]
+    message_metrics: Option<crate::metrics::MessageMetricHandles>,
 }
 
 impl<A> ActorRunner<A>
@@ -100,6 +141,9 @@ where
         actor: A,
         parent_info: Option<crate::parent_ref::ParentInfo>,
         stop_channel_size: usize,
+        #[cfg(feature = "prometheus")] metrics: Option<
+            Arc<crate::metrics::ActorMetrics>,
+        >,
     ) -> Result<(Self, ActorRef<A>, StopSender), Error> {
         let mailbox_capacity = A::mailbox_capacity();
         validate_mailbox_capacity(mailbox_capacity)?;
@@ -119,13 +163,38 @@ where
         validate_max_timers(A::max_timers())?;
         A::supervision_strategy().validate()?;
 
+        #[cfg(feature = "prometheus")]
+        let actor_type = actor_type_name::<A>();
+        #[cfg(feature = "prometheus")]
+        let scope = Arc::from(path.scope_key());
+
         let (sender, receiver) = mailbox(mailbox_capacity);
         let (stop_sender, stop_receiver) = mpsc::channel(stop_channel_size);
         let (error_sender, error_receiver) =
             crate::parent_ref::child_error_channel(stop_channel_size);
-        let helper = HandleHelper::new(sender, A::mailbox_overflow_strategy());
+        let helper = HandleHelper::new(
+            sender,
+            A::mailbox_overflow_strategy(),
+            #[cfg(feature = "prometheus")]
+            path.clone(),
+            #[cfg(feature = "prometheus")]
+            Arc::clone(&scope),
+            #[cfg(feature = "prometheus")]
+            Arc::clone(&actor_type),
+            #[cfg(feature = "prometheus")]
+            metrics.clone(),
+        );
         let sinks = Arc::new(DashMap::<String, Sink<A::SinkEvent>>::new());
 
+        #[cfg(feature = "prometheus")]
+        let actor_ref = ActorRef::new_with_metrics(
+            Arc::new(path.clone()),
+            helper,
+            stop_sender.clone(),
+            sinks.clone(),
+            metrics.clone(),
+        );
+        #[cfg(not(feature = "prometheus"))]
         let actor_ref = ActorRef::new(
             Arc::new(path.clone()),
             helper,
@@ -145,7 +214,23 @@ where
             error_receiver,
             stop_signal: false,
             sinks,
+            interceptors: Vec::new(),
+            #[cfg(feature = "prometheus")]
+            metrics: metrics.clone(),
+            #[cfg(feature = "prometheus")]
+            actor_type: Arc::clone(&actor_type),
+            #[cfg(feature = "prometheus")]
+            scope: Arc::clone(&scope),
+            #[cfg(feature = "prometheus")]
+            message_metrics: metrics.as_ref().map(|m| {
+                crate::metrics::MessageMetricHandles::new(
+                    m,
+                    &scope,
+                    &actor_type,
+                )
+            }),
         };
+
         Ok((runner, actor_ref, stop_sender))
     }
 
@@ -162,6 +247,7 @@ where
             self.path.clone(),
             A::max_timers(),
         );
+        self.interceptors = system.interceptors_snapshot();
         let spawned_tasks = Arc::new(Mutex::new(Vec::new()));
 
         // Create the actor context.
@@ -186,24 +272,70 @@ where
                 // State: CREATED
                 ActorLifecycle::Created => {
                     ctx.timer_scheduler.set_accepting(true);
-                    // Pre-start hook.
-                    match self.actor.pre_start(&mut ctx).await {
-                        Ok(_) => {
-                            debug!("Actor started");
-                            self.lifecycle = ActorLifecycle::Started;
-                        }
-                        Err(err) => {
-                            error!(error = %err, "Actor failed to start");
-                            ctx.set_startup_error(err);
-                            if self.parent_info.is_some() {
-                                // Child actor: notify synchronously via the
-                                // init oneshot only; the parent already sees
-                                // the failure through create_child Err.
-                                self.lifecycle = ActorLifecycle::Terminated;
-                            } else {
-                                self.lifecycle = ActorLifecycle::Failed;
+                    // Pre-start hook. A panic is treated like a startup
+                    // error so the actor follows the Failed path instead
+                    // of killing the init task silently.
+                    match catch_panic(self.actor.pre_start(&mut ctx)).await {
+                        Err(_) => {
+                            error!(
+                                path = %self.path,
+                                "Actor panicked in pre_start"
+                            );
+                            #[cfg(feature = "prometheus")]
+                            if let Some(m) = &self.metrics {
+                                m.inc_actor_failed(
+                                    Arc::clone(&self.scope),
+                                    Arc::clone(&self.actor_type),
+                                    "pre_start",
+                                );
+                                if A::detailed_metrics() {
+                                    m.inc_actor_failed_detailed(
+                                        &self.path,
+                                        "pre_start",
+                                    );
+                                };
                             }
+                            self.lifecycle = ActorLifecycle::Failed;
+                            ctx.set_startup_error(Error::FunctionalCritical {
+                                description: "pre_start panicked".to_owned(),
+                            });
+                            if self.parent_info.is_some() {
+                                self.lifecycle = ActorLifecycle::Terminated;
+                            }
+                            continue;
                         }
+                        Ok(result) => match result {
+                            Ok(_) => {
+                                debug!("Actor started");
+                                self.lifecycle = ActorLifecycle::Started;
+                            }
+                            Err(err) => {
+                                error!(error = %err, "Actor failed to start");
+                                #[cfg(feature = "prometheus")]
+                                if let Some(m) = &self.metrics {
+                                    m.inc_actor_failed(
+                                        Arc::clone(&self.scope),
+                                        Arc::clone(&self.actor_type),
+                                        "pre_start",
+                                    );
+                                    if A::detailed_metrics() {
+                                        m.inc_actor_failed_detailed(
+                                            &self.path,
+                                            "pre_start",
+                                        );
+                                    };
+                                }
+                                ctx.set_startup_error(err);
+                                if self.parent_info.is_some() {
+                                    // Child actor: notify synchronously via the
+                                    // init oneshot only; the parent already sees
+                                    // the failure through create_child Err.
+                                    self.lifecycle = ActorLifecycle::Terminated;
+                                } else {
+                                    self.lifecycle = ActorLifecycle::Failed;
+                                }
+                            }
+                        },
                     }
                 }
                 // State: STARTED
@@ -213,23 +345,76 @@ where
                     {
                         error!(error = ?err, "Failed to send start signal");
                     }
+                    #[cfg(feature = "prometheus")]
+                    if let Some(m) = &self.metrics {
+                        m.inc_actor_active(
+                            Arc::clone(&self.scope),
+                            Arc::clone(&self.actor_type),
+                        );
+                    }
                     pending_stop_ack = self.run(&mut ctx).await;
+                    #[cfg(feature = "prometheus")]
+                    if let Some(m) = &self.metrics {
+                        m.dec_actor_active(
+                            Arc::clone(&self.scope),
+                            Arc::clone(&self.actor_type),
+                        );
+                    }
                     if self.pending_fault.is_some() {
+                        #[cfg(feature = "prometheus")]
+                        if let Some(m) = &self.metrics {
+                            m.inc_actor_failed(
+                                Arc::clone(&self.scope),
+                                Arc::clone(&self.actor_type),
+                                "fault",
+                            );
+                            if A::detailed_metrics() {
+                                m.inc_actor_failed_detailed(
+                                    &self.path, "fault",
+                                );
+                            };
+                        }
                         self.lifecycle = ActorLifecycle::Failed;
                     }
                 }
                 // State: RESTARTED
                 ActorLifecycle::Restarted => {
                     ctx.timer_scheduler.set_accepting(true);
-                    // Apply supervision strategy.
-                    self.apply_supervision_strategy(&mut ctx, &mut retries)
-                        .await;
+                    // Apply supervision strategy. A stop arriving during
+                    // the backoff wait is returned for immediate handling
+                    // instead of stalling shutdown until the wait ends.
+                    if let Some(signal) = self
+                        .apply_supervision_strategy(&mut ctx, &mut retries)
+                        .await
+                    {
+                        match signal {
+                            StopSignal::Stop(ack) => {
+                                pending_stop_ack = ack;
+                                self.lifecycle = ActorLifecycle::Stopped;
+                            }
+                            StopSignal::Fault(fault, ack) => {
+                                self.pending_fault = Some(fault);
+                                pending_stop_ack = ack;
+                                self.lifecycle = ActorLifecycle::Failed;
+                            }
+                        }
+                    }
                 }
                 // State: STOPPED
                 ActorLifecycle::Stopped => {
-                    // Post stop hook.
-                    if let Err(e) = self.actor.post_stop(&mut ctx).await {
-                        error!(error = %e, "Actor failed post_stop");
+                    // Post stop hook. A panic is logged; shutdown proceeds.
+                    match catch_panic(self.actor.post_stop(&mut ctx)).await {
+                        Ok(result) => {
+                            if let Err(e) = result {
+                                error!(error = %e, "Actor failed post_stop");
+                            }
+                        }
+                        Err(_) => {
+                            error!(
+                                path = %self.path,
+                                "post_stop panicked; continuing shutdown"
+                            );
+                        }
                     }
                     if let Some(stop_sender) = pending_stop_ack.take() {
                         let _ = stop_sender.send(());
@@ -344,9 +529,20 @@ where
                     // do not outlive the actor.
                     ctx.abort_spawned_tasks();
 
-                    // 3. Pre-stop hook.
-                    if let Err(e) = self.actor.pre_stop(ctx).await {
-                        error!(error = %e, "pre_stop failed");
+                    // 3. Pre-stop hook. A panic must not kill the
+                    // shutdown path: log and continue stopping.
+                    match catch_panic(self.actor.pre_stop(ctx)).await {
+                        Ok(result) => {
+                            if let Err(e) = result {
+                                error!(error = %e, "pre_stop failed");
+                            }
+                        }
+                        Err(_) => {
+                            error!(
+                                path = %self.path,
+                                "pre_stop panicked; continuing shutdown"
+                            );
+                        }
                     }
 
                     // 3. Drain mailbox: process critical, discard non-critical.
@@ -385,17 +581,41 @@ where
                     }
                     break;
                 }
-                // Handle error from `ErrorBoxReceiver`.
+                // Handle an error or fault reported by a child actor.
                 error = self.error_receiver.recv(), if !self.stop_signal => {
                     if let Some(error) = error {
                         match error {
                             ChildError::Error { error } => {
                                 debug!(error = ?error, "Child error received");
-                                self.actor.on_child_error(error, ctx).await
+                                if catch_panic(
+                                    self.actor.on_child_error(error, ctx),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    error!(
+                                        path = %self.path,
+                                        "on_child_error panicked"
+                                    );
+                                }
                             },
                             ChildError::Fault { error, sender } => {
                                 warn!(error = ?error, "Child fault received");
-                                let action = self.actor.on_child_fault(error, ctx).await;
+                                let action = match catch_panic(
+                                    self.actor.on_child_fault(error, ctx),
+                                )
+                                .await
+                                {
+                                    Ok(action) => action,
+                                    Err(_) => {
+                                        error!(
+                                            path = %self.path,
+                                            "on_child_fault panicked; \
+                                             stopping child"
+                                        );
+                                        ChildAction::Stop
+                                    }
+                                };
                                 if sender.send(action).is_err() {
                                     error!("Failed to send action to child");
                                 }
@@ -409,10 +629,118 @@ where
                         self.stop_signal = true;
                     }
                 }
-                // Gets message handler from mailbox receiver and push it to the messages queue.
+                // Receive the next message from the mailbox.
                 msg = self.receiver.recv(), if !self.stop_signal => {
-                    if let Some(mut msg) = msg {
-                        msg.handle(&mut self.actor, ctx).await;
+                    if let Some(mut envelope) = msg {
+                        let metadata = envelope.metadata();
+                        ctx.set_current_metadata(metadata);
+                        // Middleware is opt-in: with an empty registry
+                        // this is one branch and no clock reads.
+                        let observed = !self.interceptors.is_empty();
+                        let route_kind = if observed {
+                            match &envelope {
+                                Envelope::Tell { .. } => "tell",
+                                Envelope::Ask { .. } => "ask",
+                            }
+                        } else {
+                            ""
+                        };
+                        if observed {
+                            let view =
+                                crate::middleware::Intercept {
+                                    path: &self.path,
+                                    kind: route_kind,
+                                    metadata,
+                                };
+                            for interceptor in &self.interceptors {
+                                interceptor.before_handle(view);
+                            }
+                        }
+                        let intercept_start = observed.then(|| {
+                            std::time::Instant::now()
+                        });
+                        #[cfg(feature = "prometheus")]
+                        let kind = match &envelope {
+                            Envelope::Tell { .. } => "tell",
+                            Envelope::Ask { .. } => "ask",
+                        };
+                        #[cfg(feature = "prometheus")]
+                        let critical = envelope.is_critical();
+                        // Skip clock reads when no metrics are installed.
+                        #[cfg(feature = "prometheus")]
+                        let start = self
+                            .metrics
+                            .as_ref()
+                            .map(|_| std::time::Instant::now());
+                        // A panicking handler must not kill the actor task:
+                        // answer pending asks with an error and keep the
+                        // mailbox running under the usual error semantics.
+                        let result = match catch_panic(
+                            envelope.handle(&mut self.actor, ctx),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => {
+                                error!(
+                                    path = %self.path,
+                                    "Message handler panicked; answering \
+                                     with an error"
+                                );
+                                envelope.respond_error(
+                                    Error::FunctionalCritical {
+                                        description:
+                                            "message handler panicked"
+                                                .to_owned(),
+                                    },
+                                );
+                                Err(Error::FunctionalCritical {
+                                    description:
+                                        "message handler panicked".to_owned(),
+                                })
+                            }
+                        };
+                        #[cfg(not(feature = "prometheus"))]
+                        let _ = result;
+                        if observed {
+                            let view =
+                                crate::middleware::Intercept {
+                                    path: &self.path,
+                                    kind: route_kind,
+                                    metadata,
+                                };
+                            let elapsed = intercept_start
+                                .map(|start| start.elapsed())
+                                .unwrap_or_default();
+                            for interceptor in &self.interceptors {
+                                interceptor.after_handle(
+                                    view,
+                                    &result,
+                                    elapsed,
+                                );
+                            }
+                        }
+                        #[cfg(feature = "prometheus")]
+                        {
+                            if let (Some(handles), Some(start)) =
+                                (&self.message_metrics, start)
+                            {
+                                let queued_at = envelope.queued_at();
+                                let wait_seconds = start
+                                    .saturating_duration_since(queued_at)
+                                    .as_secs_f64();
+                                let duration =
+                                    start.elapsed().as_secs_f64();
+                                let ok = result.is_ok();
+                                handles.processed(kind, ok).inc();
+                                handles
+                                    .duration(kind, critical)
+                                    .observe(duration);
+                                handles
+                                    .wait(kind, critical)
+                                    .observe(wait_seconds);
+                            }
+                        }
                     } else {
                         ctx.stop(None).await;
                         self.stop_signal = true;
@@ -444,6 +772,20 @@ where
                 critical.push(msg);
             } else {
                 msg.respond_stopped();
+                #[cfg(feature = "prometheus")]
+                if let Some(m) = &self.metrics {
+                    m.inc_mailbox_dropped(
+                        Arc::clone(&self.scope),
+                        Arc::clone(&self.actor_type),
+                        "drain_discard",
+                    );
+                    if A::detailed_metrics() {
+                        m.inc_mailbox_dropped_detailed(
+                            &self.path,
+                            "drain_discard",
+                        );
+                    }
+                }
             }
         }
 
@@ -457,6 +799,20 @@ where
         for mut msg in critical {
             if timed_out {
                 msg.respond_stopped();
+                #[cfg(feature = "prometheus")]
+                if let Some(m) = &self.metrics {
+                    m.inc_mailbox_dropped(
+                        Arc::clone(&self.scope),
+                        Arc::clone(&self.actor_type),
+                        "drain_timeout",
+                    );
+                    if A::detailed_metrics() {
+                        m.inc_mailbox_dropped_detailed(
+                            &self.path,
+                            "drain_timeout",
+                        );
+                    }
+                }
                 continue;
             }
 
@@ -468,16 +824,100 @@ where
                 );
                 timed_out = true;
                 msg.respond_stopped();
+                #[cfg(feature = "prometheus")]
+                if let Some(m) = &self.metrics {
+                    m.inc_mailbox_dropped(
+                        Arc::clone(&self.scope),
+                        Arc::clone(&self.actor_type),
+                        "drain_timeout",
+                    );
+                    if A::detailed_metrics() {
+                        m.inc_mailbox_dropped_detailed(
+                            &self.path,
+                            "drain_timeout",
+                        );
+                    }
+                }
                 continue;
             }
 
-            if tokio::time::timeout(remaining, msg.handle(&mut self.actor, ctx))
-                .await
-                .is_err()
+            #[cfg(feature = "prometheus")]
+            let kind = match &msg {
+                Envelope::Tell { .. } => "tell",
+                Envelope::Ask { .. } => "ask",
+            };
+            #[cfg(feature = "prometheus")]
+            let start =
+                self.metrics.as_ref().map(|_| std::time::Instant::now());
+
+            match tokio::time::timeout(
+                remaining,
+                catch_panic(msg.handle(&mut self.actor, ctx)),
+            )
+            .await
             {
-                warn!("Critical message handling timed out");
-                timed_out = true;
-                msg.respond_stopped();
+                Ok(Ok(_result)) => {
+                    #[cfg(feature = "prometheus")]
+                    {
+                        if let (Some(handles), Some(start)) =
+                            (&self.message_metrics, start)
+                        {
+                            let queued_at = msg.queued_at();
+                            let wait_seconds = start
+                                .saturating_duration_since(queued_at)
+                                .as_secs_f64();
+                            let duration = start.elapsed().as_secs_f64();
+                            let ok = _result.is_ok();
+                            handles.processed(kind, ok).inc();
+                            handles.duration(kind, true).observe(duration);
+                            handles.wait(kind, true).observe(wait_seconds);
+                        }
+                    }
+                }
+                Ok(Err(_)) => {
+                    // The handler panicked mid-drain: answer and keep
+                    // draining instead of killing the shutdown path.
+                    error!(
+                        path = %self.path,
+                        "Message handler panicked during drain"
+                    );
+                    msg.respond_error(Error::FunctionalCritical {
+                        description: "message handler panicked".to_owned(),
+                    });
+                    #[cfg(feature = "prometheus")]
+                    if let Some(m) = &self.metrics {
+                        m.inc_mailbox_dropped(
+                            Arc::clone(&self.scope),
+                            Arc::clone(&self.actor_type),
+                            "drain_panic",
+                        );
+                        if A::detailed_metrics() {
+                            m.inc_mailbox_dropped_detailed(
+                                &self.path,
+                                "drain_panic",
+                            );
+                        }
+                    }
+                }
+                Err(_) => {
+                    warn!("Critical message handling timed out");
+                    timed_out = true;
+                    msg.respond_stopped();
+                    #[cfg(feature = "prometheus")]
+                    if let Some(m) = &self.metrics {
+                        m.inc_mailbox_dropped(
+                            Arc::clone(&self.scope),
+                            Arc::clone(&self.actor_type),
+                            "drain_timeout",
+                        );
+                        if A::detailed_metrics() {
+                            m.inc_mailbox_dropped_detailed(
+                                &self.path,
+                                "drain_timeout",
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -514,15 +954,20 @@ where
     /// Apply supervision strategy.
     /// If the actor fails, the strategy is applied.
     ///
+    /// Returns a stop signal when one arrives while waiting out the retry
+    /// backoff, so shutdown is not stalled by long backoffs. The caller
+    /// processes it as if received in the main loop.
     async fn apply_supervision_strategy(
         &mut self,
         ctx: &mut ActorContext<A>,
         retries: &mut usize,
-    ) {
+    ) -> Option<StopSignal> {
         let strategy = std::mem::replace(
             &mut self.supervision_strategy,
             SupervisionStrategy::Stop,
         );
+        #[cfg(feature = "prometheus")]
+        let restart_strategy_label = strategy_label(&strategy);
 
         match strategy {
             SupervisionStrategy::Stop => {
@@ -543,11 +988,28 @@ where
                             backoff_ms = duration.as_millis(),
                             "Waiting before retry"
                         );
-                        tokio::time::sleep(duration).await;
+                        let interrupted = tokio::select! {
+                            () = tokio::time::sleep(duration) => None,
+                            stop = self.stop_receiver.recv() => stop,
+                        };
+                        if let Some(signal) = interrupted {
+                            // Stop arrived mid-backoff: skip the restart.
+                            self.supervision_strategy =
+                                SupervisionStrategy::Retry(retry_strategy);
+                            return Some(signal);
+                        }
                     }
                     *retries += 1;
                     match ctx.restart(&mut self.actor).await {
                         Ok(_) => {
+                            #[cfg(feature = "prometheus")]
+                            if let Some(m) = &self.metrics {
+                                m.inc_actor_restarted(
+                                    Arc::clone(&self.scope),
+                                    Arc::clone(&self.actor_type),
+                                    restart_strategy_label,
+                                );
+                            }
                             self.pending_fault = None;
                             ctx.clean_startup_error();
                             self.lifecycle = ActorLifecycle::Started;
@@ -556,6 +1018,21 @@ where
                                 A::supervision_strategy();
                         }
                         Err(err) => {
+                            error!(error = %err, "Actor failed to restart");
+                            #[cfg(feature = "prometheus")]
+                            if let Some(m) = &self.metrics {
+                                m.inc_actor_failed(
+                                    Arc::clone(&self.scope),
+                                    Arc::clone(&self.actor_type),
+                                    "pre_restart",
+                                );
+                                if A::detailed_metrics() {
+                                    m.inc_actor_failed_detailed(
+                                        &self.path,
+                                        "pre_restart",
+                                    );
+                                };
+                            }
                             ctx.set_startup_error(err);
                             self.supervision_strategy =
                                 SupervisionStrategy::Retry(retry_strategy);
@@ -572,6 +1049,7 @@ where
                 }
             }
         }
+        None
     }
 }
 
@@ -579,6 +1057,20 @@ where
 mod tests {
 
     use super::*;
+
+    #[cfg(not(feature = "prometheus"))]
+    macro_rules! create_test_runner {
+        ($path:expr, $actor:expr, $parent:expr, $stop_size:expr $(,)?) => {
+            ActorRunner::create($path, $actor, $parent, $stop_size)
+        };
+    }
+
+    #[cfg(feature = "prometheus")]
+    macro_rules! create_test_runner {
+        ($path:expr, $actor:expr, $parent:expr, $stop_size:expr $(,)?) => {
+            ActorRunner::create($path, $actor, $parent, $stop_size, None)
+        };
+    }
 
     use crate::{
         Error,
@@ -703,7 +1195,7 @@ mod tests {
         );
 
         let actor = TestActor { failed: false };
-        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+        let (mut runner, actor_ref, stop_sender) = create_test_runner!(
             ActorPath::from("/user/test"),
             actor,
             None,
@@ -726,21 +1218,18 @@ mod tests {
             }
             .instrument(TestActor::get_span("spawn", None)),
         );
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // No sleep needed before `tell`: the message queues in the mailbox
+        // and `init` processes it once the runner starts.
 
         actor_ref
             .tell(TestMessage(ErrorMessage::Stop))
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        assert!(
-            system
-                .get_actor::<TestActor>(&ActorPath::from("/user/test"))
-                .await
-                .is_err()
-        );
+        // Wait for the stop to complete instead of a fixed sleep.
+        tokio::time::timeout(Duration::from_secs(5), actor_ref.closed())
+            .await
+            .expect("actor should stop after Stop message");
     }
 
     // ========== Shutdown drain tests ==========
@@ -874,6 +1363,8 @@ mod tests {
                 }
                 SlowMsg::SlowCritical => {
                     // Sleeps well beyond mailbox_drain_timeout (50ms)
+                    // timing: simulated slow handler so the drain timeout
+                    // fires deterministically.
                     tokio::time::sleep(Duration::from_millis(300)).await;
                 }
             }
@@ -904,14 +1395,14 @@ mod tests {
         // already closed when this returns.
         actor_ref.ask_stop().await.unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             actor_ref.tell(DrainMsg::Normal).await,
             Err(Error::ActorStopped)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             actor_ref.ask(DrainMsg::Normal).await,
             Err(Error::ActorStopped)
-        );
+        ));
     }
 
     /// During shutdown drain: critical messages are processed, non-critical ask
@@ -957,6 +1448,8 @@ mod tests {
         });
 
         // Give the spawned tasks time to place their messages in the mailbox.
+        // timing: pacing pause so both asks queue behind the block before
+        // the stop signal triggers the drain.
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         // Step 3: send stop signal (non-blocking, no confirmation wait)
@@ -968,7 +1461,10 @@ mod tests {
         let normal_result = normal_join.await.unwrap();
         let critical_result = critical_join.await.unwrap();
 
-        assert_eq!(normal_result, Err(Error::ActorStopped));
+        assert!(
+            matches!(normal_result, Err(Error::ActorStopped)),
+            "normal message should be rejected: {normal_result:?}"
+        );
         assert!(
             critical_result.is_ok(),
             "critical message should be processed: {critical_result:?}"
@@ -1014,15 +1510,21 @@ mod tests {
             async move { r.ask(SlowMsg::SlowCritical).await }
         });
 
+        // timing: pacing pause so the ask queues behind the block before
+        // the stop signal triggers the drain.
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         actor_ref.tell_stop().await;
         release.notify_one();
 
         // mailbox_drain_timeout = 50ms, SlowCritical handler sleeps 300ms
-        // -> timeout fires
+        // -> timeout fires (timing: handler/sleep above + this drain window
+        // are the timeout under test, not sync sleeps).
         let result = slow_join.await.unwrap();
-        assert_eq!(result, Err(Error::ActorStopped));
+        assert!(
+            matches!(result, Err(Error::ActorStopped)),
+            "expected ActorStopped, got {result:?}"
+        );
     }
 
     // Actor that always fails pre_start with Retry strategy (1 retry).
@@ -1082,7 +1584,7 @@ mod tests {
             CancellationToken::new(),
             CancellationToken::new(),
         );
-        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+        let (mut runner, actor_ref, stop_sender) = create_test_runner!(
             ActorPath::from("/user/max_retries"),
             MaxRetriesActor,
             None,
@@ -1161,7 +1663,7 @@ mod tests {
             CancellationToken::new(),
             CancellationToken::new(),
         );
-        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+        let (mut runner, actor_ref, stop_sender) = create_test_runner!(
             ActorPath::from("/user/stop_strategy"),
             StopStrategyActor,
             None,
@@ -1227,7 +1729,7 @@ mod tests {
             CancellationToken::new(),
             CancellationToken::new(),
         );
-        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+        let (mut runner, actor_ref, stop_sender) = create_test_runner!(
             ActorPath::from("/user/simple"),
             SimpleRunningActor,
             None,
@@ -1245,6 +1747,8 @@ mod tests {
                 )
                 .await;
         });
+        // timing: pacing pause so the runner init starts before the
+        // mailbox is dropped; there is no observable start signal to poll.
         tokio::time::sleep(Duration::from_millis(50)).await;
         drop(actor_ref);
         tokio::time::timeout(Duration::from_secs(2), handle)
@@ -1320,7 +1824,7 @@ mod tests {
             CancellationToken::new(),
             CancellationToken::new(),
         );
-        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+        let (mut runner, actor_ref, stop_sender) = create_test_runner!(
             ActorPath::from("/user/pre_restart_err"),
             PreRestartErrorActor,
             None,
@@ -1414,7 +1918,7 @@ mod tests {
         let actor = RetryOnceActor {
             failed: Arc::new(Mutex::new(true)),
         };
-        let (mut runner, actor_ref, stop_sender) = ActorRunner::create(
+        let (mut runner, actor_ref, stop_sender) = create_test_runner!(
             ActorPath::from("/user/retry_success"),
             actor,
             None,
@@ -1433,12 +1937,576 @@ mod tests {
                 .await;
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Poll until the retry cycle revives the actor instead of a fixed
+        // sleep.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if actor_ref.ask(()).await.is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "actor never recovered from retry"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         actor_ref.tell_stop().await;
 
         tokio::time::timeout(Duration::from_secs(2), actor_ref.closed())
             .await
             .expect("actor should stop");
         handle.await.unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "prometheus"))]
+mod prometheus_tests {
+    use crate::metrics::{
+        ActorActiveLabels, ActorFailureLabels, ActorMetrics,
+        ActorRestartLabels, MessageLabels,
+    };
+    use crate::supervision::{
+        NoIntervalStrategy, Strategy, SupervisionStrategy,
+    };
+    use crate::{
+        Actor, ActorContext, ActorPath, ActorSystemConfig, Error, Handler,
+        Message, NotPersistentActor, SystemRef, SystemRunner,
+    };
+    use async_trait::async_trait;
+    use prometheus_client::registry::Registry;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use test_log::test;
+    use tokio_util::sync::CancellationToken;
+    use tracing::info_span;
+
+    #[derive(Debug, Clone)]
+    struct Ping;
+
+    impl Message for Ping {}
+
+    #[derive(Debug, Clone)]
+    struct MetricsActor;
+
+    impl NotPersistentActor for MetricsActor {}
+
+    #[async_trait]
+    impl Actor for MetricsActor {
+        type Message = Ping;
+        type Response = ();
+        type Event = ();
+        type SinkEvent = ();
+        type ChildError = Error;
+        type ChildFault = Error;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("MetricsActor", id = %id)
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Self> for MetricsActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: Ping,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    fn encode(registry: &Registry) -> String {
+        let mut buf = String::new();
+        prometheus_client::encoding::text::encode(&mut buf, registry)
+            .expect("prometheus registry should encode to text");
+        buf
+    }
+
+    fn system_with_metrics(
+        registry: &mut Registry,
+    ) -> (
+        SystemRef,
+        SystemRunner,
+        Arc<ActorMetrics>,
+        CancellationToken,
+        CancellationToken,
+    ) {
+        let metrics = Arc::new(ActorMetrics::new());
+        metrics.register_into(registry);
+        let graceful = CancellationToken::new();
+        let crash = CancellationToken::new();
+        let (mut system, shutdown_complete) = SystemRef::new(
+            ActorSystemConfig::default(),
+            graceful.clone(),
+            crash.clone(),
+        );
+        system.actor_metrics = Some(metrics.clone());
+        let runner = SystemRunner::new(
+            graceful.clone(),
+            crash.clone(),
+            shutdown_complete,
+        );
+        (system, runner, metrics, graceful, crash)
+    }
+
+    #[test(tokio::test)]
+    async fn message_metrics_are_emitted() {
+        let mut registry = Registry::default();
+        let (system, _runner, metrics, _graceful, _crash) =
+            system_with_metrics(&mut registry);
+
+        let actor_ref = system
+            .create_root_actor("message_metrics", MetricsActor)
+            .await
+            .expect("root actor should be created");
+
+        actor_ref
+            .ask(Ping)
+            .await
+            .expect("ask should receive a response");
+        actor_ref
+            .ask_stop()
+            .await
+            .expect("actor should stop gracefully");
+
+        assert_eq!(
+            metrics
+                .actor_messages_processed_total
+                .get_or_create(&MessageLabels {
+                    scope: Arc::from("user"),
+                    actor_type: Arc::from("MetricsActor"),
+                    kind: "ask",
+                    result: "ok",
+                })
+                .get(),
+            1
+        );
+
+        let output = encode(&registry);
+        assert!(output.contains("ave_actors_actor_messages_processed_total"));
+        assert!(output.contains("ave_actors_actor_message_duration_seconds"));
+    }
+
+    #[derive(Debug, Clone)]
+    struct FailingPreStartActor;
+
+    impl NotPersistentActor for FailingPreStartActor {}
+
+    #[async_trait]
+    impl Actor for FailingPreStartActor {
+        type Message = ();
+        type Response = ();
+        type Event = ();
+        type SinkEvent = ();
+        type ChildError = Error;
+        type ChildFault = Error;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("FailingPreStartActor", id = %id)
+        }
+
+        fn supervision_strategy() -> SupervisionStrategy {
+            SupervisionStrategy::Stop
+        }
+
+        async fn pre_start(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Err(Error::FunctionalCritical {
+                description: "pre_start failure".to_owned(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Self> for FailingPreStartActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct Crash;
+
+    impl Message for Crash {}
+
+    #[derive(Debug, Clone)]
+    struct FailingHandleActor;
+
+    impl NotPersistentActor for FailingHandleActor {}
+
+    #[async_trait]
+    impl Actor for FailingHandleActor {
+        type Message = Crash;
+        type Response = ();
+        type Event = ();
+        type SinkEvent = ();
+        type ChildError = Error;
+        type ChildFault = Error;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("FailingHandleActor", id = %id)
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Self> for FailingHandleActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: Crash,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Err(Error::FunctionalCritical {
+                description: "handle failure".to_owned(),
+            })
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn pre_start_failure_emits_failed_metric() {
+        let mut registry = Registry::default();
+        let (system, _runner, metrics, _graceful, _crash) =
+            system_with_metrics(&mut registry);
+
+        let result = system
+            .create_root_actor("pre_start_failure", FailingPreStartActor)
+            .await;
+        assert!(result.is_err());
+
+        assert_eq!(
+            metrics
+                .actor_failed_total
+                .get_or_create(&ActorFailureLabels {
+                    scope: Arc::from("user"),
+                    actor_type: Arc::from("FailingPreStartActor"),
+                    phase: "pre_start",
+                })
+                .get(),
+            1
+        );
+
+        let output = encode(&registry);
+        assert!(output.contains("ave_actors_actor_failed_total"));
+        assert!(output.contains("phase=\"pre_start\""));
+    }
+
+    #[test(tokio::test)]
+    async fn handle_failure_counts_processed_metric_not_failed_metric() {
+        let mut registry = Registry::default();
+        let (system, _runner, metrics, _graceful, _crash) =
+            system_with_metrics(&mut registry);
+
+        let actor_ref = system
+            .create_root_actor("handle_failure", FailingHandleActor)
+            .await
+            .expect("root actor should be created");
+
+        // The ask will return the error produced by handle_message.
+        let _ = actor_ref.ask(Crash).await;
+        actor_ref
+            .ask_stop()
+            .await
+            .expect("actor should stop gracefully");
+
+        assert_eq!(
+            metrics
+                .actor_messages_processed_total
+                .get_or_create(&MessageLabels {
+                    scope: Arc::from("user"),
+                    actor_type: Arc::from("FailingHandleActor"),
+                    kind: "ask",
+                    result: "err",
+                })
+                .get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .actor_failed_total
+                .get_or_create(&ActorFailureLabels {
+                    scope: Arc::from("user"),
+                    actor_type: Arc::from("FailingHandleActor"),
+                    phase: "handle",
+                })
+                .get(),
+            0
+        );
+    }
+
+    #[derive(Debug, Clone)]
+    struct RestartingActor {
+        first_attempt: Arc<AtomicBool>,
+    }
+
+    impl NotPersistentActor for RestartingActor {}
+
+    #[async_trait]
+    impl Actor for RestartingActor {
+        type Message = ();
+        type Response = ();
+        type Event = ();
+        type SinkEvent = ();
+        type ChildError = Error;
+        type ChildFault = Error;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("RestartingActor", id = %id)
+        }
+
+        fn supervision_strategy() -> SupervisionStrategy {
+            SupervisionStrategy::Retry(Strategy::NoInterval(
+                NoIntervalStrategy::new(1),
+            ))
+        }
+
+        async fn pre_start(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            if self.first_attempt.load(Ordering::SeqCst) {
+                self.first_attempt.store(false, Ordering::SeqCst);
+                Err(Error::FunctionalCritical {
+                    description: "first pre_start fails".to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Self> for RestartingActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn actor_restarted_total_is_incremented_on_restart() {
+        let mut registry = Registry::default();
+        let (system, _runner, metrics, _graceful, _crash) =
+            system_with_metrics(&mut registry);
+
+        let actor_ref = system
+            .create_root_actor(
+                "restarted_actor",
+                RestartingActor {
+                    first_attempt: Arc::new(AtomicBool::new(true)),
+                },
+            )
+            .await
+            .expect("root actor should be created after retry");
+
+        actor_ref
+            .ask_stop()
+            .await
+            .expect("actor should stop gracefully");
+
+        assert_eq!(
+            metrics
+                .actor_restarted_total
+                .get_or_create(&ActorRestartLabels {
+                    scope: Arc::from("user"),
+                    actor_type: Arc::from("RestartingActor"),
+                    strategy: "NoInterval",
+                })
+                .get(),
+            1
+        );
+
+        let output = encode(&registry);
+        assert!(output.contains("ave_actors_actor_restarted_total"));
+        assert!(output.contains("strategy=\"NoInterval\""));
+    }
+
+    #[derive(Debug, Clone)]
+    struct PreRestartFailingActor;
+
+    impl NotPersistentActor for PreRestartFailingActor {}
+
+    #[async_trait]
+    impl Actor for PreRestartFailingActor {
+        type Message = ();
+        type Response = ();
+        type Event = ();
+        type SinkEvent = ();
+        type ChildError = Error;
+        type ChildFault = Error;
+
+        fn get_span(
+            id: &str,
+            _parent_span: Option<tracing::Span>,
+        ) -> tracing::Span {
+            info_span!("PreRestartFailingActor", id = %id)
+        }
+
+        fn supervision_strategy() -> SupervisionStrategy {
+            SupervisionStrategy::Retry(Strategy::NoInterval(
+                NoIntervalStrategy::new(1),
+            ))
+        }
+
+        async fn pre_start(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Err(Error::FunctionalCritical {
+                description: "pre_start fails".to_owned(),
+            })
+        }
+
+        async fn pre_restart(
+            &mut self,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Err(Error::FunctionalCritical {
+                description: "pre_restart fails".to_owned(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Self> for PreRestartFailingActor {
+        async fn handle_message(
+            &mut self,
+            _sender: ActorPath,
+            _msg: (),
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test(tokio::test)]
+    async fn pre_restart_failure_emits_failed_metric() {
+        let mut registry = Registry::default();
+        let (system, _runner, metrics, _graceful, _crash) =
+            system_with_metrics(&mut registry);
+
+        let result = system
+            .create_root_actor("pre_restart_failure", PreRestartFailingActor)
+            .await;
+        assert!(result.is_err());
+
+        assert_eq!(
+            metrics
+                .actor_failed_total
+                .get_or_create(&ActorFailureLabels {
+                    scope: Arc::from("user"),
+                    actor_type: Arc::from("PreRestartFailingActor"),
+                    phase: "pre_start",
+                })
+                .get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .actor_failed_total
+                .get_or_create(&ActorFailureLabels {
+                    scope: Arc::from("user"),
+                    actor_type: Arc::from("PreRestartFailingActor"),
+                    phase: "pre_restart",
+                })
+                .get(),
+            1
+        );
+
+        let output = encode(&registry);
+        assert!(output.contains("ave_actors_actor_failed_total"));
+        assert!(output.contains("phase=\"pre_restart\""));
+    }
+
+    #[test(tokio::test)]
+    async fn actor_active_increments_on_start_and_decrements_on_stop() {
+        let mut registry = Registry::default();
+        let (system, _runner, metrics, _graceful, _crash) =
+            system_with_metrics(&mut registry);
+
+        let actor_ref = system
+            .create_root_actor("active_actor", MetricsActor)
+            .await
+            .expect("root actor should be created");
+
+        assert_eq!(
+            metrics
+                .actor_active
+                .get_or_create(&ActorActiveLabels {
+                    scope: Arc::from("user"),
+                    actor_type: Arc::from("MetricsActor"),
+                })
+                .get(),
+            1
+        );
+
+        actor_ref
+            .ask_stop()
+            .await
+            .expect("actor should stop gracefully");
+        actor_ref.closed().await;
+
+        assert_eq!(
+            metrics
+                .actor_active
+                .get_or_create(&ActorActiveLabels {
+                    scope: Arc::from("user"),
+                    actor_type: Arc::from("MetricsActor"),
+                })
+                .get(),
+            0
+        );
+
+        let output = encode(&registry);
+        assert!(output.contains("ave_actors_actor_active"));
+    }
+
+    #[test(tokio::test)]
+    async fn message_wait_metric_is_emitted() {
+        let mut registry = Registry::default();
+        let (system, _runner, _metrics, _graceful, _crash) =
+            system_with_metrics(&mut registry);
+
+        let actor_ref = system
+            .create_root_actor("wait_metric", MetricsActor)
+            .await
+            .expect("root actor should be created");
+
+        actor_ref
+            .ask(Ping)
+            .await
+            .expect("ask should receive a response");
+        actor_ref
+            .ask_stop()
+            .await
+            .expect("actor should stop gracefully");
+
+        let output = encode(&registry);
+        assert!(output.contains("ave_actors_actor_message_wait_seconds"));
     }
 }

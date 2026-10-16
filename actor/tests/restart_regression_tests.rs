@@ -3,7 +3,7 @@ use ave_actors_actor::{
     Actor, ActorContext, ActorPath, ActorRef, ActorSystem, ChildAction, Error,
     Event, Handler, IntervalStrategy, Message, NoIntervalStrategy,
     NotPersistentActor, Response, RetryActor, RetryMessage, ShutdownReason,
-    Strategy, SupervisionStrategy,
+    Strategy, SupervisionStrategy, TestSystem,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -473,6 +473,8 @@ impl Actor for HangingStartActor {
         _ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         self.started.notify_one();
+        // timing: hangs far beyond startup_timeout so the test verifies the
+        // timeout aborts the stuck actor.
         tokio::time::sleep(Duration::from_secs(60)).await;
         Ok(())
     }
@@ -539,6 +541,8 @@ impl Handler<Self> for BlockingChild {
         _ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         self.entered.notify_one();
+        // timing: blocks far beyond stop_timeout so the test verifies the
+        // configured shutdown timeout path.
         tokio::time::sleep(Duration::from_secs(60)).await;
         Ok(())
     }
@@ -635,19 +639,11 @@ impl Handler<Self> for BlockingRootActor {
         _ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
         self.entered.notify_one();
+        // timing: blocks far beyond the root stop timeout so the test
+        // verifies system shutdown respects the configured timeout.
         tokio::time::sleep(Duration::from_secs(60)).await;
         Ok(())
     }
-}
-
-async fn shutdown_system(mut handle: ActorSystemRefHandle) {
-    handle.system.stop_system();
-    let shutdown =
-        tokio::time::timeout(Duration::from_secs(5), &mut handle.runner)
-            .await
-            .expect("runner should finish within timeout")
-            .expect("runner task should not panic");
-    assert_eq!(shutdown, ShutdownReason::Graceful);
 }
 
 struct ActorSystemRefHandle {
@@ -664,16 +660,15 @@ fn spawn_system() -> ActorSystemRefHandle {
 
 #[test(tokio::test)]
 async fn test_cleanup_after_pre_start_failure_allows_recreate() {
-    let handle = spawn_system();
+    let harness = TestSystem::start();
+    let system = harness.system();
 
-    let result = handle
-        .system
+    let result = system
         .create_root_actor("reusable-name", AlwaysFailStartActor)
         .await;
     assert!(result.is_err());
 
-    let actor_ref = handle
-        .system
+    let actor_ref = system
         .create_root_actor("reusable-name", HealthyActor)
         .await
         .expect("failed actor should have been removed from registry");
@@ -681,16 +676,16 @@ async fn test_cleanup_after_pre_start_failure_allows_recreate() {
     let response = actor_ref.ask(StartMessage::Ping).await.unwrap();
     assert_eq!(response, StartResponse::Pong);
 
-    shutdown_system(handle).await;
+    assert_eq!(harness.shutdown().await, ShutdownReason::Graceful);
 }
 
 #[test(tokio::test)]
 async fn test_startup_timeout_aborts_stuck_actor_and_releases_path() {
-    let handle = spawn_system();
+    let harness = TestSystem::start();
+    let system = harness.system();
     let started = Arc::new(Notify::new());
 
-    let result = handle
-        .system
+    let result = system
         .create_root_actor(
             "slow-start",
             HangingStartActor {
@@ -699,10 +694,11 @@ async fn test_startup_timeout_aborts_stuck_actor_and_releases_path() {
         )
         .await;
 
-    assert!(matches!(result, Err(Error::Timeout { ms }) if ms == 20));
     assert!(
-        handle
-            .system
+        matches!(result, Err(Error::Timeout { duration }) if duration == Duration::from_millis(20))
+    );
+    assert!(
+        system
             .get_actor::<HangingStartActor>(&ActorPath::from(
                 "/user/slow-start"
             ))
@@ -710,24 +706,23 @@ async fn test_startup_timeout_aborts_stuck_actor_and_releases_path() {
             .is_err()
     );
 
-    let actor_ref = handle
-        .system
+    let actor_ref = system
         .create_root_actor("slow-start", HealthyActor)
         .await
         .expect("startup timeout should release actor path");
     let response = actor_ref.ask(StartMessage::Ping).await.unwrap();
     assert_eq!(response, StartResponse::Pong);
 
-    shutdown_system(handle).await;
+    assert_eq!(harness.shutdown().await, ShutdownReason::Graceful);
 }
 
 #[test(tokio::test)]
 async fn test_runtime_restart_preserves_registry_lookup() {
-    let handle = spawn_system();
+    let harness = TestSystem::start();
+    let system = harness.system();
     let hooks = Arc::new(RestartHooks::default());
 
-    let _parent_ref = handle
-        .system
+    let _parent_ref = system
         .create_root_actor(
             "restart-registry",
             RestartParent {
@@ -737,8 +732,7 @@ async fn test_runtime_restart_preserves_registry_lookup() {
         .await
         .unwrap();
 
-    let actor_ref: ActorRef<RuntimeRestartActor> = handle
-        .system
+    let actor_ref: ActorRef<RuntimeRestartActor> = system
         .get_actor(&ActorPath::from("/user/restart-registry/restart_child"))
         .await
         .unwrap();
@@ -749,8 +743,7 @@ async fn test_runtime_restart_preserves_registry_lookup() {
     let path = ActorPath::from("/user/restart-registry/restart_child");
     loop {
         if hooks.pre_restart_calls.load(Ordering::SeqCst) > 0 {
-            let fetched = handle
-                .system
+            let fetched = system
                 .get_actor::<RuntimeRestartActor>(&path)
                 .await
                 .expect("restarted actor should remain registered");
@@ -766,16 +759,16 @@ async fn test_runtime_restart_preserves_registry_lookup() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    shutdown_system(handle).await;
+    assert_eq!(harness.shutdown().await, ShutdownReason::Graceful);
 }
 
 #[test(tokio::test)]
 async fn test_runtime_restart_resumes_mailbox_processing() {
-    let handle = spawn_system();
+    let harness = TestSystem::start();
+    let system = harness.system();
     let hooks = Arc::new(RestartHooks::default());
 
-    let _parent_ref = handle
-        .system
+    let _parent_ref = system
         .create_root_actor(
             "restart-mailbox",
             RestartParent {
@@ -785,8 +778,7 @@ async fn test_runtime_restart_resumes_mailbox_processing() {
         .await
         .unwrap();
 
-    let actor_ref: ActorRef<RuntimeRestartActor> = handle
-        .system
+    let actor_ref: ActorRef<RuntimeRestartActor> = system
         .get_actor(&ActorPath::from("/user/restart-mailbox/restart_child"))
         .await
         .unwrap();
@@ -818,12 +810,13 @@ async fn test_runtime_restart_resumes_mailbox_processing() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    shutdown_system(handle).await;
+    assert_eq!(harness.shutdown().await, ShutdownReason::Graceful);
 }
 
 #[test(tokio::test)]
 async fn test_retry_actor_with_no_interval_strategy_retries_immediately() {
-    let handle = spawn_system();
+    let harness = TestSystem::start();
+    let system = harness.system();
     let deliveries = Arc::new(AtomicUsize::new(0));
 
     let retry_actor = RetryActor::new(
@@ -834,8 +827,7 @@ async fn test_retry_actor_with_no_interval_strategy_retries_immediately() {
         Strategy::NoInterval(NoIntervalStrategy::new(3)),
     );
 
-    let retry_ref: ActorRef<RetryActor<CountingTarget>> = handle
-        .system
+    let retry_ref: ActorRef<RetryActor<CountingTarget>> = system
         .create_root_actor("no-interval-retry", retry_actor)
         .await
         .unwrap();
@@ -856,13 +848,13 @@ async fn test_retry_actor_with_no_interval_strategy_retries_immediately() {
     }
 
     retry_ref.ask_stop().await.unwrap();
-    shutdown_system(handle).await;
+    assert_eq!(harness.shutdown().await, ShutdownReason::Graceful);
 }
 
 #[test(tokio::test)]
 async fn test_create_root_actor_rejected_once_shutdown_starts() {
-    let handle = spawn_system();
-    let system = handle.system.clone();
+    let harness = TestSystem::start();
+    let system = harness.system().clone();
 
     system.stop_system();
 
@@ -875,11 +867,7 @@ async fn test_create_root_actor_rejected_once_shutdown_starts() {
             .is_err()
     );
 
-    let shutdown = tokio::time::timeout(Duration::from_secs(5), handle.runner)
-        .await
-        .expect("runner should finish within timeout")
-        .expect("runner task should not panic");
-    assert_eq!(shutdown, ShutdownReason::Graceful);
+    assert_eq!(harness.shutdown().await, ShutdownReason::Graceful);
 
     let result = system.create_root_actor("late-root-2", HealthyActor).await;
     assert!(matches!(result, Err(Error::SystemStopped)));
@@ -887,11 +875,11 @@ async fn test_create_root_actor_rejected_once_shutdown_starts() {
 
 #[test(tokio::test)]
 async fn test_child_emit_error_propagates_to_parent_without_stopping_child() {
-    let handle = spawn_system();
+    let harness = TestSystem::start();
+    let system = harness.system();
     let errors_seen = Arc::new(AtomicUsize::new(0));
 
-    let _parent_ref: ActorRef<ErrorParent> = handle
-        .system
+    let _parent_ref: ActorRef<ErrorParent> = system
         .create_root_actor(
             "root-error",
             ErrorParent {
@@ -901,8 +889,7 @@ async fn test_child_emit_error_propagates_to_parent_without_stopping_child() {
         .await
         .unwrap();
 
-    let actor_ref: ActorRef<RootErrorActor> = handle
-        .system
+    let actor_ref: ActorRef<RootErrorActor> = system
         .get_actor(&ActorPath::from("/user/root-error/error_child"))
         .await
         .unwrap();
@@ -924,16 +911,16 @@ async fn test_child_emit_error_propagates_to_parent_without_stopping_child() {
     let response = actor_ref.ask(RootErrorMessage::Ping).await.unwrap();
     assert_eq!(response, RootErrorResponse::Ok);
 
-    shutdown_system(handle).await;
+    assert_eq!(harness.shutdown().await, ShutdownReason::Graceful);
 }
 
 #[test(tokio::test)]
 async fn test_parent_stop_uses_configured_shutdown_timeout_for_blocked_child() {
-    let handle = spawn_system();
+    let harness = TestSystem::start();
+    let system = harness.system();
     let child_entered = Arc::new(Notify::new());
 
-    let parent_ref: ActorRef<ParentWithBlockingChild> = handle
-        .system
+    let parent_ref: ActorRef<ParentWithBlockingChild> = system
         .create_root_actor(
             "blocked-child-parent",
             ParentWithBlockingChild {
@@ -951,7 +938,7 @@ async fn test_parent_stop_uses_configured_shutdown_timeout_for_blocked_child() {
         .expect("parent stop should not hang forever")
         .expect("parent stop should complete even if child is blocked");
 
-    shutdown_system(handle).await;
+    assert_eq!(harness.shutdown().await, ShutdownReason::Graceful);
 }
 
 #[test(tokio::test)]
@@ -989,4 +976,505 @@ async fn test_system_shutdown_uses_root_stop_timeout_for_blocked_root() {
             .expect("system shutdown should respect configured timeout")
             .expect("runner task should not panic");
     assert_eq!(shutdown, ShutdownReason::Graceful);
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum BackoffMsg {
+    Trigger,
+}
+
+impl Message for BackoffMsg {}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BackoffResponse;
+
+impl Response for BackoffResponse {}
+
+#[derive(Clone)]
+struct BackoffParent;
+
+impl NotPersistentActor for BackoffParent {}
+
+#[async_trait]
+impl Actor for BackoffParent {
+    type Message = BackoffMsg;
+    type Response = BackoffResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("BackoffParent", id = %id)
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        ctx.create_child("child", BackoffChild).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for BackoffParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        msg: BackoffMsg,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<BackoffResponse, Error> {
+        match msg {
+            BackoffMsg::Trigger => {
+                let child: ActorRef<BackoffChild> =
+                    ctx.get_child("child").await.unwrap();
+                child.tell(BackoffChildMsg).await.unwrap();
+                Ok(BackoffResponse)
+            }
+        }
+    }
+
+    async fn on_child_fault(
+        &mut self,
+        _error: Error,
+        _ctx: &mut ActorContext<Self>,
+    ) -> ChildAction {
+        ChildAction::Restart
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackoffChildMsg;
+
+impl Message for BackoffChildMsg {}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BackoffChildResponse;
+
+impl Response for BackoffChildResponse {}
+
+#[derive(Clone)]
+struct BackoffChild;
+
+impl NotPersistentActor for BackoffChild {}
+
+#[async_trait]
+impl Actor for BackoffChild {
+    type Message = BackoffChildMsg;
+    type Response = BackoffChildResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("BackoffChild", id = %id)
+    }
+
+    fn supervision_strategy() -> SupervisionStrategy {
+        SupervisionStrategy::Retry(Strategy::Interval(IntervalStrategy::new(
+            3,
+            Duration::from_secs(30),
+        )))
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for BackoffChild {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: BackoffChildMsg,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<BackoffChildResponse, Error> {
+        ctx.get_parent::<BackoffParent>()
+            .await?
+            .emit_fail(Error::Functional {
+                description: "forced fault into 30s backoff".to_owned(),
+            })
+            .await?;
+        Ok(BackoffChildResponse)
+    }
+}
+
+#[test(tokio::test)]
+async fn test_stop_interrupts_retry_backoff() {
+    let harness = TestSystem::start();
+    let system = harness.system();
+
+    let parent_ref = system
+        .create_root_actor("backoff-parent", BackoffParent)
+        .await
+        .unwrap();
+
+    // Fault the child: the parent restarts it, landing the child in its
+    // 30s retry backoff. Stopping it then must not wait out the backoff.
+    parent_ref.tell(BackoffMsg::Trigger).await.unwrap();
+    // timing: waits out the fault-to-backoff cycle, which exposes no
+    // observable signal to poll before stopping the child.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let child_ref: ActorRef<BackoffChild> = system
+        .get_actor(&ActorPath::from("/user/backoff-parent/child"))
+        .await
+        .unwrap();
+    let start = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(5), child_ref.ask_stop())
+        .await
+        .expect("stop must interrupt the backoff wait")
+        .expect("ask_stop must succeed");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "stop waited out the backoff"
+    );
+
+    harness.shutdown().await;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TimeoutInitMsg;
+
+impl Message for TimeoutInitMsg {}
+
+#[derive(Clone)]
+struct TimeoutInitChild {
+    terminated: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NotPersistentActor for TimeoutInitChild {}
+
+#[async_trait]
+impl Actor for TimeoutInitChild {
+    type Message = TimeoutInitMsg;
+    type Response = StartResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("TimeoutInitChild", id = %id)
+    }
+
+    async fn post_stop(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        self.terminated.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for TimeoutInitChild {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: TimeoutInitMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<StartResponse, Error> {
+        Ok(StartResponse::Pong)
+    }
+}
+
+#[derive(Clone)]
+struct TimeoutInitParent {
+    terminated_child: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NotPersistentActor for TimeoutInitParent {}
+
+#[async_trait]
+impl Actor for TimeoutInitParent {
+    type Message = TimeoutInitMsg;
+    type Response = StartResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("TimeoutInitParent", id = %id)
+    }
+
+    fn startup_timeout() -> Option<Duration> {
+        Some(Duration::from_millis(100))
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        ctx.create_child(
+            "child",
+            TimeoutInitChild {
+                terminated: Arc::clone(&self.terminated_child),
+            },
+        )
+        .await?;
+        // Never finish: the startup timeout aborts this init.
+        // timing: hangs far beyond startup_timeout (100ms) so the test
+        // verifies the timeout stops already-created children.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for TimeoutInitParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: TimeoutInitMsg,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<StartResponse, Error> {
+        Ok(StartResponse::Pong)
+    }
+}
+
+#[test(tokio::test)]
+async fn test_init_timeout_stops_already_created_children() {
+    let harness = TestSystem::start();
+    let system = harness.system();
+
+    let terminated_child = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let result = system
+        .create_root_actor(
+            "timeout-parent",
+            TimeoutInitParent {
+                terminated_child: Arc::clone(&terminated_child),
+            },
+        )
+        .await;
+    assert!(
+        matches!(result, Err(Error::Timeout { .. })),
+        "create must fail with the startup timeout, got {:?}",
+        result.as_ref().err()
+    );
+
+    // The orphaned child must be stopped, not leaked: its post_stop runs
+    // and its path is deindexed.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if terminated_child.load(Ordering::SeqCst) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "orphaned child was never stopped"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let lookup: Result<ActorRef<TimeoutInitChild>, Error> = system
+        .get_actor(&ActorPath::from("/user/timeout-parent/child"))
+        .await;
+    assert!(
+        matches!(lookup, Err(Error::NotFound { .. })),
+        "orphaned child must be deindexed"
+    );
+
+    harness.shutdown().await;
+}
+
+#[derive(Clone)]
+struct PanicStartChild {
+    terminated: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NotPersistentActor for PanicStartChild {}
+
+#[async_trait]
+impl Actor for PanicStartChild {
+    type Message = StartMessage;
+    type Response = StartResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("PanicStartChild", id = %id)
+    }
+
+    async fn post_stop(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        self.terminated.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for PanicStartChild {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: StartMessage,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<StartResponse, Error> {
+        Ok(StartResponse::Pong)
+    }
+}
+
+#[derive(Clone)]
+struct PanicStartParent {
+    terminated_child: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NotPersistentActor for PanicStartParent {}
+
+#[async_trait]
+impl Actor for PanicStartParent {
+    type Message = StartMessage;
+    type Response = StartResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("PanicStartParent", id = %id)
+    }
+
+    async fn pre_start(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        ctx.create_child(
+            "child",
+            PanicStartChild {
+                terminated: Arc::clone(&self.terminated_child),
+            },
+        )
+        .await?;
+        panic!("intentional pre_start panic");
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for PanicStartParent {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: StartMessage,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<StartResponse, Error> {
+        Ok(StartResponse::Pong)
+    }
+}
+
+#[test(tokio::test)]
+async fn test_pre_start_panic_cleans_up_children() {
+    let harness = TestSystem::start();
+    let system = harness.system();
+
+    let terminated_child = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let result = system
+        .create_root_actor(
+            "panic-parent",
+            PanicStartParent {
+                terminated_child: Arc::clone(&terminated_child),
+            },
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "panicking pre_start must fail creation loudly"
+    );
+
+    // The child created before the panic must be stopped, not orphaned.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if terminated_child.load(Ordering::SeqCst) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "orphaned child was never stopped"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    harness.shutdown().await;
+}
+
+#[derive(Clone)]
+struct PanicStopActor;
+
+impl NotPersistentActor for PanicStopActor {}
+
+#[async_trait]
+impl Actor for PanicStopActor {
+    type Message = StartMessage;
+    type Response = StartResponse;
+    type Event = StartEvent;
+    type SinkEvent = Self::Event;
+    type ChildError = Error;
+    type ChildFault = Error;
+
+    fn get_span(
+        id: &str,
+        _parent_span: Option<tracing::Span>,
+    ) -> tracing::Span {
+        info_span!("PanicStopActor", id = %id)
+    }
+
+    async fn pre_stop(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), Error> {
+        panic!("intentional pre_stop panic");
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for PanicStopActor {
+    async fn handle_message(
+        &mut self,
+        _sender: ActorPath,
+        _msg: StartMessage,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<StartResponse, Error> {
+        Ok(StartResponse::Pong)
+    }
+}
+
+#[test(tokio::test)]
+async fn test_pre_stop_panic_does_not_hang_shutdown() {
+    let harness = TestSystem::start();
+    let system = harness.system();
+
+    let actor_ref = system
+        .create_root_actor("panic-stop", PanicStopActor)
+        .await
+        .unwrap();
+
+    // A panicking pre_stop must not kill the shutdown path: the stop
+    // still completes.
+    tokio::time::timeout(Duration::from_secs(5), actor_ref.ask_stop())
+        .await
+        .expect("shutdown must survive a pre_stop panic")
+        .expect("ask_stop must succeed");
+
+    harness.shutdown().await;
 }

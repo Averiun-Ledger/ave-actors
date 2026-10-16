@@ -2,12 +2,11 @@
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, Error, Handler,
-    Message, NotPersistentActor, Response,
+    Actor, ActorContext, ActorPath, ActorRef, Error, Handler, Message,
+    NotPersistentActor, Response, TestSystem,
 };
 use serde::{Deserialize, Serialize};
 use test_log::test;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,9 +102,8 @@ impl Handler<Self> for ParentActor {
 
 #[test(tokio::test)]
 async fn test_create_root_actor_rejects_invalid_name() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let result = system
         .create_root_actor::<DummyActor, _>("bad name", DummyActor)
@@ -115,30 +113,28 @@ async fn test_create_root_actor_rejects_invalid_name() -> Result<(), Error> {
         "root actor name with spaces should be rejected"
     );
 
-    system.stop_system();
+    harness.shutdown().await;
     Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_create_root_actor_accepts_valid_name() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor_ref = system
         .create_root_actor::<DummyActor, _>("valid-name_2", DummyActor)
         .await?;
     actor_ref.tell(DummyMsg).await?;
 
-    system.stop_system();
+    harness.shutdown().await;
     Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_create_child_rejects_invalid_name() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent_ref = system
         .create_root_actor::<ParentActor, _>("parent", ParentActor)
@@ -150,15 +146,14 @@ async fn test_create_child_rejects_invalid_name() -> Result<(), Error> {
         .await?;
     assert!(!resp.success, "child name with slash should be rejected");
 
-    system.stop_system();
+    harness.shutdown().await;
     Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_create_child_accepts_valid_name() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let parent_ref = system
         .create_root_actor::<ParentActor, _>("parent2", ParentActor)
@@ -170,6 +165,6 @@ async fn test_create_child_accepts_valid_name() -> Result<(), Error> {
         .await?;
     assert!(resp.success, "valid child name should be accepted");
 
-    system.stop_system();
+    harness.shutdown().await;
     Ok(())
 }

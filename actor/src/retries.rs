@@ -41,6 +41,11 @@ where
     async fn notify(&self, ctx: &ActorContext<RetryActor<T>>) {
         if let Ok(parent) = ctx.get_parent::<P>().await {
             let _ = parent.tell(self.message.clone()).await;
+        } else {
+            tracing::warn!(
+                "RetryActor completion notifier has no parent; notification \
+                 dropped"
+            );
         }
     }
 }
@@ -61,6 +66,10 @@ where
 /// `RetryMessage::End` is always terminal:
 /// - before the cycle starts, it stops the actor without sending the target message
 /// - while a retry is scheduled, it cancels the pending retry and finishes the cycle
+///
+/// In both cases the completion notifier fires if one was configured: `End`
+/// acknowledges the waiter even when no retry ever ran, so a parent waiting
+/// for completion cannot hang on a cycle that never started.
 pub struct RetryActor<T>
 where
     T: Actor + Handler<T> + Clone + NotPersistentActor,
@@ -72,9 +81,12 @@ where
     started: bool,
     is_end: bool,
     completion_pending: bool,
-    completion_notified: bool,
+    finish_started: bool,
     on_finished: Option<Box<dyn CompletionNotifier<T>>>,
+    /// Timer key for the next scheduled retry attempt.
     pending_retry: Option<crate::TimerKey>,
+    /// Timer key for the scheduled completion (stop) marker.
+    completion_timer: Option<crate::TimerKey>,
 }
 
 impl<T> RetryActor<T>
@@ -95,9 +107,10 @@ where
             started: false,
             is_end: false,
             completion_pending: false,
-            completion_notified: false,
+            finish_started: false,
             on_finished: None,
             pending_retry: None,
+            completion_timer: None,
         }
     }
 
@@ -124,12 +137,13 @@ where
             started: false,
             is_end: false,
             completion_pending: false,
-            completion_notified: false,
+            finish_started: false,
             on_finished: Some(Box::new(ParentMessageNotifier::<T, P> {
                 message: completion_message,
                 _phantom: PhantomData,
             })),
             pending_retry: None,
+            completion_timer: None,
         }
     }
 
@@ -141,8 +155,8 @@ where
         if let Some(key) = self.pending_retry.take() {
             ctx.cancel_timer(key);
         }
-        if !self.completion_notified {
-            self.completion_notified = true;
+        if !self.finish_started {
+            self.finish_started = true;
         } else {
             ctx.stop(None).await;
             return Ok(());
@@ -165,7 +179,7 @@ where
             std::time::Duration::from_millis(1),
             RetryMessage::Complete,
         )?;
-        self.pending_retry = Some(key);
+        self.completion_timer = Some(key);
         Ok(())
     }
 
@@ -275,6 +289,9 @@ where
         if let Some(key) = self.pending_retry.take() {
             ctx.cancel_timer(key);
         }
+        if let Some(key) = self.completion_timer.take() {
+            ctx.cancel_timer(key);
+        }
         Ok(())
     }
 }
@@ -297,6 +314,20 @@ where
                         "Retry cycle already started, ignoring duplicate start"
                     );
                 } else {
+                    // Enforce strategy limits at the consumption point:
+                    // `new()` constructors are intentionally non-validating
+                    // (const), so an invalid strategy would otherwise
+                    // busy-loop here instead of failing loudly.
+                    if let Err(e) = self.retry_strategy.validate() {
+                        error!(
+                            error = %e,
+                            "Invalid retry strategy; ending cycle without \
+                             running"
+                        );
+                        self.started = true;
+                        self.finish_retry_cycle(ctx).await?;
+                        return Err(e);
+                    }
                     self.started = true;
                     self.handle_retry_attempt(ctx).await?;
                 }
@@ -633,7 +664,8 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // No fixed sleep: creation above already synchronizes actor startup,
+        // and this smoke test performs no time-dependent assertions.
     }
 
     #[derive(Clone)]
@@ -832,5 +864,47 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), retry_ref.closed())
             .await
             .expect("retry actor should stop after End");
+    }
+
+    #[test(tokio::test)]
+    async fn test_invalid_strategy_rejected_at_cycle_start() {
+        let (system, mut runner) = ActorSystem::create(
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move {
+            runner.run().await;
+        });
+
+        // Infinite retries without delay: `new()` accepts it, but
+        // starting the cycle must fail fast instead of busy-looping
+        // forever.
+        let retry_actor = RetryActor::new(
+            CountingTarget {
+                deliveries: Arc::new(AtomicUsize::new(0)),
+            },
+            CountMessage,
+            Strategy::Interval(IntervalStrategy::new(
+                usize::MAX,
+                Duration::ZERO,
+            )),
+        );
+        let retry_ref: ActorRef<RetryActor<CountingTarget>> = system
+            .create_root_actor("retry_invalid", retry_actor)
+            .await
+            .unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            retry_ref.ask(RetryMessage::Retry),
+        )
+        .await
+        .expect("invalid strategy must fail fast, not busy-loop");
+        assert!(
+            matches!(result, Err(Error::InvalidConfiguration { .. })),
+            "expected InvalidConfiguration, got {:?}",
+            result.as_ref().err()
+        );
+        system.stop_system();
     }
 }

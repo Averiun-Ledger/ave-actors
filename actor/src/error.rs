@@ -6,7 +6,11 @@ use crate::ActorPath;
 use thiserror::Error;
 
 /// Error type for the actor system.
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
+///
+/// Equality is intentionally not implemented: variants carry free-text
+/// reasons, so structural equality would be fragile. Match on variants
+/// with `matches!` instead.
+#[derive(Clone, Debug, Error)]
 pub enum Error {
     // ===== Actor Lifecycle Errors =====
     /// Actor already exists at the specified path.
@@ -64,15 +68,6 @@ pub enum Error {
         expected: String,
     },
 
-    /// Failed to send an event to the event bus.
-    ///
-    /// This error occurs when an event cannot be published to the event bus.
-    #[error("failed to send event to event bus: {reason}")]
-    SendEvent {
-        /// The reason why event sending failed.
-        reason: String,
-    },
-
     /// A store operation failed.
     ///
     /// This error covers various store operations that don't fit into
@@ -97,13 +92,6 @@ pub enum Error {
         reason: String,
     },
 
-    /// Maximum number of retry attempts reached.
-    ///
-    /// This error occurs when an operation has been retried the maximum
-    /// allowed number of times without success.
-    #[error("maximum retry attempts reached")]
-    Retry,
-
     // ===== Shutdown Errors =====
     /// The actor was stopped before processing this message.
     ///
@@ -118,10 +106,10 @@ pub enum Error {
     MailboxFull,
 
     /// The ask request timed out before the actor responded.
-    #[error("ask timed out after {ms}ms")]
+    #[error("ask timed out after {duration:?}")]
     Timeout {
-        /// Duration waited in milliseconds.
-        ms: u128,
+        /// How long the caller waited.
+        duration: std::time::Duration,
     },
 
     // ===== Functional Errors =====
@@ -139,7 +127,7 @@ pub enum Error {
     ///
     /// This error indicates a problem that compromises the system's operation
     /// and requires intervention.
-    #[error("{description}")]
+    #[error("critical: {description}")]
     FunctionalCritical {
         /// Description of the critical error.
         description: String,

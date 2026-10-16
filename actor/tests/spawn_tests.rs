@@ -6,13 +6,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ave_actors_actor::{
-    Actor, ActorContext, ActorPath, ActorRef, ActorSystem, Error, Handler,
-    Message, NotPersistentActor, Response, ShutdownReason,
+    Actor, ActorContext, ActorPath, ActorRef, Error, Handler, Message,
+    NotPersistentActor, ProbeActor, Response, TestProbe, TestSystem,
 };
 use serde::{Deserialize, Serialize};
 use test_log::test;
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,7 +34,7 @@ impl Response for SpawnResponse {}
 #[derive(Clone)]
 struct SpawnActor {
     flag: Arc<Mutex<bool>>,
-    target: Option<ActorRef<TargetActor>>,
+    target: Option<ActorRef<ProbeActor<TargetMsg>>>,
 }
 
 impl NotPersistentActor for SpawnActor {}
@@ -69,6 +68,7 @@ impl Handler<Self> for SpawnActor {
             SpawnMsg::RunTask => {
                 let flag = self.flag.clone();
                 ctx.spawn(async move {
+                    // timing: simulated work delay inside the spawned task.
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     *flag.lock().await = true;
                 });
@@ -76,6 +76,8 @@ impl Handler<Self> for SpawnActor {
             SpawnMsg::RunLongTask => {
                 let flag = self.flag.clone();
                 ctx.spawn(async move {
+                    // timing: very long task so the abort-on-stop test can
+                    // verify cancellation well before completion.
                     tokio::time::sleep(Duration::from_secs(10)).await;
                     *flag.lock().await = true;
                 });
@@ -83,6 +85,8 @@ impl Handler<Self> for SpawnActor {
             SpawnMsg::SendToOther => {
                 if let Some(target) = self.target.clone() {
                     ctx.spawn(async move {
+                        // timing: simulated delay before the spawned task
+                        // delivers to the other actor.
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         let _ = target.tell(TargetMsg::Ping).await;
                     });
@@ -101,83 +105,14 @@ impl Handler<Self> for SpawnActor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum TargetMsg {
     Ping,
-    GetReceived,
 }
 
 impl Message for TargetMsg {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TargetResponse {
-    received: bool,
-}
-
-impl Response for TargetResponse {}
-
-#[derive(Clone)]
-struct TargetActor {
-    received: Arc<Mutex<bool>>,
-}
-
-impl NotPersistentActor for TargetActor {}
-
-#[async_trait]
-impl Actor for TargetActor {
-    type Message = TargetMsg;
-    type Response = TargetResponse;
-    type Event = ();
-    type SinkEvent = Self::Event;
-    type ChildError = Error;
-    type ChildFault = Error;
-
-    fn get_span(
-        id: &str,
-        _parent_span: Option<tracing::Span>,
-    ) -> tracing::Span {
-        info_span!("TargetActor", id = %id)
-    }
-}
-
-#[async_trait]
-impl Handler<Self> for TargetActor {
-    async fn handle_message(
-        &mut self,
-        _sender: ActorPath,
-        msg: TargetMsg,
-        _ctx: &mut ActorContext<Self>,
-    ) -> Result<TargetResponse, Error> {
-        match msg {
-            TargetMsg::Ping => {
-                *self.received.lock().await = true;
-            }
-            TargetMsg::GetReceived => {
-                return Ok(TargetResponse {
-                    received: *self.received.lock().await,
-                });
-            }
-        }
-        Ok(TargetResponse { received: false })
-    }
-}
-
-async fn join_runner(
-    handle: tokio::task::JoinHandle<ShutdownReason>,
-) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(2), handle)
-        .await
-        .map_err(|_| Error::Functional {
-            description: "runner timed out".to_owned(),
-        })?
-        .map_err(|_| Error::Functional {
-            description: "runner panicked".to_owned(),
-        })?;
-    Ok(())
-}
-
 #[test(tokio::test)]
 async fn test_spawn_runs_task() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = SpawnActor {
         flag: Arc::new(Mutex::new(false)),
@@ -201,15 +136,14 @@ async fn test_spawn_runs_task() -> Result<(), Error> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_spawn_aborted_on_actor_stop() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
     let actor = SpawnActor {
         flag: Arc::new(Mutex::new(false)),
@@ -219,52 +153,42 @@ async fn test_spawn_aborted_on_actor_stop() -> Result<(), Error> {
     let actor_ref = system.create_root_actor("spawn_aborted", actor).await?;
 
     actor_ref.tell(SpawnMsg::RunLongTask).await?;
-    // Give the spawned task time to start, then stop the actor.
+    // timing: pacing pause so the spawned task starts before the actor is
+    // stopped; there is no observable start signal to poll.
     tokio::time::sleep(Duration::from_millis(50)).await;
     actor_ref.ask_stop().await?;
 
-    // Wait briefly; the task would have set the flag only after 10 seconds.
+    // timing: absence check — the task would set the flag only after 10s,
+    // so a short wait plus the assert verifies it was aborted.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!*flag.lock().await, "spawned task should have been aborted");
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_spawn_can_send_to_other_actor() -> Result<(), Error> {
-    let (system, mut runner) =
-        ActorSystem::create(CancellationToken::new(), CancellationToken::new());
-    let runner_handle = tokio::spawn(async move { runner.run().await });
+    let harness = TestSystem::start();
+    let system = harness.system();
 
-    let target = TargetActor {
-        received: Arc::new(Mutex::new(false)),
-    };
-    let target_ref = system.create_root_actor("spawn_target", target).await?;
+    let probe = TestProbe::<TargetMsg>::new();
+    let target_ref = probe.spawn(system, "spawn_target").await?;
 
     let actor = SpawnActor {
         flag: Arc::new(Mutex::new(false)),
-        target: Some(target_ref.clone()),
+        target: Some(target_ref),
     };
     let actor_ref = system.create_root_actor("spawn_sender", actor).await?;
 
     actor_ref.tell(SpawnMsg::SendToOther).await?;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let resp = target_ref.ask(TargetMsg::GetReceived).await?;
-        if resp.received {
-            break;
-        }
-        if tokio::time::Instant::now() > deadline {
-            return Err(Error::Functional {
-                description: "target actor did not receive delayed message"
-                    .to_owned(),
-            });
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    let got = probe.expect_msg(Duration::from_secs(2)).await?;
+    assert!(
+        matches!(got, TargetMsg::Ping),
+        "target actor did not receive delayed message, got {got:?}"
+    );
 
-    system.stop_system();
-    join_runner(runner_handle).await
+    harness.shutdown().await;
+    Ok(())
 }

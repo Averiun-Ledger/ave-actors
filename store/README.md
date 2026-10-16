@@ -12,8 +12,8 @@ API documentation is available on [docs.rs](https://docs.rs/ave-actors-store).
 
 ```toml
 [dependencies]
-ave-actors-store = "0.5.0"
-ave-actors-actor = "0.5.0"
+ave-actors-store = "0.6.0"
+ave-actors-actor = "0.6.0"
 async-trait = "0.1"
 borsh = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -29,8 +29,7 @@ tracing = "0.1"
 | Concept | Description |
 |---|---|
 | `PersistentActor` | Trait extending `Actor` with event sourcing — define `type State`, implement `apply`, `state()`, `set_state()`, and call `persist` |
-| `LightPersistence` | Strategy: stores event + state snapshot on every write (fast recovery) |
-| `FullPersistence` | Strategy: stores events only, replays on recovery (smaller footprint, full audit trail) |
+| Events + snapshots | Every `persist` appends the event; snapshots are automatic every `snapshot_every` events (default 100) plus manual/shutdown; opt-in `prune_events_on_snapshot()` deletes snapshot-covered events |
 | `InitializedActor<A>` | Required wrapper returned by `PersistentActor::initial(params)` |
 | `DbManager<C, S>` | Backend factory trait — implement to plug in a custom database |
 | `Collection` | Ordered key-value storage for the event log |
@@ -46,7 +45,7 @@ tracing = "0.1"
 | `PersistentActor::initial` | `InitParams` | `InitializedActor<Self>` | Wraps the actor so the actor system accepts it as persistent |
 | `PersistentActor::apply` | `Arc<State>, &Event` | `Result<Arc<State>, ActorError>` | Pure function that applies one event to state and returns the new state |
 | `PersistentActor::start_store` | store `name`, optional `prefix`, `ActorContext`, backend manager, optional `EncryptedKey` | `Result<(), ActorError>` | Opens the backend and recovers persisted state into the actor |
-| `PersistentActor::persist` | `&Event`, `ActorContext` | `Result<(), ActorError>` | Calls `apply`, durably records the event, and updates `self` with the new state; rolls back on failure |
+| `PersistentActor::persist` | `Self::Event` (owned), `ActorContext` | `Result<(), ActorError>` | Calls `apply`, durably records the event, and updates `self` with the new state; rolls back on failure |
 | `PersistentActor::snapshot` | `ActorContext` | `Result<(), ActorError>` | Forces an immediate snapshot of the current actor state |
 
 ---
@@ -61,8 +60,7 @@ use ave_actors_actor::{
     Message, Response,
 };
 use ave_actors_store::{
-    store::{FullPersistence, PersistentActor},
-    memory::MemoryManager,
+    store::PersistentActor, memory::MemoryManager,
 };
 use async_trait::async_trait;
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -128,7 +126,7 @@ impl Handler<Counter> for Counter {
             CounterMsg::Increment(n) => {
                 // persist calls apply, saves the event durably, and updates self.state.
                 // If persistence fails, the in-memory state is rolled back.
-                self.persist(&CounterEvent::Incremented(n), ctx).await?;
+                self.persist(CounterEvent::Incremented(n), ctx).await?;
                 Ok(CounterResp::Ok)
             }
             CounterMsg::GetValue => Ok(CounterResp::Value(self.state.value)),
@@ -139,7 +137,6 @@ impl Handler<Counter> for Counter {
 // --- PersistentActor ---
 
 impl PersistentActor for Counter {
-    type Persistence = FullPersistence;
     type InitParams  = ();
     type State       = CounterState;
 
@@ -198,14 +195,10 @@ async fn main() {
 
 ---
 
-## Persistence strategies
+## Snapshots and pruning
 
-| Strategy | Write | Recovery | When to use |
-|---|---|---|---|
-| `LightPersistence` | Event + state snapshot | Load snapshot (no replay) | When recovery speed matters most |
-| `FullPersistence` | Event only | Load last snapshot + replay remaining events | When storage efficiency or a full audit trail matters |
-
-For `FullPersistence`, snapshots are taken automatically every N events (default: 100). Override to tune:
+Snapshots are taken automatically every N events (default: 100).
+Override to tune:
 
 ```rust,ignore
 fn snapshot_every() -> Option<u64> {
@@ -213,13 +206,50 @@ fn snapshot_every() -> Option<u64> {
 }
 ```
 
-Set `compact_on_snapshot() -> bool` to `true` to delete events already covered by a snapshot and reduce storage use:
+Opt-in `prune_events_on_snapshot() -> true` deletes snapshot-covered
+events right after each snapshot: storage stays flat (one snapshot
+plus at most N pending events) instead of keeping history. Recovery
+replays from the snapshot, so pruning never loses state.
+
+---
+
+## Event and state versioning
+
+Stored records carry a version header (`EVENT_VERSION` / `STATE_VERSION`,
+default 1). When you change an event or state shape, bump the version and
+implement `upcast_event` / `upcast_state` to migrate older records on read:
 
 ```rust,ignore
-fn compact_on_snapshot() -> bool {
-    true
+const EVENT_VERSION: u32 = 2;
+
+fn upcast_event(version: u32, bytes: &[u8]) -> Result<Self::Event, ActorError> {
+    if version == 1 {
+        // v1 shape was a bare `i32` delta.
+        let delta: i32 = borsh::from_slice(bytes).map_err(|e| {
+            ActorError::InvalidConfiguration {
+                component: "persistent event".to_owned(),
+                reason: format!("cannot decode v1 event: {e}"),
+            }
+        })?;
+        return Ok(MyEvent::V2 { delta, tag: 0 });
+    }
+    // ...default handling for the current version
 }
 ```
+
+Records written before versioning have no header and read as version 1, so
+upgrading the framework never invalidates existing data by itself. Unknown
+versions fail loudly instead of decoding fiction.
+
+---
+
+## Prefix fencing
+
+Two live `Store` instances must never share one backend prefix: each store
+writes a unique generation on startup and verifies it on every mutating
+write. A displaced (older) store fails fast with a fencing error instead of
+interleaving events or purging somebody else's log. Restarting an actor
+re-adopts the prefix normally, so rolling restarts keep working.
 
 ---
 

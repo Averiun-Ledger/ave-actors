@@ -4,7 +4,7 @@ version = "0.7.0"
 edition.workspace = true
 authors.workspace = true
 description.workspace = true
-readme = "README.md"
+readme.workspace = true
 homepage.workspace = true
 repository.workspace = true
 license.workspace = true
@@ -12,15 +12,20 @@ keywords.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-rusqlite = { version = "0.40.1", features = ["bundled"]}
 ave-actors-store = { workspace = true }
-tracing = {workspace = true }
+rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
-tempfile = {workspace = true }
-ave-actors-sqlite = { path = ".", features = ["sqlite"]}
+ave-actors-sqlite = { path = ".", features = ["sqlite"] }
+ave-actors-store = { workspace = true }
+criterion = { workspace = true }
+tempfile = { workspace = true }
 
+[[bench]]
+name = "backend"
+harness = false
 
 [features]
-sqlite = []
-export-sqlite = []
+sqlite = ["dep:rusqlite"]
+export-sqlite = ["sqlite"]

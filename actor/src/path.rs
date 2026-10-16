@@ -14,7 +14,7 @@ const MAX_PATH_DEPTH: usize = 255;
 const MAX_SEGMENT_LENGTH: usize = 256;
 
 /// Returns `true` if `c` is allowed inside an `ActorPath` segment.
-fn is_valid_segment_char(c: char) -> bool {
+const fn is_valid_segment_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
@@ -67,17 +67,26 @@ impl ActorPath {
         self.0.last().map(|s| s.as_str()).unwrap_or("")
     }
 
+    /// Returns the first segment of the path (the root scope), or an empty
+    /// string if the path has no segments.
+    pub fn scope_key(&self) -> &str {
+        self.0.first().map(|s| s.as_str()).unwrap_or("")
+    }
+
     /// Returns the number of segments in this path (its depth).
     pub fn level(&self) -> usize {
         self.0.len()
+    }
+
+    /// Returns the path segments in order.
+    pub(crate) fn segments(&self) -> &[String] {
+        &self.0
     }
 
     /// Returns this path truncated to `level` segments, or `self` unchanged if `level` is out of range.
     pub fn at_level(&self, level: usize) -> Self {
         if level < 1 || level >= self.level() {
             self.clone()
-        } else if self.is_top_level() {
-            self.root()
         } else if level == self.level() - 1 {
             self.parent()
         } else {
@@ -290,6 +299,14 @@ mod tests {
     }
 
     #[test]
+    fn test_scope_key() {
+        let path = ActorPath::from("/acme/building/room/sensor");
+        assert_eq!(path.scope_key(), "acme");
+        assert_eq!(ActorPath::from("/").scope_key(), "");
+        assert_eq!(ActorPath::from("/user").scope_key(), "user");
+    }
+
+    #[test]
     fn parse_get_parent() {
         let path = ActorPath::from("/acme/building/room/sensor").parent();
         println!("{:?}", path);
@@ -407,7 +424,7 @@ mod tests {
     fn test_add_path() {
         let path = ActorPath::from("/acme");
         let child = path.clone() / "child";
-        println!("{}", &child);
+        println!("{}", child);
         assert!(path.is_parent_of(&child))
     }
 

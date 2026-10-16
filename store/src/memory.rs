@@ -1,7 +1,10 @@
 //! In-memory [`DbManager`] backend, intended for tests and ephemeral usage.
 
 use crate::{
-    database::{Collection, DbManager, State},
+    database::{
+        BatchOp, BatchWrite, Collection, DbManager, PurgeScope, State,
+        validate_key_prefix,
+    },
     error::{Error, StoreOperation},
 };
 
@@ -30,8 +33,10 @@ impl MemoryManager {
         name: &str,
         prefix: &str,
     ) -> Result<MemoryStore, Error> {
+        crate::database::validate_key_prefix(prefix)?;
         let mut data_lock = self.data.write().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockManagerData,
             reason: e.to_string(),
         })?;
@@ -69,6 +74,143 @@ impl DbManager<MemoryStore, MemoryStore> for MemoryManager {
     ) -> Result<MemoryStore, Error> {
         self.get_or_create_store(name, prefix)
     }
+
+    fn batch_writer(&self) -> Option<Box<dyn BatchWrite>> {
+        Some(Box::new(MemoryBatchWriter {
+            manager: self.clone(),
+        }))
+    }
+
+    fn purge_scopes(&self, scopes: &[PurgeScope<'_>]) -> Result<(), Error> {
+        for scope in scopes {
+            validate_key_prefix(scope.prefix)?;
+        }
+        let mut data = self.data.write().map_err(|e| Error::Store {
+            source: None,
+            code: None,
+            operation: StoreOperation::LockData,
+            reason: e.to_string(),
+        })?;
+        // One lock for every scope: all-or-nothing by construction.
+        // Same coverage as per-actor purge (events, snapshots,
+        // metadata); fence rows stay, like `purge` does.
+        for scope in scopes {
+            for suffix in ["_events", "_states", "_metadata"] {
+                data.remove(&(
+                    format!("{}{}", scope.store, suffix),
+                    scope.prefix.to_owned(),
+                ));
+            }
+        }
+        drop(data);
+        Ok(())
+    }
+}
+
+/// Atomic multi-write handle over [`MemoryManager`]'s shared map.
+///
+/// All ops apply while holding every affected inner store's write lock
+/// (acquired in deterministic order), so concurrent handle writers block
+/// until the whole batch is applied: all-or-nothing.
+#[derive(Clone)]
+struct MemoryBatchWriter {
+    manager: MemoryManager,
+}
+
+impl BatchWrite for MemoryBatchWriter {
+    fn write_batch(
+        &self,
+        prefix: &str,
+        ops: &[BatchOp<'_>],
+    ) -> Result<(), Error> {
+        // Unique (name, prefix) stores touched, in deterministic lock order.
+        let mut stores: Vec<(String, String)> = ops
+            .iter()
+            .map(|op| match op {
+                BatchOp::PutEvent { collection, .. } => {
+                    ((*collection).to_owned(), prefix.to_owned())
+                }
+                BatchOp::PutState { store, .. } => {
+                    ((*store).to_owned(), prefix.to_owned())
+                }
+            })
+            .collect();
+        stores.sort();
+        stores.dedup();
+
+        // Owned handles keep the inner maps alive while locked; lock in
+        // deterministic order so concurrent batches cannot deadlock.
+        let mut owned = Vec::with_capacity(stores.len());
+        for (name, store_prefix) in &stores {
+            owned.push(self.manager.get_or_create_store(name, store_prefix)?);
+        }
+        // Owned handles keep the inner maps alive while locked; lock in
+        // deterministic order so concurrent batches cannot deadlock.
+        // Scoped so the guards drop as soon as the batch is applied.
+        {
+            let mut guards = Vec::with_capacity(owned.len());
+            for store in &owned {
+                guards.push(store.data.write().map_err(|e| Error::Store {
+                    source: None,
+                    code: None,
+                    operation: StoreOperation::LockData,
+                    reason: e.to_string(),
+                })?);
+            }
+
+            // Apply with all locks held; no persistent failure mode remains.
+            // Index by store name once instead of scanning per op. The map is
+            // built from the same ops, so a miss is an internal invariant
+            // break: report it instead of panicking.
+            let index: std::collections::HashMap<&str, usize> = stores
+                .iter()
+                .enumerate()
+                .map(|(pos, (name, _))| (name.as_str(), pos))
+                .collect();
+            for op in ops {
+                match op {
+                    BatchOp::PutEvent {
+                        collection,
+                        key,
+                        data,
+                    } => {
+                        let pos = index.get(collection).copied().ok_or_else(
+                            || Error::Store {
+                                source: None,
+                                code: None,
+                                operation: StoreOperation::LockData,
+                                reason:
+                                    "batch store missing for collection op \
+                                         (internal invariant broken)"
+                                        .to_owned(),
+                            },
+                        )?;
+                        guards[pos].insert(
+                            format!("{prefix}.{key}"),
+                            (*data).to_vec(),
+                        );
+                    }
+                    BatchOp::PutState { store, data } => {
+                        let pos =
+                            index.get(store).copied().ok_or_else(|| {
+                                Error::Store {
+                                    source: None,
+                                    code: None,
+                                    operation: StoreOperation::LockData,
+                                    reason: "batch store missing for state op \
+                                         (internal invariant broken)"
+                                        .to_owned(),
+                                }
+                            })?;
+                        guards[pos].insert(prefix.to_owned(), (*data).to_vec());
+                    }
+                }
+            }
+            // Release all store locks before reporting success.
+            drop(guards);
+        }
+        Ok(())
+    }
 }
 
 /// In-memory implementation of both [`Collection`] and [`State`].
@@ -97,6 +239,7 @@ impl State for MemoryStore {
     fn get(&self) -> Result<Vec<u8>, Error> {
         let lock = self.data.read().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -116,6 +259,7 @@ impl State for MemoryStore {
             .write()
             .map_err(|e| Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::LockData,
                 reason: e.to_string(),
             })?
@@ -127,6 +271,7 @@ impl State for MemoryStore {
     fn del(&mut self) -> Result<(), Error> {
         let mut lock = self.data.write().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -143,6 +288,7 @@ impl State for MemoryStore {
             .write()
             .map_err(|e| Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::LockData,
                 reason: e.to_string(),
             })?
@@ -153,8 +299,21 @@ impl State for MemoryStore {
 
 impl Collection for MemoryStore {
     fn last(&self) -> Result<Option<(String, Vec<u8>)>, Error> {
-        let mut iter = self.iter(true)?;
-        iter.next().transpose()
+        let lock = self.data.read().map_err(|e| Error::Store {
+            source: None,
+            code: None,
+            operation: StoreOperation::LockData,
+            reason: e.to_string(),
+        })?;
+        let collection_prefix = self.collection_prefix();
+        let prefix_len = collection_prefix.len();
+        // BTreeMap range scan from the end: O(log n + 1) instead of
+        // cloning the whole map via `iter(true)`.
+        let upper = format!("{}~", collection_prefix);
+        Ok(lock
+            .range(collection_prefix..upper)
+            .next_back()
+            .map(|(key, value)| (key[prefix_len..].to_owned(), value.clone())))
     }
 
     fn name(&self) -> &str {
@@ -165,6 +324,7 @@ impl Collection for MemoryStore {
         let key = format!("{}.{}", self.prefix, key);
         let lock = self.data.read().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -181,6 +341,7 @@ impl Collection for MemoryStore {
             .write()
             .map_err(|e| Error::Store {
                 source: None,
+                code: None,
                 operation: StoreOperation::LockData,
                 reason: e.to_string(),
             })?
@@ -193,6 +354,7 @@ impl Collection for MemoryStore {
         let key = format!("{}.{}", self.prefix, key);
         let mut lock = self.data.write().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -205,6 +367,7 @@ impl Collection for MemoryStore {
     fn purge(&mut self) -> Result<(), Error> {
         let mut lock = self.data.write().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -231,6 +394,7 @@ impl Collection for MemoryStore {
     > {
         let lock = self.data.read().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -270,6 +434,7 @@ impl Collection for MemoryStore {
     > {
         let lock = self.data.read().map_err(|e| Error::Store {
             source: None,
+            code: None,
             operation: StoreOperation::LockData,
             reason: e.to_string(),
         })?;
@@ -310,26 +475,88 @@ mod tests {
     }
 
     #[test]
+    fn test_dotted_prefix_rejected() {
+        let manager = MemoryManager::default();
+        assert!(manager.create_collection("c", "a.b").is_err());
+        assert!(manager.create_state("s", "a.b").is_err());
+    }
+
+    #[test]
     fn test_state_del_not_found() {
         let manager = MemoryManager::default();
         let mut state = manager.create_state("test", "test").unwrap();
-        assert_eq!(
+        assert!(matches!(
             State::del(&mut state),
-            Err(Error::EntryNotFound {
-                key: "test".to_owned()
-            })
-        );
+            Err(Error::EntryNotFound { key }) if key == "test"
+        ));
     }
 
     #[test]
     fn test_collection_del_not_found() {
         let manager = MemoryManager::default();
         let mut collection = manager.create_collection("test", "test").unwrap();
-        assert_eq!(
+        assert!(matches!(
             Collection::del(&mut collection, "missing"),
-            Err(Error::EntryNotFound {
-                key: "test.missing".to_owned()
-            })
-        );
+            Err(Error::EntryNotFound { key }) if key == "test.missing"
+        ));
+    }
+
+    #[test]
+    fn test_purge_scopes_wipes_only_listed_prefixes() {
+        use crate::database::PurgeScope;
+        // Table names mirror Store::new: `{store}_events` and friends.
+        let manager = MemoryManager::default();
+        for (store, prefix) in
+            [("a", "gov"), ("a", "other"), ("b", "gov"), ("b", "other")]
+        {
+            let mut events = manager
+                .create_collection(&format!("{store}_events"), prefix)
+                .unwrap();
+            Collection::put(&mut events, "0", b"v").unwrap();
+            let mut states = manager
+                .create_state(&format!("{store}_states"), prefix)
+                .unwrap();
+            State::put(&mut states, b"v").unwrap();
+        }
+        manager
+            .purge_scopes(&[
+                PurgeScope {
+                    store: "a",
+                    prefix: "gov",
+                },
+                PurgeScope {
+                    store: "b",
+                    prefix: "gov",
+                },
+            ])
+            .unwrap();
+        // Listed scopes are empty again (recreated handles see nothing).
+        for store in ["a", "b"] {
+            let events = manager
+                .create_collection(&format!("{store}_events"), "gov")
+                .unwrap();
+            assert!(Collection::last(&events).unwrap().is_none());
+            let states = manager
+                .create_state(&format!("{store}_states"), "gov")
+                .unwrap();
+            assert!(matches!(
+                State::get(&states),
+                Err(Error::EntryNotFound { .. })
+            ));
+        }
+        // Unlisted scopes are untouched.
+        for store in ["a", "b"] {
+            let events = manager
+                .create_collection(&format!("{store}_events"), "other")
+                .unwrap();
+            assert!(Collection::last(&events).unwrap().is_some());
+        }
+        // Unknown scopes are a no-op, never an error.
+        manager
+            .purge_scopes(&[PurgeScope {
+                store: "nope",
+                prefix: "missing",
+            }])
+            .unwrap();
     }
 }

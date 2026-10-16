@@ -10,8 +10,8 @@ API documentation is available on [docs.rs](https://docs.rs/ave-actors-sqlite).
 
 ```toml
 [dependencies]
-ave-actors-sqlite = { version = "0.6.0", features = ["sqlite"] }
-ave-actors-store = "0.5.0"
+ave-actors-sqlite = { version = "0.7.0", features = ["sqlite"] }
+ave-actors-store = "0.6.0"
 ```
 
 ## Features
@@ -27,14 +27,14 @@ ave-actors-store = "0.5.0"
 use ave_actors_sqlite::SqliteManager;
 use ave_actors_store::{
     config::{MachineProfile, MachineSpec},
-    database::{Collection, DbManager, State},
+    database::{Collection, DbManager, Durability, State},
 };
 
 fn main() -> Result<(), ave_actors_store::Error> {
     let path = std::env::temp_dir().join("ave-actors-sqlite-docs");
     let manager = SqliteManager::new(
         &path,
-        true,
+        Durability::Relaxed,
         Some(MachineSpec::Profile(MachineProfile::Small)),
     )?;
 
@@ -67,13 +67,13 @@ fn main() -> Result<(), ave_actors_store::Error> {
 
 ```text
 pub fn new(
-    path: &PathBuf,
-    durability: bool,
+    path: &Path,
+    durability: Durability,
     spec: Option<MachineSpec>,
 ) -> Result<SqliteManager, Error>
 ```
 
-- Receives a directory path, a durability flag, and an optional machine sizing profile.
+- Receives a directory path, a durability level, and an optional machine sizing profile.
 - Creates the directory if needed and opens `<path>/database.db`.
 - Returns a configured `SqliteManager`.
 - Returns `Error::CreateStore` if the directory or database cannot be created.
@@ -136,5 +136,7 @@ fn create_state(&self, identifier: &str, prefix: &str) -> Result<SqliteCollectio
 ## Behavior notes
 
 - Collections are ordered lexicographically by key. Zero-padded sequence numbers are recommended if keys represent event numbers.
-- Each store handle uses dedicated read and write connections.
-- `SqliteManager::stop()` runs `PRAGMA optimize` and checkpoints the WAL before shutdown.
+- Chunked iterators take no snapshot: each chunk uses a fresh connection, so concurrent writes mid-scan may duplicate or skip rows. Only iterate quiescent stores (recovery) or tolerate it.
+- Event rows are addressed as (`prefix`, `sn`); the `prefix.key` notation elsewhere means the same pair. (The store's *derived* default prefix itself uses `__` separators, e.g. `user__a__counter`.)
+- Encryption covers values only; `prefix` and `sn` stay in plaintext (actor namespaces and volumes are observable metadata).
+- All store handles share a bounded connection pool sized from the host (1× vCPU clamped 4–16, then capped so pooled page caches stay within 6% of RAM), plus one administrative connection for maintenance; checkout waits up to 5s and then fails instead of blocking forever, and idle connections above half the pool are closed on return. Multi-write batches run in a single `BEGIN IMMEDIATE…COMMIT` transaction.
