@@ -20,12 +20,12 @@ pub use ave_actors_actor::{
     ActorSystemConfig, ActorTreeNode, ChildAction, CustomIntervalStrategy,
     EncryptedKey, Error as ActorError, Event, ExponentialBackoffStrategy,
     Handler, Intercept, Interceptor, IntervalStrategy, IntoActor, Message,
-    MessageMetadata, NoIntervalStrategy, NotPersistentActor,
-    OverflowStrategy, ParentRef, ProbeActor, Response, RetryActor,
-    RetryMessage, RetryPolicy, RetryStrategy, Router, RouterMsg,
-    RouterResponse, RoutingStrategy, ShutdownReason, Sink, SinkEntry,
-    Strategy, Subscriber, SupervisionStrategy, SystemEvent, SystemRef,
-    SystemRunner, TestProbe, TestSystem, TimerKey, format_tree, pipe_to,
+    MessageMetadata, NoIntervalStrategy, NotPersistentActor, OverflowStrategy,
+    ParentRef, ProbeActor, Response, RetryActor, RetryMessage, RetryPolicy,
+    RetryStrategy, Router, RouterMsg, RouterResponse, RoutingStrategy,
+    ShutdownReason, Sink, SinkEntry, Strategy, Subscriber, SupervisionStrategy,
+    SystemEvent, SystemRef, SystemRunner, TestProbe, TestSystem, TimerKey,
+    format_tree, pipe_to,
 };
 
 #[cfg(any(feature = "rocksdb", feature = "sqlite"))]

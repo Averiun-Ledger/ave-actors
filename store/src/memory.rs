@@ -468,7 +468,7 @@ impl Collection for MemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::{Collection, PurgeScope, State};
+    use crate::database::{Collection, State};
     use crate::test_store_trait;
     test_store_trait! {
         unit_test_memory_manager:crate::memory::MemoryManager:MemoryStore

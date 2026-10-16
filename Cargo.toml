@@ -70,18 +70,18 @@ ave-actors-actor = { path = "actor", version = "0.6.0" }
 ave-actors-rocksdb = { path = "databases/rocksdb_db", version = "0.5.0" }
 ave-actors-sqlite = { path = "databases/sqlite_db", version = "0.7.0" }
 ave-actors-store = { path = "store", version = "0.6.0" }
-borsh = { version = "1.8.0", features = ["derive"] }
+borsh = { version = "1.8.1", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"
 fastrand = "2.5.0"
 memsecurity = { version = "3.5.2", features = ["encryption"] }
-prometheus-client = "0.25.0"
+prometheus-client = "0.25.1"
 serde = { version = "1.0.229", features = ["derive"] }
 tempfile = "3.27.0"
 test-log = { version = "0.2.21", features = ["trace"] }
-thiserror = { version = "2.0.20" }
-tokio = { version = "1.53.1" }
-tokio-util = { version = "0.7.19" }
+thiserror = { version = "2.0.21" }
+tokio = { version = "1.53.3" }
+tokio-util = { version = "0.7.20" }
 tracing = { version = "0.1.44" }
 tracing-test = "0.2.6"
-zeroize = "1.9.0"
+zeroize = "1.9.1"

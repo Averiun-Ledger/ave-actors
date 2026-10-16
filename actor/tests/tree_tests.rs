@@ -84,8 +84,10 @@ impl Actor for TreeParent {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), Error> {
-        ctx.create_child::<TreeChild, _>("child_a", TreeChild).await?;
-        ctx.create_child::<TreeChild, _>("child_b", TreeChild).await?;
+        ctx.create_child::<TreeChild, _>("child_a", TreeChild)
+            .await?;
+        ctx.create_child::<TreeChild, _>("child_b", TreeChild)
+            .await?;
         Ok(())
     }
 }
@@ -129,9 +131,7 @@ async fn wait_for_path(
     }
 }
 
-fn subtree_paths(
-    node: &ave_actors_actor::ActorTreeNode,
-) -> Vec<ActorPath> {
+fn subtree_paths(node: &ave_actors_actor::ActorTreeNode) -> Vec<ActorPath> {
     let mut out = vec![ActorPath::from(node.path.as_str())];
     for child in &node.children {
         out.extend(subtree_paths(child));
