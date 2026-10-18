@@ -74,7 +74,7 @@ borsh = { version = "1.8.1", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"
 fastrand = "2.5.0"
-memsecurity = { version = "3.5.2", features = ["encryption"] }
+memsecurity = { version = "4.0.0", features = ["encryption"] }
 prometheus-client = "0.25.1"
 serde = { version = "1.0.229", features = ["derive"] }
 tempfile = "3.27.0"

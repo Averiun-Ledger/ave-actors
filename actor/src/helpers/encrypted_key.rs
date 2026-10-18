@@ -21,7 +21,13 @@ impl EncryptedKey {
     /// Returns an error if the underlying ASCON encryption fails, which typically
     /// indicates an out-of-memory or platform security error.
     pub fn new(key: &[u8; 32]) -> Result<Self, Error> {
-        let mut encrypted_mem = EncryptedMem::new();
+        let mut encrypted_mem = EncryptedMem::new().map_err(|_| {
+            tracing::error!("Secure memory allocation failed");
+            Error::Helper {
+                name: "encryption".to_owned(),
+                reason: "Failed to allocate secure memory".to_owned(),
+            }
+        })?;
 
         encrypted_mem.encrypt(key).map_err(|_| {
             tracing::error!("Key encryption failed");
